@@ -25,8 +25,38 @@ from __future__ import annotations
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from .capabilities import DeviceCapabilities  # noqa: F401  （对外转出，便于一处导入）
+from .device import (
+    JOB_ACTIVE_STATES,
+    JOB_FAILED,
+    JOB_FINISHED,
+    JOB_IDLE,
+    JOB_OFFLINE,
+    JOB_PAUSED,
+    JOB_PREPARING,
+    JOB_PRINTING,
+    JOB_STATE_TEXT,
+    JOB_UNKNOWN,
+    MAPPABLE_FIELDS,
+    DeviceStatus,
+)
 
-__all__ = ["DeviceCapabilities", "DeviceSession", "DeviceSnapshot"]
+__all__ = [
+    "DeviceCapabilities",
+    "DeviceSession",
+    "DeviceSnapshot",
+    "DeviceStatus",
+    "JOB_ACTIVE_STATES",
+    "JOB_FAILED",
+    "JOB_FINISHED",
+    "JOB_IDLE",
+    "JOB_OFFLINE",
+    "JOB_PAUSED",
+    "JOB_PREPARING",
+    "JOB_PRINTING",
+    "JOB_STATE_TEXT",
+    "JOB_UNKNOWN",
+    "MAPPABLE_FIELDS",
+]
 
 
 class DeviceSnapshot(Protocol):
