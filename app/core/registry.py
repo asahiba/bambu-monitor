@@ -36,6 +36,13 @@ FAMILY_MOONRAKER = "moonraker"
 #: OctoPrint 生态
 FAMILY_OCTOPRINT = "octoprint"
 
+#: Moonraker 的候选端口。
+#: 官方 moonraker.conf 默认 ``port: 7125``，但 Snapmaker U1 出厂配置前面挂了
+#: nginx 反代，**80 端口也能直接访问 Moonraker API**（官方端口表与真机探测都确认）。
+#: 因此顺序是「80 优先、7125 回退」——U1 上 80 一定通，通用 Klipper 机器上 7125 通。
+MOONRAKER_HTTP_PORT = 80
+MOONRAKER_FALLBACK_PORT = 7125
+
 
 @dataclass(frozen=True)
 class CredentialPolicy:
@@ -119,8 +126,7 @@ def is_registered(family: str) -> bool:
 def _register_builtins() -> None:
     """登记内置设备族。
 
-    这里只放**已经能用**的族。Moonraker / OctoPrint 在对应适配器落地时才登记
-    —— 提前登记会让界面显示出一个用不了的选项，比没有更糟。
+    只登记**已经能用**的族：提前登记会让界面出现一个选了也没用的选项，比没有更糟。
     """
     from ..bambu.ports import CAMERA_PORT, MQTT_PORT, RTSP_PORT
 
@@ -146,6 +152,36 @@ def _register_builtins() -> None:
             notes=(
                 "新机型（H2C/H2S/X2D/P2S/A2L）的 fun 字段会要求 MQTT 命令签名，"
                 "未开 Developer Mode 时控制会被静默忽略（见 docs/FIELD_NOTES.md）"
+            ),
+        )
+    )
+
+    register(
+        FamilyDescriptor(
+            family=FAMILY_MOONRAKER,
+            label="Klipper / Moonraker（含 Snapmaker U1）",
+            credential=CredentialPolicy(
+                key="api_key",
+                label="API Key",
+                # 内网默认免鉴权（trusted_clients 含各私网段），因此不是必填；
+                # 非标准网段或开了 force_logins 时会 401，那时才需要填。
+                required=False,
+                hint="一般留空即可；若提示未授权，从 Moonraker 的 /access/api_key 获取",
+                secret=True,
+            ),
+            default_port=MOONRAKER_FALLBACK_PORT,
+            # 官方与真机探测都确认 80 可访问（nginx 反代到 Moonraker），7125 为回退
+            candidate_ports=(MOONRAKER_HTTP_PORT, MOONRAKER_FALLBACK_PORT),
+            discoveries=(
+                "mDNS _moonraker._tcp.local.（需设备端开启 zeroconf，默认不开）",
+                "mDNS _snapmaker._tcp.local.（Snapmaker U1 的主通道）",
+                "端口探测 80 / 7125",
+                "手动填写 IP",
+            ),
+            notes=(
+                "急停与 /printer/control/* 是 WebSocket-only，HTTP 发不通，"
+                "必须常驻一条 WS 连接；U1 的摄像头也靠该连接周期性保活，"
+                "不保活画面就静止。详见 docs/FIELD_NOTES.md"
             ),
         )
     )

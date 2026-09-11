@@ -525,6 +525,12 @@ def test_文件名与命令入口未被改名():
         "app/core/device.py",
         "app/core/adapter.py",
         "app/core/registry.py",
+        # 第三方设备族适配器（已落地的族）
+        "app/adapters/__init__.py",
+        "app/adapters/moonraker/__init__.py",
+        "app/adapters/moonraker/adapter.py",
+        "app/adapters/moonraker/ws.py",
+        "app/adapters/moonraker/fake.py",
     ):
         assert (PROJECT_ROOT / relative).is_file(), f"模块被移动或改名：{relative}"
 

@@ -51,11 +51,13 @@ def test_未知family值退回拓竹而不是崩掉():
 def test_只登记已经能用的设备族():
     """契约：注册表里不出现「已登记但用不了」的族。
 
-    Moonraker / OctoPrint 要等对应适配器落地时才登记——提前登记会让
-    界面显示出一个选了也没用的选项，比没有更糟。
+    moonraker 已登记是因为它有了实现并测试过的适配器
+    （`tests/test_moonraker.py`）；未落地的族（octoprint）不得出现在这里。
     """
     families = {descriptor.family for descriptor in registry.all_families()}
     assert registry.FAMILY_BAMBU in families
+    assert registry.FAMILY_MOONRAKER in families
+    assert registry.FAMILY_OCTOPRINT not in families, "适配器未落地就不该登记"
     for family in families:
         descriptor = registry.get(family)
         assert descriptor is not None
@@ -115,12 +117,51 @@ def test_注册表按id排序保证展示顺序稳定():
     assert names == sorted(names)
 
 
-@pytest.mark.parametrize("family", [registry.FAMILY_MOONRAKER, registry.FAMILY_OCTOPRINT])
+@pytest.mark.parametrize("family", [registry.FAMILY_OCTOPRINT])
 def test_未落地生态的id已预留但未登记(family):
-    """契约：Moonraker / OctoPrint 的 id 已定义为常量，但**尚未登记**。
+    """契约：OctoPrint 的 id 已定义为常量，但**尚未登记**（适配器还没写）。
 
     常量先定义是为了让适配器实现时不用改公共接口；未登记是刻意的
-    （见 `test_只登记已经能用的设备族`）。
+    —— 提前登记会让界面出现一个选了也没用的选项。
     """
     assert not registry.is_registered(family)
     assert family
+
+
+def test_moonraker族已登记且凭据不是必填():
+    """契约：Moonraker 族已登记（适配器已落地），且 **API Key 不是必填**。
+
+    内网默认免鉴权（Moonraker 的 trusted_clients 含各私网段），强制要求填
+    API Key 会把最常见的场景挡在门外。
+    """
+    descriptor = registry.get(registry.FAMILY_MOONRAKER)
+    assert descriptor is not None
+    policy = descriptor.credential
+    assert policy.key == "api_key"
+    assert policy.required is False, "内网免鉴权场景不该强制填 API Key"
+    assert policy.secret is True
+
+
+def test_moonraker候选端口是80优先7125回退():
+    """契约：候选端口顺序为 80 → 7125。
+
+    Snapmaker U1 出厂配置前挂了 nginx，80 端口即可访问 Moonraker API
+    （官方端口表 + 真机探测都确认）；通用 Klipper 机器则是 7125。
+    顺序反了会让 U1 用户白等一轮超时。
+    """
+    descriptor = registry.get(registry.FAMILY_MOONRAKER)
+    assert descriptor.candidate_ports[0] == 80
+    assert 7125 in descriptor.candidate_ports
+
+
+def test_moonraker描述符记录了WS_only这条坑():
+    """契约：必须写明「急停与 control/* 是 WebSocket-only」这条实现约束。
+
+    不写下来，后来者很可能按 REST 直觉去实现，结果是"点急停没反应"。
+    U1 的主发现通道 `_snapmaker._tcp` 也要记录（它不是 `_moonraker._tcp`）。
+    """
+    descriptor = registry.get(registry.FAMILY_MOONRAKER)
+    assert "WebSocket" in descriptor.notes
+    assert any("snapmaker" in item.lower() for item in descriptor.discoveries), (
+        "U1 的主发现通道是 _snapmaker._tcp，必须记录"
+    )
