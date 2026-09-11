@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol, runtime_checkable
 
+from .adapter import PollingDeviceSession  # noqa: F401  （对外转出）
 from .capabilities import DeviceCapabilities  # noqa: F401  （对外转出，便于一处导入）
 from .device import (
     JOB_ACTIVE_STATES,
@@ -45,6 +46,7 @@ __all__ = [
     "DeviceSession",
     "DeviceSnapshot",
     "DeviceStatus",
+    "PollingDeviceSession",
     "JOB_ACTIVE_STATES",
     "JOB_FAILED",
     "JOB_FINISHED",
