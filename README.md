@@ -355,11 +355,26 @@ set BAMBU_RUN_SLOW=1 && test.bat -m slow    :: 端到端慢测试（内置模拟
 
 测试不需要真实打印机：内置模拟器会在回环地址上伪造完整的打印机
 （UDP 发现响应 + MQTT broker + 6000 端口画面），因此「搜索 → 遥测 → 画面」全链路都能离线验证。
+第三方设备族（Klipper / Moonraker，含 Snapmaker U1）也用假服务器做离线端到端测试。
 
 > 环境提示：本项目虚拟环境不可搬迁（`.venv\pyvenv.cfg` 写死了基础解释器路径）。
 > 如果 `.venv\Scripts\python.exe` 报 `did not find executable at ...`，删掉 `.venv`
 > 重新运行 `run.bat` 即可。判断环境是否可用不要用 `if exist`，直接跑
 > `.venv\Scripts\python.exe -c "import sys"`。
+
+### 打包成单文件
+
+四种形态各自打包，详见 [`docs/PACKAGING.md`](docs/PACKAGING.md)：
+
+| 形态 | 命令 | 产物 |
+| --- | --- | --- |
+| Windows | `build-onefile.bat` | `dist-onefile\BambuMonitor.exe`（约 93 MB，单文件） |
+| Linux | `bash linux/build-headless-docker.sh` | `dist-onefile-headless\BambuMonitor-headless`（约 89 MB） |
+| Docker | `build-docker-image.ps1` | `dist-docker\bambu-monitor-latest-image.tar.gz`（约 132 MB） |
+| 安卓 | `android/build-apk.ps1` 或 Android Studio | `app-debug.apk` |
+
+Windows / Linux 产物**自带 Python 运行时**，目标机不需要装任何东西；
+Docker 产物是**整个镜像**打成一个 tar，`docker load` 即可用。
 
 ## 8. 已验证情况
 

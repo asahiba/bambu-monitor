@@ -58,7 +58,10 @@ analysis = Analysis(
         "unittest",
         "pydoc_data",
         "app.ui",
-        "app.web.icons",
+        # ⚠️ 不要排除 app.web.icons：app/web/server.py 顶层就 `from .icons import
+        # icon_bytes`（PWA 图标），排掉会让服务在启动时直接
+        # ModuleNotFoundError: No module named 'app.web.icons'。
+        # 它只有几十 KB（base64 图标），留着不值得省。
     ],
     noarchive=False,
     optimize=0,

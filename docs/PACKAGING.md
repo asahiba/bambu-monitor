@@ -7,9 +7,22 @@
 | 形态 | 产物 | 构建命令 | 目标机需要什么 |
 | --- | --- | --- | --- |
 | **Windows** | `dist-onefile/BambuMonitor.exe`（单文件，约 93 MB） | `build-onefile.bat` | 什么都不用装 |
-| **Linux** | `dist-onefile-linux/BambuMonitor-linux`（单文件，约 143 MB） | `bash linux/build-onefile-docker.sh` | 什么都不用装 |
-| **Docker** | `dist-docker/bambu-monitor-latest-image.tar.gz`（单文件镜像） | `build-docker-image.ps1` | 只需 Docker |
+| **Linux** | `dist-onefile-headless/BambuMonitor-headless`（单文件，约 89 MB） | `bash linux/build-headless-docker.sh` | 什么都不用装 |
+| **Docker** | `dist-docker/bambu-monitor-latest-image.tar.gz`（单文件镜像，约 132 MB） | `build-docker-image.ps1` | 只需 Docker |
 | **安卓** | `app-debug.apk` | `android/build-apk.ps1` 或 Android Studio | Android 7.0+ |
+
+Linux 另有一个**带 Qt 的变体**（`linux/build-onefile-docker.sh`，约 143 MB），
+能开图形界面；但服务器/NAS 场景请用上面的 headless 变体，原因见第 2 节。
+
+### 已验证的产物（本机实测）
+
+| 产物 | 验证方式 | 结果 |
+| --- | --- | --- |
+| Windows exe | `--core-test`（模拟器全链路） | 全部通过，退出码 0 |
+| Windows exe | `--sim --screenshot` | 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标正常 |
+| Linux headless | 干净 `python:3.11-slim` 容器内起服务 | `/health` = 200；2 台模拟打印机**画面与遥测全部在线**；取到真实 JPEG 帧 30 KB；日志无错误 |
+| Docker 镜像 | 容器内 `/health` + `/api/printers` | 通过（镜像已导出为 tar.gz） |
+| 安卓 APK | 前置检查脚本 | 工程就绪；本机缺 Android SDK，未产出 APK |
 
 「单文件」的含义：Windows/Linux 是**自带 Python 运行时**的单个可执行文件；
 Docker 是**整个镜像**打成的一个 tar（`docker load` 即可用，目标机无需联网拉依赖）。
@@ -65,24 +78,50 @@ bash linux/build-onefile-docker.sh
 
 ### ⚠️ 两个必须知道的坑
 
-**坑一：目标机缺 `libxcb.so.1` 会导致模拟器画面生成失败。**
-带 Qt 的产物在**没有图形系统库**的服务器上跑 `--core-test` 时，
-模拟器绘制画面要经过 Qt，而 Qt 依赖 `libxcb.so.1` 等库；缺了会报
+**坑一：目标机缺图形库会导致画面生成失败 —— 必须用 headless 变体。**
+带 Qt 的产物在**没有图形系统库**的服务器上跑时，模拟器绘制画面要经过 Qt，
+而 Qt 依赖 `libxcb.so.1` 等库；缺了会报
 `ImportError: libxcb.so.1: cannot open shared object file`。
-因此 Linux 服务器场景请用**不含 Qt 的 headless 产物**：
+
+更隐蔽的一层：**构建镜像里装的 opencv 版本也决定产物能不能在没有图形库的机器上跑**。
+完整版 `opencv-python` 链接 `libGL`，缺了会报 `ImportError: libGL.so.1`；
+`opencv-python-headless` 才没有这个依赖。项目自己的 `requirements-server.txt`
+本来就是选的 headless 版，构建镜像必须与之一致 ——
+`linux/Dockerfile.headless-build` 就是为此单独做的（用 `requirements-server.txt`）。
+
+因此 Linux 服务器场景请用 headless 产物：
 
 ```bash
-python -m PyInstaller --noconfirm --clean \
-  --distpath dist-onefile-headless --workpath build-onefile-headless \
-  BambuMonitor-headless.spec
+bash linux/build-headless-docker.sh      # 产出 dist-onefile-headless/BambuMonitor-headless
 ```
 
-它排除了 PySide6，体积更小，也不再依赖图形库（模拟器会自动改用 OpenCV 绘制）。
+它不含 Qt、用 opencv-headless，体积 89 MB（带 Qt 的变体是 143 MB），
+也不再依赖任何图形库。
 
 **坑二：构建容器缺 `libgssapi-krb5-2` 时 PyInstaller 的 Qt 钩子直接失败。**
 报错长这样：`ImportError: libgssapi_krb5.so.2: cannot open shared object file`。
 原因是 PyInstaller 的 Qt 钩子会 `import QtNetwork` 去探测 OpenSSL 支持，
 而 QtNetwork 依赖 krb5。`linux/Dockerfile.build` 已经把它装上了。
+
+**坑三：headless 产物不要再加 `--headless`。**
+`--headless` 是 `app.main`（桌面入口）用来切到无界面模式的开关；
+而 `BambuMonitor-headless` 这个产物的入口本来就是 `app.headless`，
+多传这个参数会被 argparse 拒绝并直接退出（`unrecognized arguments: --headless`）。
+正确用法：
+
+```bash
+./BambuMonitor-headless --port 8080
+./BambuMonitor-headless --sim 4 --status-interval 0     # 演示模式
+```
+
+**坑四：Docker 里跑时配置目录必须可写。**
+`BAMBU_MONITOR_CONFIG_DIR` 指向的目录若不存在或只读，`AppConfig.load()`
+会在 `os.makedirs` 上抛 `PermissionError`，容器直接起不来。
+用挂载卷或可写路径：
+
+```bash
+docker run ... -v bambu-cfg:/data -e BAMBU_MONITOR_CONFIG_DIR=/data ...
+```
 
 ### 验证方式（自包含性）
 

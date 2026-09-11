@@ -1,0 +1,34 @@
+# 构建 **无界面版** Linux 单文件产物用的镜像。
+#
+# 与 linux/Dockerfile.build 的关键区别：**装 opencv-python-headless 而不是
+# opencv-python**。这不是可选优化 —— 完整版 opencv 链接 libGL，产物在没有图形库的
+# 服务器上 `import cv2` 会失败：
+#     ImportError: libGL.so.1: cannot open shared object file
+# 后果是模拟器画不出画面（`--sim` / `--core-test` 全废），
+# 而 Linux 部署恰恰大量发生在没有图形库的环境（服务器、NAS、容器）。
+#
+# 项目自己的 requirements-server.txt 早就是这个选择，构建镜像必须与之一致。
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# 只装打包与运行真正需要的最小系统库：
+#   * binutils    —— PyInstaller 分析 ELF 依赖
+#   * libgssapi-krb5-2 / libssl3 —— 让 PyInstaller 的 Qt 钩子能做 OpenSSL 探测
+#     （即使本产物不含 Qt，钩子在某些路径下仍会尝试，缺了会直接失败）
+#   * fonts-noto-cjk —— 让产物内含可用中文字体（离屏渲染 CJK 时需要）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils \
+        libgssapi-krb5-2 \
+        libssl3 \
+        fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+# 服务端依赖（含 opencv-python-headless），与部署环境完全一致
+COPY requirements-server.txt requirements.txt ./
+RUN pip install --no-cache-dir -r requirements-server.txt
+
+CMD ["bash"]

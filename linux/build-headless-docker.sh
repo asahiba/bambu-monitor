@@ -15,11 +15,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-IMAGE="${BAMBU_BUILD_IMAGE:-bambu-monitor-linux-build}"
+IMAGE="${BAMBU_HEADLESS_BUILD_IMAGE:-bambu-monitor-headless-build}"
 OUT="$ROOT/dist-onefile-headless"
 
-echo "=== 1/3 准备构建镜像（复用带界面版的构建镜像即可）==="
-docker build -f linux/Dockerfile.build -t "$IMAGE" .
+echo "=== 1/3 准备构建镜像（用 opencv-python-headless，与部署环境一致）==="
+# ⚠️ 不能用带界面版那个构建镜像：它装的是完整版 opencv-python，链接 libGL，
+# 产物在没有图形库的服务器上 `import cv2` 会失败（ImportError: libGL.so.1），
+# 于是模拟器画不出画面。详见 linux/Dockerfile.headless-build 的注释。
+docker build -f linux/Dockerfile.headless-build -t "$IMAGE" .
 
 echo "=== 2/3 容器内执行 PyInstaller（headless spec，不含 Qt）==="
 # ⚠️ Git Bash / MSYS 下必须关掉路径转换，否则 -w /src 会被改写成 Windows 路径
@@ -57,10 +60,12 @@ cleanup_empty() {
 }
 
 echo "--- 端到端 B：演示模式（模拟打印机 + 网页服务）---"
+# ⚠️ 不要加 --headless：那是 app.main（桌面入口）用来切到无界面模式的开关，
+# 而本产物本身就是 app.headless 入口，多传会被 argparse 拒绝并退出。
 docker volume rm -f bambu-cfg-sim >/dev/null 2>&1 || true
 docker run --rm -d --name bambu-headless-smoke -p 18081:8080 \
   -v "$OUT:/app:ro" -v bambu-cfg-sim:/data -e BAMBU_MONITOR_CONFIG_DIR=/data \
-  python:3.11-slim /app/BambuMonitor-headless --headless --sim 2 --status-interval 0 >/dev/null
+  python:3.11-slim /app/BambuMonitor-headless --sim 2 --status-interval 0 >/dev/null
 
 cleanup() {
   docker rm -f bambu-headless-smoke >/dev/null 2>&1 || true
@@ -99,4 +104,5 @@ docker logs bambu-headless-smoke 2>&1 | tail -4
 ls -lh "$OUT/BambuMonitor-headless"
 echo
 echo "构建完成：$OUT/BambuMonitor-headless"
-echo "目标机用法：  ./BambuMonitor-headless --headless --port 8080"
+echo "目标机用法（注意：本产物本身就是无界面服务入口，**不要**再加 --headless）："
+echo "    ./BambuMonitor-headless --port 8080"
