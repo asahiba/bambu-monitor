@@ -21,6 +21,9 @@
 │ 设备无关内核（不依赖任何厂商模块，也不依赖 Qt）                │
 │   app/core/__init__.py       DeviceSession 协议（界面依赖的契约）│
 │   app/core/capabilities.py   DeviceCapabilities：设备「能做什么」│
+│   app/core/device.py         DeviceStatus：通用状态 + apply_mapped│
+│   app/core/adapter.py        PollingDeviceSession：轮询型适配器基类│
+│   app/core/registry.py       设备族注册表（凭据策略/端口/发现方式）│
 ├──────────────────────────────────────────────────────────────┤
 │ 界面层（只有它依赖 Qt Widgets）                               │
 │   app/ui/main_window.py   监控墙、工具栏、布局、轮巡、配置     │
@@ -76,6 +79,28 @@
 `tests/test_contracts.py` 与 `tests/test_capabilities.py` 双重锚定。
 接入第三方设备族时，只要新适配器满足该协议、并按自己的能力表回答上述问题，
 **界面与网页不需要改动**。
+
+### 2.0.1 接入一个新设备族要动什么
+
+`app/core/` 已经把差异收敛掉了，因此新增一个族（例如 Moonraker）只需要：
+
+1. 写一个适配器。若设备是**轮询型**（第三方基本都是），继承
+   `app/core/adapter.py::PollingDeviceSession` 并只实现三个方法：
+   `_fetch_status()`（返回通用字段字典，键取自 `MAPPABLE_FIELDS`）、
+   `_fetch_frame()`（返回 **JPEG** 字节，无摄像头则返回 None）、
+   `_send_command()`。
+   基类负责线程回收、限流、错误抑制与退避、增量合并 —— 这四件事都是本项目
+   历史上真踩过的坑，因此不要在适配器里重写。
+2. 在 `app/core/registry.py` 里 `register(FamilyDescriptor(...))`：
+   声明族 id、展示名、凭据策略（`CredentialPolicy`）、端口与发现方式。
+   **只登记已经能用的族** —— 提前登记会让界面出现一个选了也没用的选项。
+3. 在配置文件里给该族设备写入 `family` 字段。老配置没有该字段时
+   一律解析为拓竹（`resolve_family`），因此**老用户不需要迁移**。
+
+仍然需要按族处理的差异只有三处，且都在适配器内部：
+**状态机映射**（各家取值完全不同，映射到 `JOB_*`）、**剩余时间来源**
+（有的有原生字段，有的要从文件元数据算）、**视频形态**
+（MJPEG / 快照轮询 / RTSPS…）。
 
 **关键约束**：协议层不得 `import` 任何 Qt。`app/web/server.py` 只在转码时**延迟
 import** PySide6，因此无 Qt 的 Docker 也能跑（代价是转码失败，见 KNOWN_ISSUES）。
