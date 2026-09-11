@@ -253,13 +253,84 @@ RTSP `rtsp://<ip>:8554/stream` 能拿到同样画质且成本≈0。检测到扩
 
 | 接入层 | 覆盖 | 发现 | 遥测 | 视频 |
 | --- | --- | --- | --- | --- |
-| **Moonraker** | 所有 Klipper 机器（Voron、RatRig、刷 Klipper 的 Creality/Elegoo/Anycubic、U1…） | mDNS `_moonraker._tcp` | HTTP/WS 7125 | MJPEG / 快照 |
+| **Moonraker** | 所有 Klipper 机器（Voron、RatRig、刷 Klipper 的 Creality/Elegoo/Anycubic、U1…） | mDNS `_moonraker._tcp` ⚠️**默认不开** | HTTP/WS 7125 | MJPEG / 快照 |
 | **OctoPrint** | 所有 OctoPrint 机器 | mDNS `_octoprint._tcp` | REST + `X-Api-Key` | MJPEG |
 
-⚠️ 注意 **PrusaLink 会同时注册 `_octoprint._tcp`**（官方为兼容旧切片器），
-但 API 不是 OctoPrint 那套，需要单独适配；而且 **PrusaLink 只有静态快照、没有视频流**，
+Voron 与 RatOS **不需要任何专用代码** —— 它们官方就是 Klipper + Moonraker。
+
+⚠️ **PrusaLink 会同时注册 `_octoprint._tcp`**（官方为兼容旧切片器），但 API 不是
+OctoPrint 那套，需要单独适配；而且 **PrusaLink 只有静态快照、没有视频流**，
 在一面「实时画面墙」上只能低频刷新。Creality 主通道是私有 JSON WebSocket（TCP 9999），
 属于逆向协议，优先级最低。
+
+---
+
+## 2.1 ⚠️ 接入第三方设备时必须遵守的三条安全/架构约束
+
+这三条来自对各家**官方源码**的核对，违反其中任何一条都会造成用户可见的严重故障。
+在动手写任何第三方适配器之前请先读这一节。
+
+### 🚨 红线一：绝不对逆向协议做「命令扫描」或盲试命令码
+
+**Elegoo Centauri Carbon（CC1）收到未识别的 Cmd 码会崩掉整个 `app` 守护进程。**
+该进程同时承担 HTTP UI + SDCP + 摄像头 + **内嵌 Klipper 运动栈**，
+因此**正在打印的任务会一起死掉**，只能墙断电重启。
+
+→ 规则：对**逆向出来的**协议（Elegoo SDCP、Creality WS 9999、Anycubic、FlashForge 等）
+只允许使用**有来源、被实证过**的确定命令；禁止「遍历命令码探测设备能力」这类做法。
+`tools/` 里的诊断脚本也要遵守这一条 —— 拓竹的诊断流程不能照搬给第三方。
+
+### 🚨 红线二：视频必须「单上游 + 服务端扇出」，不能让每个画面各自直连打印机
+
+* Elegoo CC1 的摄像头 HTTP 服务**槽位会泄漏**（客户端断开后滞留 FIN-WAIT-2 占槽，
+  耗尽后新连接收不到帧），且**只允许 5 个并发 WebSocket**（第 6 个返回 HTTP 500）。
+* Elegoo CC2 通常**只允许 1 路**视频连接。
+* Anycubic 必须先发 MQTT `startCapture` 才有流，而且**启动采集会强制点亮腔体 LED 且无法覆盖**。
+
+→ 规则：无论多少路画面、多少个网页客户端，对同一台设备**只保持一条上游视频连接**，
+在服务端缓存最新帧再扇出（现有 `WebFrameCache` 已经是这个模型的雏形，
+`web/server.py` 的多路复用也只是把它推给多个客户端，方向是对的）。
+
+### ⚠️ 约束三：发现层必须多路并行，不能只靠 mDNS
+
+mDNS 的覆盖率比预期低：
+
+* Moonraker 的 `[zeroconf]` 是**可选组件段，默认不开启**；
+* Creality **完全没有**专属 mDNS 服务类型（且 K2 的 hostname 官方实现里就不能 mDNS 解析）；
+* Elegoo 官方 SDK README 声称支持 mDNS，但把 `src/lan/` 全量源码 grep
+  `mdns|avahi|bonjour|zeroconf` **零命中** —— 是文档措辞错误。
+
+→ 规则：发现层要做成「**mDNS 多服务类型 ∥ 固定端口探测（7125/9999/8898 等）
+∥ UDP 广播（3000 / 52700 / 19000+48899 等）∥ 手工录入**」四路并行，
+并且**手工录入必须是永远可用的兜底**（跨 VLAN、禁多播的环境下它是唯一出路）。
+
+### 与 U1 直接相关的两条校正（来自真机探测记录）
+
+* **`/printer/emergency_stop` 与整个 `/printer/control/*` 系列是 WebSocket-only**
+  （官方源码里它们都带 `transports = all & ~HTTP`）。**HTTP-only 的客户端无法急停。**
+  因此接 Moonraker 系设备**必须常驻一条 WebSocket 连接**（遥测本来也需要），
+  急停与灯光/风扇/温度/速度都走它。`print/pause|resume|cancel|start` 与 `restart`
+  没有该限制，HTTP 可用。
+* **WS 层调灯的参数名是 `name`**（不是 `led`）：`{"name":"cavity_led","white":1}`；
+  且该层用整数取色 → **WS 只能 0/1 开关，调光必须走 G-code `SET_LED`**。
+* ⚠️ **U1 的 `output_pin` 是 `e0_heat_sw`…`e3_heat_sw`（加热使能线），绝不要 `SET_PIN`。**
+* ⚠️ **不要套用 Snapmaker Luban 的发现协议**（UDP 20054 / `_printer._tcp` / SACP 8889）——
+  那是 2.0/Artisan/J1 世代，与 U1 无关，套上去既发现不到 U1 还可能误判老机型。
+
+### 各家状态机取值完全不同（归一化层必须逐族映射）
+
+Moonraker 是字符串（`standby/printing/paused/complete/error/cancelled`）、
+Creality 是 `0..5`、Elegoo CC1 是 `0..22`、FlashForge 是字符串、PrusaLink 是大写字符串。
+**通用状态模型的 `job_state` 必须由各适配器负责映射**，不能假设各家一致。
+
+### 两个功能缺口（影响 UI 该显示什么）
+
+* Moonraker 与 OctoPrint **都没有统一的「开灯」端点**（前者要枚举 `gcode/help`/`configfile`，
+  后者靠插件）；U1 要用 `SET_LED LED=cavity_led WHITE=1`。
+* **OctoPrint 的 `/api/job` 没有层数字段**；Moonraker 的层数需要切片器写
+  `SET_PRINT_STATS_INFO`。若画面墙要显示层数，这是选型时的真实缺口。
+* Moonraker 的剩余时间有正经来源：`GET /server/files/metadata?filename=<path>` 返回
+  `estimated_time` / `layer_count` / `filament_weight_total`，比按进度自算准。
 
 ---
 

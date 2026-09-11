@@ -226,6 +226,7 @@ PRINTER_PAYLOAD_KEYS = frozenset(
         "mqtt_online",
         "camera_online",
         "can_control",
+        "controls_blocked_reason",
         "state_text",
         "progress",
         "remaining_text",

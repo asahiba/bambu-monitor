@@ -394,8 +394,37 @@ class PrinterSession:
     # ------------------------------------------------------------------ 控制
     @property
     def can_control(self) -> bool:
-        """遥测在线才允许下发控制命令。"""
-        return self._mqtt is not None and self.status.mqtt_online
+        """遥测在线**且固件允许**下发控制命令。
+
+        注意这里保留了「MQTT 在线」的原始语义（有测试与调用方依赖），
+        但因为下面这条实测事实，它现在还要求固件不处于「命令需签名」状态：
+
+        新机型（H2C / H2S / X2D / P2S / **A2L**）的报文里 ``fun`` 字段 bit
+        ``0x20000000`` 会置位，表示 **MQTT 命令需要签名校验**。此时若用户没有在
+        打印机触屏上开启 Developer Mode，我们下发的命令会被固件**静默忽略**——
+        界面看起来就是「点了暂停没反应」，而画面与遥测一切正常。
+        与其让按钮看起来能用却无效，不如置灰并说明原因（见 ``controls_blocked``）。
+        """
+        return self._mqtt is not None and self.status.mqtt_online and not self.controls_blocked
+
+    @property
+    def controls_blocked(self) -> bool:
+        """控制是否被「固件要求命令签名」挡住（需要用户去开 Developer Mode）。
+
+        只在**明确知道**需要签名时才返回 True：``fun`` 字段缺失或无法解析时是未知，
+        此时不能拦（否则老机型会被误伤）。
+        """
+        return self.status.needs_mqtt_signature is True
+
+    @property
+    def controls_blocked_reason(self) -> str:
+        """被挡住时给用户看的说明。"""
+        if not self.controls_blocked:
+            return ""
+        return (
+            "打印机固件要求 MQTT 命令签名：请在打印机屏幕上开启「开发者模式 / "
+            "Developer Mode」后重启设备，否则暂停/停止/开灯等控制指令会被静默忽略"
+        )
 
     def _command(self, section: str, command: str, **fields: Any) -> bool:
         worker = self._mqtt

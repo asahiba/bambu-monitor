@@ -392,6 +392,12 @@ function applyStatus(data){
     stopButton.disabled = !info.can_control;
     lightButton.textContent = info.light === 'on' ? '💡 关灯' : '💡 开灯';
     lightButton.disabled = !info.can_control;
+    // 控制被固件签名要求挡住时（新机型未开 Developer Mode），把原因挂到提示上：
+    // 按钮是灰的却不说明原因，用户会以为软件坏了
+    const blocked = info.controls_blocked_reason || '';
+    [pauseButton, stopButton, lightButton].forEach(button => {
+      button.title = blocked;
+    });
 
     if (!state.live && !info.camera_online){
       tile.img.style.visibility = 'hidden';

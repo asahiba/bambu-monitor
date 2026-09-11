@@ -127,6 +127,7 @@ class CameraTile(QFrame):
         self._last_state_text = ""
         self._text_cache: dict = {}
         self._progress_accent = ""
+        self._control_block_reason = ""
         self._tooltip = ""
         self._filament_signature: object = None
         self._snapshot_dir = os.path.join(_pictures_dir(), "BambuMonitor")
@@ -450,7 +451,24 @@ class CameraTile(QFrame):
         self.stop_button.setEnabled(online and printing)
         self.light_button.setVisible(status.light_on is not None or online)
         self.light_button.setEnabled(online)
+        self._apply_control_block_hint()
         self._apply_button_labels(paused)
+
+    def _apply_control_block_hint(self) -> None:
+        """控制被「固件要求命令签名」挡住时，把原因写到按钮提示上。
+
+        实测：新机型（H2C / H2S / X2D / P2S / A2L）的 `fun` 字段会置位命令签名要求，
+        未开 Developer Mode 时下发的控制会被固件静默忽略。按钮置灰却不说明原因
+        会让人以为软件坏了，所以把原因挂到 tooltip 上。
+        """
+        reason = self.session.controls_blocked_reason
+        if reason == self._control_block_reason:
+            return
+        self._control_block_reason = reason
+        for button in (self.pause_button, self.stop_button, self.light_button):
+            button.setToolTip(reason)
+            # 置灰时给个视觉提示，避免用户反复点击
+            button.setStyleSheet("color: #8fa3ad;" if reason else "")
 
     # ------------------------------------------------------------------ 交互
     def contextMenuEvent(self, event) -> None:  # noqa: N802

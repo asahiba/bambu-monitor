@@ -316,6 +316,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "mqtt_online": mqtt,
                     "camera_online": camera,
                     "can_control": session.can_control,
+                    # 新机型固件会要求 MQTT 命令签名，未开 Developer Mode 时控制会被静默忽略；
+                    # 前端据此解释「为什么按钮是灰的」（只增字段，不改已有键）
+                    "controls_blocked_reason": getattr(session, "controls_blocked_reason", ""),
                     "state_text": status.state_text if (mqtt or status.gcode_state) else "离线",
                     "progress": max(0, min(100, status.progress)),
                     "remaining_text": status.remaining_text,

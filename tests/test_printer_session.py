@@ -414,3 +414,50 @@ def test_未配置访问代码时不启动视频通道(monkeypatch):
         assert any("访问代码" in text for text in session.warnings)
     finally:
         session.stop()
+
+
+# --------------------------------------------------------------- Developer Mode 门槛
+
+
+def test_控制被固件签名要求挡住时可以被识别():
+    """契约：新机型要求 MQTT 命令签名时，`controls_blocked` 为真且给出可读原因。
+
+    实测事实：A2L（固件 01.01.05.00）的 `fun` = "100d122002fbd"，bit 0x20000000 置位，
+    表示「MQTT 命令需签名校验」。未在打印机触屏开启 Developer Mode 时，下发的
+    暂停/停止/开灯会被固件**静默忽略**——所以必须让界面知道这件事并置灰按钮，
+    而不是让用户反复点击一个看起来可用的按钮。
+    """
+    session = PrinterSession(
+        PrinterInfo(ip="127.0.0.1", serial="26A00A000000000000", model=PrinterModel.A2L)
+    )
+    # 还没收到 fun 时是「未知」，不能拦
+    assert session.controls_blocked is False
+    assert session.controls_blocked_reason == ""
+
+    session.status.apply_report({"print": {"fun": "100d122002fbd"}})
+    assert session.controls_blocked is True
+    assert "开发者模式" in session.controls_blocked_reason
+    assert "Developer Mode" in session.controls_blocked_reason
+    # 被挡住时 can_control 必须为假，否则界面仍会放开按钮
+    assert session.can_control is False
+
+
+def test_已开开发者模式时不拦控制():
+    """契约：`fun` 里签名位为 0（已开 Developer Mode）时不得拦截控制。"""
+    session = PrinterSession(PrinterInfo(ip="127.0.0.1", model=PrinterModel.A2L))
+    session.status.apply_report({"print": {"fun": "100d102002fbd"}})
+    assert session.controls_blocked is False
+    assert session.controls_blocked_reason == ""
+
+
+def test_老机型没有fun字段时控制不被误伤():
+    """契约：没有 `fun` 字段的老机型（P1/A1/X1 等）不能被判成需要开发者模式。
+
+    这是最容易写错的地方：若把「无法判断」当成「需要签名」，所有老机型的
+    控制按钮都会被置灰，等于把已有功能弄坏。
+    """
+    for model in (PrinterModel.P1S, PrinterModel.A1, PrinterModel.X1C):
+        session = PrinterSession(PrinterInfo(ip="127.0.0.1", model=model))
+        session.status.apply_report({"print": {"mc_percent": 40, "gcode_state": "RUNNING"}})
+        assert session.controls_blocked is False, f"{model.label} 被误判为需要签名"
+        assert session.controls_blocked_reason == ""
