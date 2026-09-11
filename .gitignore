@@ -9,6 +9,29 @@ _*.log
 _*.png
 _*.txt
 
+# 单文件打包的产物与中间目录（体积上百 MB，绝不入库）
+dist-onefile/
+build-onefile/
+dist-onefile-linux/
+build-onefile-linux/
+dist-onefile-headless/
+build-onefile-headless/
+dist-docker/
+
+# Linux 构建用的独立虚拟环境
+.venv-linux/
+
+# 安卓构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+*.keystore
+*.jks
+
 # 测试与静态检查的缓存
 .pytest_cache/
 .ruff_cache/

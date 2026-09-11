@@ -117,12 +117,36 @@ docker exec -it bambu-monitor python -m app.headless --add-printer "X2D 192.168.
 docker exec -it bambu-monitor python -m app.headless --list
 ```
 
+> **首次启动没有打印机时会怎样**：服务**照常启动**，监控墙为空，网页可以打开。
+> 这是刻意设计——`docker-compose.yml` 里配的是 `restart: unless-stopped`，
+> 若空配置就退出，容器会陷入"重启 → 又没配置 → 再退出"的无限循环，
+> 用户既看不到任何有效信息，也没有途径自助添加打印机。
+> 现在只需打开网页（或按上面的命令加设备）即可。
+
 ### 2.4 没有打印机也能验证（演示模式）
 
 ```bash
 docker run --rm -p 8080:8080 bambu-monitor python -m app.headless --sim 4 --status-interval 0
 # 浏览器打开 http://127.0.0.1:8080  →  4 台虚拟打印机，画面/进度/温度齐全
 ```
+
+### 2.5 单文件镜像（离线部署）
+
+如果目标机不能联网拉依赖，可以把整个镜像打包成一个文件：
+
+```powershell
+# 在构建机上（Windows）
+powershell -ExecutionPolicy Bypass -File build-docker-image.ps1
+# 产物：dist-docker\bambu-monitor-latest-image.tar.gz（约 132 MB）
+```
+
+```bash
+# 在目标机上
+docker load -i bambu-monitor-latest-image.tar.gz
+docker run -d --name bambu-monitor --network host -v $PWD/data:/data bambu-monitor:latest
+```
+
+该脚本会先起容器跑 `/health` 健康检查，确认镜像真的能用，再导出。
 
 ### 2.5 Windows / macOS 上的 Docker Desktop（实测结论）
 

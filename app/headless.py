@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="bambu-monitor-headless",
         description="拓竹打印机监控台 · 无界面服务模式（Linux / Docker）",
     )
+    # 与桌面入口保持一致：无界面版同样需要能查版本
+    # （单文件产物验证、Docker 镜像标签核对、运维排查都会用到）
+    from . import __version__
+
+    parser.add_argument("--version", action="version", version=f"Bambu Monitor {__version__}")
     parser.add_argument("--port", type=int, default=int(os.environ.get("BAMBU_WEB_PORT", "8080")))
     parser.add_argument("--token", default=os.environ.get("BAMBU_TOKEN", ""), help="网页访问令牌（留空则用配置里的）")
     parser.add_argument("--fps", type=float, default=float(os.environ.get("BAMBU_WEB_FPS", "4")), help="网页帧率")
@@ -280,9 +285,16 @@ def run_headless(argv: list[str] | None = None) -> int:
         print(f"已启动 {len(printers)} 台模拟打印机（访问代码 {args.sim_code}）")
 
     if not config.printers:
-        print("配置里还没有打印机：先执行 `--discover` 或 `--add-printer \"名称 IP 访问代码\"`")
-        if not args.sim:
-            return 1
+        # ⚠️ 这里**不能**直接退出。Docker Compose 里配的是 restart: unless-stopped，
+        # 而首次启动本来就没有配置——退出码非 0 会让容器陷入"重启 → 又没配置 → 再退出"
+        # 的无限循环，用户只会看到容器反复重启，而且没有任何途径自助添加打印机。
+        # 正确做法：照常把网页服务起起来（监控墙为空），用户可以从网页/命令行加设备。
+        print("=" * 68)
+        print("配置里还没有打印机。服务仍会启动，你可以：")
+        print("  1) 用网页打开下面的地址（监控墙为空，但可以看到服务状态）")
+        print("  2) 在容器/主机上执行：--discover 或 --add-printer \"名称 IP 访问代码\"")
+        print("  3) 想先看效果：给启动命令加 --sim 4（4 台虚拟打印机）")
+        print("=" * 68)
 
     for info in config.printers:
         session = PrinterSession(info)

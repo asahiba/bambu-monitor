@@ -568,5 +568,44 @@ def test_页面标题仍包含产品名():
     assert re.search(r"<title>[^<]*监控", INDEX_HTML), "页面标题丢了"
 
 
+# --------------------------------------------------------------------------- 构建脚本
+
+
+def test_含中文的PowerShell脚本必须带UTF8_BOM():
+    """契约：`.ps1` 脚本若含非 ASCII 字符，必须以 UTF-8 **BOM** 开头。
+
+    这条不是洁癖，是踩过的坑：**Windows PowerShell 5.1 读取无 BOM 的 UTF-8 文件时
+    会按系统 ANSI 代码页（中文系统是 GBK）解码**，中文字符被拆坏后会连带破坏语法，
+    报出一堆 `Unexpected token`，而且**报错行号对不上真实内容** ——
+    极容易被误导到错误的方向去排查。
+
+    处理方式（加 BOM）：
+        $p = "xxx.ps1"
+        $t = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
+        [IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))
+    """
+    scripts = sorted(PROJECT_ROOT.glob("*.ps1")) + sorted(PROJECT_ROOT.glob("*/*.ps1"))
+    assert scripts, "没有找到任何 .ps1 脚本，测试本身可能失效了"
+    for script in scripts:
+        raw = script.read_bytes()
+        if all(byte < 0x80 for byte in raw):
+            continue  # 纯 ASCII 脚本不受影响
+        assert raw.startswith(b"\xef\xbb\xbf"), (
+            f"{script.relative_to(PROJECT_ROOT)} 含非 ASCII 字符但没有 UTF-8 BOM，"
+            "PowerShell 5.1 会按 ANSI 解码并破坏语法"
+        )
+
+
+def test_打包脚本引用的spec文件都存在():
+    """契约：打包脚本里点名的 spec 必须真的在仓库里（否则构建时才炸）。"""
+    for name in (
+        "BambuMonitor-onefile.spec",
+        "BambuMonitor-headless.spec",
+        "BambuMonitor-linux.spec",
+        "BambuMonitor.spec",
+    ):
+        assert (PROJECT_ROOT / name).is_file(), f"缺少打包配置：{name}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))

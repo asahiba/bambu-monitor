@@ -1,0 +1,36 @@
+# 构建 Linux 单文件产物用的镜像（只在 linux/build-onefile-docker.sh 里使用）。
+#
+# 与运行用的 Dockerfile 分开：那个产出的是"运行镜像"，这个产出的是"构建环境"。
+# 这里装的是**带界面版**所需的全套依赖（含 PySide6 及其系统库），
+# 因此产物既能开窗口，也能用 --headless 跑服务模式。
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# PySide6 在 Linux 上需要这些系统库才能正常打包与运行。
+# 其中几个是**打包时**才会暴露的（PyInstaller 的 Qt 钩子会 import QtNetwork 探测
+# OpenSSL 支持），缺了会报 "cannot open shared object file"：
+#   * libgssapi-krb5-2 —— QtNetwork 依赖它，缺了 Qt 钩子直接失败
+#   * libssl / libcrypto —— QtNetwork 的 TLS 后端
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libegl1 \
+        libxkbcommon0 \
+        libdbus-1-3 \
+        libfontconfig1 \
+        libgssapi-krb5-2 \
+        libssl3 \
+        fonts-noto-cjk \
+        binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 源码在运行时通过 volume 挂进来（见 build-onefile-docker.sh），
+# 这样改代码不需要重新构建镜像
+CMD ["bash"]
