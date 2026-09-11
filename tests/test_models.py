@@ -149,12 +149,129 @@ def test_is_known_mapping(model, expected):
         # 实测：A2L 的序列号是 26A00A000000000000（18 位），前缀 26A
         ("26A00A000000000000", PrinterModel.A2L),
         ("26AABC123", PrinterModel.A2L),
+        # 官方 Wiki 的序列号前缀表（https://wiki.bambulab.com/en/general/find-sn）
+        ("31B00A123456789", PrinterModel.H2C),
+        ("23900A123456789", PrinterModel.H2D_PRO),
     ],
 )
 def test_detect_model_by_serial_prefix(serial, expected):
     """契约：型号名为空时按序列号前 3 位识别机型（SERIAL_PREFIX_MODEL 表）。"""
     assert detect_model(serial, "") is expected
     assert detect_model(serial) is expected
+
+
+@pytest.mark.parametrize(
+    "dev_model, expected",
+    [
+        # 新机型用代号上报 devmodel，代号与型号名毫无字面关系，必须查专用表
+        ("C11", PrinterModel.P1P),
+        ("C12", PrinterModel.P1S),
+        ("N9", PrinterModel.A2L),
+        ("O1E", PrinterModel.H2D_PRO),  # H2D Pro 代号来源不一致，两个都收
+        ("O2D", PrinterModel.H2D_PRO),
+        ("c12", PrinterModel.P1S),  # 代号匹配不区分大小写
+    ],
+)
+def test_detect_model_by_dev_model_code(dev_model, expected):
+    """契约：`devmodel` 代号表（``DEV_MODEL_CODES``）能识别代号形式的机型。
+
+    P1S 报 ``C12``、A2L 报 ``N9`` —— 若只靠型号名关键字匹配，这些会全部落空，
+    退化成「未知机型」并走 auto 通道，新机型可能因此被错误地先去试 6000 端口。
+    """
+    assert detect_model("", "", dev_model) is expected
+    assert detect_model("01P00A123456789", "", dev_model) is expected, (
+        "代号应优先于序列号前缀（官方说明换主板后序列号会变）"
+    )
+
+
+def test_h2c_dev_model_codes_both_recognized():
+    """契约：H2C 有**两个** devmodel 代号，`O1C`（单喷嘴）与 `O1C2`（双喷嘴）都识别为 H2C。
+
+    漏掉 ``O1C2`` 会让程序把它当未知机型、误用 6000 端口并陷入重连循环
+    （社区已记录该故障）。顺序上 ``o1c2`` 必须排在 ``o1c`` 之前，否则会命中后者
+    ——两者现在都映射到 H2C，所以顺序不再影响结果，但改动该表时仍要注意。
+    """
+    assert detect_model("", "", "O1C") is PrinterModel.H2C
+    assert detect_model("", "", "O1C2") is PrinterModel.H2C
+    assert PrinterModel.H2C.video_channel == "rtsp", "H2C 走 RTSPS(322)"
+    assert PrinterModel.H2C.supports_rtsp is True
+    assert PrinterModel.H2C.has_chamber_sensor is True
+
+
+def test_h2d_pro_capabilities_match_h2_family():
+    """契约：H2D Pro 与 H2 系同族：RTSPS + 有腔温传感器。"""
+    assert PrinterModel.H2D_PRO.video_channel == "rtsp"
+    assert PrinterModel.H2D_PRO.supports_rtsp is True
+    assert PrinterModel.H2D_PRO.has_chamber_sensor is True
+
+
+# --------------------------------------------------------------------------- Developer Mode
+
+
+def test_fun_field_from_real_a2l_report_sets_signature_required():
+    """契约：实测 A2L 的 `fun` = "100d122002fbd"（**十六进制字符串**）解析后要求签名。
+
+    这条直接决定「控制按钮能不能用」：该机型未开 Developer Mode 时，
+    第三方下发的暂停/停止/开灯会被固件静默忽略。
+    """
+    status = PrinterStatus()
+    assert status.needs_mqtt_signature is None, "没收到 fun 时不得擅自判断"
+    assert status.developer_mode is None
+
+    status.apply_report({"print": {"fun": "100d122002fbd"}})
+    assert status.fun_bits == 0x100D122002FBD
+    assert status.needs_mqtt_signature is True
+    assert status.developer_mode is False
+
+
+def test_fun_field_without_signature_bit_means_developer_mode_on():
+    """契约：`fun` 里 bit 0x20000000 为 0 时表示不要求签名（已开 Developer Mode）。
+
+    用实测值清掉该位得到 ``100d102002fbd``（对照实测值 ``100d122002fbd``）。
+    """
+    status = PrinterStatus()
+    status.apply_report({"print": {"fun": "100d102002fbd"}})
+    assert status.fun_bits == 0x100D102002FBD
+    assert status.needs_mqtt_signature is False
+    assert status.developer_mode is True
+
+
+@pytest.mark.parametrize("raw", ["0x100d122002fbd", "100D122002FBD", 0x100D122002FBD])
+def test_fun_field_accepts_hex_prefix_case_and_int(raw):
+    """契约：`fun` 的解析要容忍 0x 前缀、大小写，以及少数固件直接给整数。"""
+    status = PrinterStatus()
+    status.apply_report({"print": {"fun": raw}})
+    assert status.fun_bits == 0x100D122002FBD
+    assert status.needs_mqtt_signature is True
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None, "not-hex", {}, []])
+def test_fun_field_unparsable_is_unknown_not_false(raw):
+    """契约：`fun` 无法解析时必须保持未知（None），**不能**退化成「需要签名」。
+
+    否则老机型（压根没有这个字段）会被误判成需要 Developer Mode 而禁用控制按钮。
+    """
+    status = PrinterStatus()
+    status.apply_report({"print": {"fun": raw}})
+    assert status.needs_mqtt_signature is None
+
+
+def test_fun_field_is_merged_incrementally():
+    """契约：P1 系列只推送变化字段，`fun` 一旦收到应被保留（增量合并不清零）。"""
+    status = PrinterStatus()
+    status.apply_report({"print": {"fun": "100d122002fbd"}})
+    status.apply_report({"print": {"mc_percent": 50}})
+    assert status.fun_bits == 0x100D122002FBD, "后续报文不带 fun 时不应丢掉已知的功能位"
+
+
+def test_model_name_wins_over_dev_model_code():
+    """契约：完整型号名优先于代号。
+
+    老机型的 ``devmodel`` 直接报完整型号名（例如 ``P1S``），它比两个字符的代号
+    更不容易误伤，因此先试型号名关键字。
+    """
+    assert detect_model("", "P1S", "P1S") is PrinterModel.P1S
+    assert detect_model("", "Bambu Lab X1 Carbon", "C12") is PrinterModel.X1C
 
 
 @pytest.mark.parametrize("serial", ["", "0", "09", "xxx", "999ABC", "   "])

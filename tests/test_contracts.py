@@ -123,6 +123,8 @@ KNOWN_MODEL_LABELS = frozenset(
         "A2L",
         "P2S",
         "H2D",
+        "H2D Pro",
+        "H2C",
         "H2S",
         "X2D",
     }

@@ -118,10 +118,156 @@ A2L 的特征（8883 + 6000 可用、322 不可用）与 **A1 / A1 mini / P1P / 
 
 ---
 
-## 2. 待补充
+## 1.3 调研结论：新老机型的真实分界线
 
-- Snapmaker U1：协议与取流方式（调研中，阶段性结论：U1 走 Klipper + Moonraker + Fluidd，
-  遥测预计是 Moonraker HTTP API 7125，摄像头大概率是 MJPEG —— 待官方文档/实机复核）。
-- 其它第三方品牌：见调研结论（已确认 Moonraker 与 OctoPrint 是两个高覆盖统一接入层）。
+一轮完整的联网调研（官方 Wiki + 官方源码 + 社区实测交叉核对）给出了三个对本项目
+直接决定实现方式的结论。**这些是调研结论而非本机实测**，可信度单独标注。
+
+### ✅ 结论一：新机型**没有**换解码方式
+
+全仓库搜索确认**没有 H.265 / HEVC、没有 WebRTC、没有 AV1**。拓竹至今只有两套视频：
+
+| 通道 | 编码 | 机型 |
+| --- | --- | --- |
+| TCP 6000 | **独立 JPEG 帧**（`FF D8 FF E0`…`FF D9`，16 字节小端头） | A1、A1 mini、**A2L**、P1P、P1S |
+| RTSPS 322 | **H.264**（`yuv420p`，1920×1080） | X1、X1C、X1E、X2D、P2S、**H2C**、H2D、H2D Pro、H2S |
+
+→ 我方的 JPEG 解码链路（`camera.py` + `ui/frame_decoder.py`）**不需要改动**。
+用户提出的「新机型解码方式似乎不一样」，实际答案是：**分界线不在编码，而在下面这条**。
+
+### ⚠️ 结论二：真正的分界线是 MQTT 的 Developer Mode（比编码重要得多）
+
+* 打印机 MQTT 报文里的 `fun` 字段，**bit `0x20000000`** 表示「MQTT 命令需要签名校验」。
+* 未在打印机触屏上开启 **Developer Mode** 时，**第三方下发的控制命令会被静默忽略**
+  （机器回一条 HMS `0500-0500-0001-0007`，界面看起来就是「点了没反应」）。
+* 新机型（H2C / H2S / X2D / P2S / A2L）默认就需要它。
+
+**因此「暂停/停止/开灯」在新机型上可能无声失败，而画面与遥测一切正常。**
+这解释了「监控正常但控制没用」这类投诉。待办：读取 `fun` 字段的该 bit，
+为 0（即需要签名）时置灰控制按钮并提示用户去开 Developer Mode。
+
+### 📋 结论三：机型表有**官方**来源，且换主板会改序列号
+
+官方 Wiki <https://wiki.bambulab.com/en/general/find-sn> 逐机型列出序列号前 3 位，
+不再是社区逆向。**同页官方警告：更换 AP 板/主板后，机器实际序列号会与机身贴纸不同。**
+
+→ 识别判据的优先级必须是「**完整型号名 → devmodel 代号 → 序列号前缀**」，
+不能只靠序列号。已据此调整 `detect_model()`。
+
+已落入代码的表（`models.py`）：前缀 `31B`=H2C、`239`=H2D Pro；
+代号 `C11`=P1P、`C12`=P1S、`N9`=A2L、`O1C`/`O1C2`=H2C、`O1E`/`O2D`=H2D Pro。
+
+补充事实：
+
+* **X1P 不存在**（五个独立来源都没有），不要为它留机型槽。
+* **X1 与 P1P 已于 2025-11 停产下架**，但在网设备仍需识别。
+* **H2C**：官方 2025-11-18 发布，**双喷嘴 + 6 位喷嘴架**（Vortek，架位 ID 16–21），
+  有腔温传感器与有源腔温加热器（≤65℃）。⚠️ 喷嘴 1 在架侧，**不遵循 0=右的惯例**。
+* **A2L**：官方 2026-06-01 发布，**单喷嘴、无腔温传感器**、摄像头是低帧率 1080P，
+  实测 5.0℃ 的腔温读数因此确认是无意义值。
+* **AMS 前缀**：`006`=AMS、`03C`=AMS lite、`19C`=AMS 2 Pro、`19F`=AMS HT。
+* **H2 系 RTSPS 默认关闭**（`ipcam.rtsp_url == "disable"`），需用户在触屏开
+  「局域网实时画面」，否则纯局域网拿不到流 —— 与现有看门狗告警文案一致。
+* **任务 URL 格式分两派**：A2L/P2S/H2C/H2D/H2D Pro/H2S/X2D 用 `ftp:///`；
+  老机型用 `file:///sdcard/`。⚠️ 这里 A2L 与 A1 属于不同阵营。
+
+**未找到可靠来源、待真机确认**：A2L 的 `devmodel` 是否为 `N9`（仅源码，未见官方；
+本机 A2L 的 devmodel 当时读到为空，需固件更新后再抓一次 SSDP 原文确认）；
+H2D Pro 的代号到底是 `O1E` 还是 `O2D`（来源不一致，两个都收）。
+
+---
+
+## 1.4 实测（四）：固件更新后重测 —— 两个关键问题当场定论
+
+A2L 从 `01.01.00.00` 更新到 **`01.01.05.00`** 后端口恢复（8883 与 6000 都开放），
+随即完成了两项关键实测。**结论直接回答了用户提出的「新机型解码方式是否不同」。**
+
+### ✅ 解码方式**没有**变化（实测确认，不再是调研推断）
+
+用项目自己的 TLS 工具连接 6000 端口、发送标准 80 字节鉴权包后，连续收到 3 帧：
+
+| 帧 | size | itrack | flags | 负载 | JPEG |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 60964 | 0 | 1 | 60964 | ✓ `ffd8ffe0` |
+| 2 | 163546 | 0 | 1 | 163546 | ✓ `ffd8ffe0` |
+| 3 | 176512 | 0 | 1 | 176512 | ✓ `ffd8ffe0` |
+
+即 **「16 字节小端帧头 + JPEG」老协议逐字段一致**（`itrack=0`、`flags=1`）。
+→ **我方 JPEG 解码链路无需任何改动**，`camera.py` 与 `frame_decoder.py` 可原样用于 A2L。
+→ 之前那次「发完鉴权包收不到帧」纯粹是固件更新期间的临时状态。
+
+### ⚠️ 但 `fun` 字段是**十六进制字符串**，且该位确已置位
+
+A2L 的 MQTT 报文里：
+
+```json
+{"print": {"fun": "100d122002fbd", ...}}      ← 注意是字符串，不是数字
+```
+
+实测 `fun = 0x000100D122002FBD`，**bit `0x20000000` 已置位** → 该机要求 MQTT 命令签名，
+即**未在触屏开启 Developer Mode 时，暂停/停止/开灯会被固件静默忽略**。
+
+⚠️ 调研资料把 `fun` 当成整数处理，**实际是十六进制字符串**；用 `int()` 解析会失败并
+退化成 0，从而**漏掉这个关键信息**。已为此单独实现 `_as_hex_int()`（容忍 `0x` 前缀、
+大小写、以及少数固件直接给整数），并新增 `PrinterStatus.needs_mqtt_signature` /
+`developer_mode` 两个属性（**无法解析时返回 `None` 而不是 `False`**，
+以免把没有该字段的老机型误判成需要开发者模式而禁用控制按钮）。
+
+### 顺带确认
+
+* 报文 `print` 段共 **86 个字段**，字段名与老机型完全同名（`mc_percent`、`nozzle_temper`、
+  `ams`、`hms`、`chamber_temper`、`ipcam`…），**没有出现需要新解析逻辑的字段**。
+* 顶层仍然只有 `print` 一个键。
+
+### 仍待确认
+
+* MQTT 里的 `devmodel`/`product_name` 字段（用于回答「A2L 的代号到底是不是 N9」）。
+* 320 端口不存在（已确认 322 不可达），故 A2L 固定走 6000 —— 与代码中的声明一致。
+
+
+---
+
+## 2. 第三方设备：Snapmaker U1（调研结论）
+
+**U1 = 改版 Klipper + 改版 Moonraker，原厂固件即可集成，无需改装。**
+协议是标准 Moonraker HTTP + WebSocket JSON-RPC（JSON-RPC 2.0）。
+**不需要 aiortc、不需要 ffmpeg、不需要 MQTT 证书** —— 接入难度显著低于拓竹。
+
+| 维度 | 结论 |
+| --- | --- |
+| 发现 | **主通道是 mDNS `_snapmaker._tcp.local.`**（默认启用）。⚠️ **原厂固件默认不开 SSDP**（`enable_ssdp` 默认 False），照搬拓竹的 SSDP 扫描会一台都发现不到。手动填 IP 是必备兜底 |
+| 端口 | ⚠️ mDNS SRV 里的 **1884 是内部 MQTT 端口，不是 API 端口**；API 是 **80**（nginx 反代），回退 **7125** |
+| 遥测 | `ws://<ip>/websocket` → `printer.objects.subscribe`，收 `notify_status_update`。对象：`print_stats`、`virtual_sdcard`、`extruder`(+`extruder1/2/3`)、`heater_bed`、`toolhead`、`display_status`、`webhooks` |
+| 控制 | `POST /printer/print/pause` `/resume` `/cancel`；灯光用 G-code `SET_LED LED=cavity_led WHITE=1\|0` |
+| 视频 | ⚠️ **只有 1 个腔体摄像头，原厂固件没有 RTSP / WebRTC / 标准 MJPEG**。正确做法是 **WS 保活 + JPEG 快照轮询**：每 2–10 秒发 `camera.start_monitor`（**只能走 WebSocket**，HTTP 发不通），再 GET `/server/files/camera/monitor.jpg`。保活一断画面就静止，**必须做看门狗** |
+| 鉴权 | 内网默认免密钥（`trusted_clients` 含 `192.0.0.0/8` 等）；**非标准网段会 401**，因此必须支持填 API Key（`X-Api-Key` 头 / WS 用 `?token=`） |
+| 机型识别 | mDNS TXT 里的 `machine_type == "Snapmaker U1"` 是唯一可靠字段 |
+| 开源属性 | ⚠️ **不是开源硬件**（OSHWA 无 Snapmaker，无原理图）。Klipper/Moonraker/Fluidd 的 GPL 衍生部分官方已开源，触屏 UI 与摄像头守护进程 `unisrv` 闭源。准确说法是「跑在 Klipper/Moonraker 开源生态上的商业产品」 |
+
+**WebRTC 不建议投入**：它只存在于社区扩展固件且信令未公开；同一扩展固件下
+RTSP `rtsp://<ip>:8554/stream` 能拿到同样画质且成本≈0。检测到扩展固件时优先用 RTSP。
+
+### 更大的收获：按「协议生态」抽象，而不是按品牌
+
+调研确认存在**两个高覆盖统一接入层**，一处适配就能吃下一大批机器：
+
+| 接入层 | 覆盖 | 发现 | 遥测 | 视频 |
+| --- | --- | --- | --- | --- |
+| **Moonraker** | 所有 Klipper 机器（Voron、RatRig、刷 Klipper 的 Creality/Elegoo/Anycubic、U1…） | mDNS `_moonraker._tcp` | HTTP/WS 7125 | MJPEG / 快照 |
+| **OctoPrint** | 所有 OctoPrint 机器 | mDNS `_octoprint._tcp` | REST + `X-Api-Key` | MJPEG |
+
+⚠️ 注意 **PrusaLink 会同时注册 `_octoprint._tcp`**（官方为兼容旧切片器），
+但 API 不是 OctoPrint 那套，需要单独适配；而且 **PrusaLink 只有静态快照、没有视频流**，
+在一面「实时画面墙」上只能低频刷新。Creality 主通道是私有 JSON WebSocket（TCP 9999），
+属于逆向协议，优先级最低。
+
+---
+
+## 3. 待补充
+
+* A2L 固件更新完成后：重抓 SSDP 原文确认 `devmodel`，并实测 6000 端口鉴权包的真实回应。
+* A2L / H2C 的 Developer Mode `fun` 字段实测（验证结论二）。
+* 任一台 U1 实机的 `/server/info` 与 `/printer/objects/list` 输出（验证上表）。
+
 
 

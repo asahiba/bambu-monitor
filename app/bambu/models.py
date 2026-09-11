@@ -33,10 +33,17 @@ class PrinterModel(str, Enum):
     A1MINI = "A1 mini"
     #: A2L：实测机型（见 docs/FIELD_NOTES.md）。8883 + 6000 可用、322 不可达，
     #: 因此与 A1/P1 同属「6000 端口机型」；固件 01.01.00.00。
+    #: 官方 2026-06-01 发布，单喷嘴、无腔温传感器（官方规格）。
     A2L = "A2L"
     P2S = "P2S"
     H2D = "H2D"
+    #: H2D Pro：官方序列号前缀 `239`；SSDP 代号未确定（见 DEV_MODEL_CODES）。
+    H2D_PRO = "H2D Pro"
     H2S = "H2S"
+    #: H2C：官方 2025-11-18 发布，序列号前缀 `31B`，双喷嘴 + 6 位喷嘴架（Vortek），
+    #: 有腔温传感器与有源腔温加热器（≤65℃），视频走 RTSPS(322)/H.264。
+    #: SSDP 有两个代号：`O1C`（单喷嘴变体）与 `O1C2`（双喷嘴变体），两者都要认。
+    H2C = "H2C"
     X2D = "X2D"
     UNKNOWN = "未知机型"
 
@@ -69,7 +76,9 @@ class PrinterModel(str, Enum):
             PrinterModel.X1E,
             PrinterModel.P2S,
             PrinterModel.H2D,
+            PrinterModel.H2D_PRO,
             PrinterModel.H2S,
+            PrinterModel.H2C,
             PrinterModel.X2D,
         )
 
@@ -77,8 +86,8 @@ class PrinterModel(str, Enum):
     def has_chamber_sensor(self) -> bool:
         """是否有腔温传感器。
 
-        A1 / A1 mini / P1P / P1S 没有腔温探头，固件仍会报送一个无效值（实测 P1S 常年是 5.0℃），
-        直接显示会误导用户，因此这些机型不显示仓温。
+        A1 / A1 mini / P1P / P1S **以及 A2L** 没有腔温探头，固件仍会报送一个无效值
+        （实测 P1S 与 A2L 都常年是 5.0℃），直接显示会误导用户，因此这些机型不显示仓温。
         """
         return self in (
             PrinterModel.X1C,
@@ -86,7 +95,9 @@ class PrinterModel(str, Enum):
             PrinterModel.X1E,
             PrinterModel.X2D,
             PrinterModel.H2D,
+            PrinterModel.H2D_PRO,
             PrinterModel.H2S,
+            PrinterModel.H2C,
             PrinterModel.P2S,
         )
 
@@ -104,6 +115,8 @@ class PrinterModel(str, Enum):
           优先 RTSPS，失败再退 6000，并由看门狗在两种情况下自动纠正。
         * A2L（固件 01.01.00.00）：8883 与 6000 开放、**322 不可达**（实测见
           docs/FIELD_NOTES.md）→ 与 A1/P1 同型，固定 6000，不去白试 RTSPS。
+          ⚠️ 不能因为它是「A 系列新品」就猜 322：调研与源码断言都确认 A2L 走 6000。
+        * H2C / H2D Pro：与 H2 系同族，走 RTSPS(322)/H.264。
         """
         if self in (
             PrinterModel.A1,
@@ -113,7 +126,14 @@ class PrinterModel(str, Enum):
             PrinterModel.P1S,
         ):
             return "tcp6000"
-        if self in (PrinterModel.X2D, PrinterModel.H2D, PrinterModel.H2S, PrinterModel.P2S):
+        if self in (
+            PrinterModel.X2D,
+            PrinterModel.H2D,
+            PrinterModel.H2D_PRO,
+            PrinterModel.H2S,
+            PrinterModel.H2C,
+            PrinterModel.P2S,
+        ):
             return "rtsp"
         # X1 / X1C / X1E 以及未知机型：先 RTSPS，失败再退 6000
         return "auto"
@@ -121,30 +141,59 @@ class PrinterModel(str, Enum):
 
 #: 序列号前缀 -> 机型。
 #:
-#: 来源分两类，可信度不同：
-#: * 社区逆向资料（老机型，已被大量实机验证）；
-#: * **真机实测**（A2L 的 ``26A``，见 docs/FIELD_NOTES.md）。
-#: 未实测到的新机型前缀不要凭猜测写进来 —— 猜错会让用户看到错误的机型与错误的视频通道，
-#: 而「未知机型」只是少显示一个名字，且走 auto 通道仍能出画面，代价小得多。
+#: **来源：拓竹官方 Wiki**《如何查找序列号》
+#: https://wiki.bambulab.com/en/general/find-sn —— 逐机型明写前 3 位，
+#: 不再是社区逆向；A2L 的 ``26A`` 另有本机真机实测交叉验证（docs/FIELD_NOTES.md）。
+#:
+#: ⚠️ **官方同一页面的警告**：更换 AP 板/主板后，机器实际序列号会与机身贴纸不同。
+#: 因此识别判据的优先级必须是 **devmodel 代号 > 序列号前缀 > 型号名关键字**，
+#: 不能只靠序列号（见 ``DEV_MODEL_CODES``）。
+#:
+#: 未见于官方表的前缀一律不猜：猜错会让用户看到错误的机型与错误的视频通道，
+#: 而「未知机型」只是少显示一个名字、走 auto 通道仍能出画面，代价小得多。
 SERIAL_PREFIX_MODEL: dict[str, PrinterModel] = {
     "00M": PrinterModel.X1C,
-    "00W": PrinterModel.X1,
     "03W": PrinterModel.X1E,
     "01S": PrinterModel.P1P,
     "01P": PrinterModel.P1S,
     "030": PrinterModel.A1MINI,
     "039": PrinterModel.A1,
-    "26A": PrinterModel.A2L,  # 实测：26A00A000000000000
+    "26A": PrinterModel.A2L,  # 官方表 + 本机实测 26A00A000000000000
     "22E": PrinterModel.P2S,
     "093": PrinterModel.H2S,
     "094": PrinterModel.H2D,
+    "239": PrinterModel.H2D_PRO,
+    "31B": PrinterModel.H2C,
     "20P": PrinterModel.X2D,
+    # `00W` 是 X1（无后缀）—— **官方表未列**，仅社区论坛与逆向源码给出，
+    # 未经真机验证。保留是因为猜错的代价仅为「显示成 X1」（两者同属 RTSPS 型），
+    # 若日后确认有误，删掉这一行即可。
+    "00W": PrinterModel.X1,
+}
+
+#: SSDP 的 `devmodel.bambu.com` 代号 -> 机型。
+#:
+#: 这些代号与型号名毫无字面关系（P1S 是 ``C12``、A2L 是 ``N9``），因此**必须单独成表**：
+#: 只靠型号名关键字匹配会全部落空，退化成「未知机型」→ 走 auto 通道 → 新机型可能被
+#: 错误地先去试 6000 端口并陷入重连循环。
+#:
+#: 可信度：``C11``/``C12``/``N9``/``O1C``/``O1C2`` 有官方源码或社区实测支撑；
+#: ``O1E``/``O2D``（H2D Pro）**来源不一致、未确定**，两个都收进来，
+#: 命中任意一个即可识别为 H2D Pro（同型，能力一致，猜错无副作用）。
+DEV_MODEL_CODES: dict[str, PrinterModel] = {
+    "c11": PrinterModel.P1P,
+    "c12": PrinterModel.P1S,
+    "n9": PrinterModel.A2L,
+    "o1c2": PrinterModel.H2C,  # ⚠️ 必须排在 "o1c" 之前（双喷嘴变体）
+    "o1c": PrinterModel.H2C,
+    "o1e": PrinterModel.H2D_PRO,
+    "o2d": PrinterModel.H2D_PRO,
 }
 
 #: 型号名关键字（大小写不敏感）-> 机型，用于解析 SSDP 的 devmodel/devname 字段。
 #:
-#: **顺序即优先级**：更具体的型号必须排在更宽泛的前面（例如 ``x1carbon`` 在 ``x1`` 之前，
-#: ``a2l`` 在 ``a1`` 之前），否则会被短关键字抢先命中。
+#: **顺序即优先级**：更具体的型号必须排在更宽泛的前面（例如 ``x1carbon`` 在 ``x1`` 之前、
+#: ``a2l`` 在 ``a1`` 之前、``h2dpro`` 在 ``h2d`` 之前），否则会被短关键字抢先命中。
 MODEL_NAME_HINTS: list[tuple[str, PrinterModel]] = [
     ("x2d", PrinterModel.X2D),
     ("x1carbon", PrinterModel.X1C),
@@ -159,8 +208,11 @@ MODEL_NAME_HINTS: list[tuple[str, PrinterModel]] = [
     ("a1 mini", PrinterModel.A1MINI),
     ("a1m", PrinterModel.A1MINI),
     ("a1", PrinterModel.A1),
+    ("h2dpro", PrinterModel.H2D_PRO),
+    ("h2d pro", PrinterModel.H2D_PRO),
     ("h2d", PrinterModel.H2D),
     ("h2s", PrinterModel.H2S),
+    ("h2c", PrinterModel.H2C),
 ]
 
 
@@ -173,17 +225,38 @@ def _normalize_model_text(text: str) -> str:
     return "".join(text.strip().lower().split()).replace("-", "").replace("_", "")
 
 
-def detect_model(serial: str = "", model_name: str = "") -> PrinterModel:
-    """综合 SSDP 型号名与序列号前缀推断机型。
+def detect_model(
+    serial: str = "", model_name: str = "", dev_model: str = ""
+) -> PrinterModel:
+    """综合 SSDP 字段与序列号推断机型。
 
-    型号名匹配时会忽略空格与 ``-``/``_``，因此 ``X1 Carbon``、``X1-Carbon``、
-    ``x1carbon`` 都能识别为 X1C（关键字表的顺序保证先匹配更具体的型号）。
+    判据优先级（**不要随意调换**）：
+
+    1. ``model_name``（``devname``）里的型号名关键字 —— 最明确。匹配时忽略空格与
+       ``-``/``_``，因此 ``X1 Carbon`` / ``X1-Carbon`` / ``x1carbon`` 都识别为 X1C；
+       关键字表顺序保证更具体的型号优先。
+       先试它是因为老机型的 ``devmodel`` 直接就报完整型号名（例如 ``P1S``），
+       比两个字符的代号更不容易误伤。
+    2. ``dev_model``（``devmodel.bambu.com`` 代号）—— 新机型才用代号，且代号与型号名
+       毫无字面关系（P1S 是 ``C12``、A2L 是 ``N9``、H2C 是 ``O1C``/``O1C2``），
+       所以必须单独查 ``DEV_MODEL_CODES`` 表，不能用关键字匹配。
+    3. 序列号前 3 位 —— **兜底**。官方明确说明：更换 AP 板/主板后序列号会变，
+       所以它排在最后。
     """
     text = _normalize_model_text(model_name)
     if text:
         for keyword, model in MODEL_NAME_HINTS:
             if _normalize_model_text(keyword) in text:
                 return model
+    code = _normalize_model_text(dev_model)
+    if code:
+        model = DEV_MODEL_CODES.get(code)
+        if model is not None:
+            return model
+        # 有些固件把完整型号名填在 devmodel 字段里，再按关键字试一次
+        for keyword, hinted in MODEL_NAME_HINTS:
+            if _normalize_model_text(keyword) in code:
+                return hinted
     sn = (serial or "").strip().upper()
     if len(sn) >= 3:
         model = SERIAL_PREFIX_MODEL.get(sn[:3])
@@ -193,8 +266,7 @@ def detect_model(serial: str = "", model_name: str = "") -> PrinterModel:
 
 
 #: gcode_state -> 中文状态
-STATE_TEXT = {
-    "IDLE": "空闲",
+STATE_TEXT = {    "IDLE": "空闲",
     "RUNNING": "打印中",
     "PAUSE": "已暂停",
     "PAUSED": "已暂停",
@@ -206,6 +278,14 @@ STATE_TEXT = {
     "OFFLINE": "离线",
     "UNKNOWN": "未知",
 }
+
+#: MQTT `fun` 字段里表示「MQTT 命令需签名校验」的位。
+#:
+#: 置位意味着**必须在打印机触屏上开启 Developer Mode**，否则第三方下发的控制命令
+#: 会被静默忽略（机器回一条 HMS 0500-0500-0001-0007），界面上表现为「点了没反应」，
+#: 而画面与遥测完全正常。新机型（H2C / H2S / X2D / P2S / A2L）默认就需要它。
+#: 实测 A2L（固件 01.01.05.00）的 `fun` = "100d122002fbd"，该位**已置位**。
+MQTT_SIGNATURE_REQUIRED = 0x20000000
 
 
 @dataclass
@@ -223,7 +303,6 @@ class AmsTray:
     external: bool = False
     #: 是否有 RFID 标签（非官方料卷 / 未接 AMS 时读不到真实余量）
     has_rfid: bool = False
-
     @property
     def color_hex(self) -> str:
         raw = (self.color or "").strip().lstrip("#")
@@ -337,6 +416,30 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _as_hex_int(value: Any) -> Optional[int]:
+    """把十六进制**字符串**形式的字段解析成整数（拓竹的 ``fun`` 字段就是这样）。
+
+    实测 A2L（固件 01.01.05.00）上报 ``"fun": "100d122002fbd"`` —— 是字符串而不是数字，
+    用 ``_as_int`` 会直接失败退化成 0，从而漏掉「需要 Developer Mode」这个关键信息。
+    这里同时容忍整数输入（老机型/其它固件可能直接给数字）。
+    无法解析时返回 ``None``，由调用方决定回退策略。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    # 允许带 0x 前缀；不含前缀时按十六进制解析（拓竹的格式）
+    if text.startswith("0x"):
+        text = text[2:]
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
 @dataclass
 class PrinterStatus:
     """打印机实时状态。
@@ -385,7 +488,32 @@ class PrinterStatus:
     # 其它
     wifi_signal: str = ""
     rtsp_url: str = ""
+    #: 固件功能位（报文里的 `fun` 字段，是**十六进制字符串**，例如 "100d122002fbd"）。
+    #: None 表示该机型/固件没有上报这个字段。
+    fun_bits: Optional[int] = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def needs_mqtt_signature(self) -> Optional[bool]:
+        """控制命令是否需要 MQTT 签名（即是否需要开 Developer Mode）。
+
+        `fun` 的 bit ``0x20000000`` 被置位表示「MQTT 命令需签名校验」。新机型
+        （H2C / H2S / X2D / P2S / **A2L**）默认就需要它：**未在打印机触屏上开启
+        Developer Mode 时，第三方下发的控制命令会被静默忽略**，界面上表现为
+        「点了暂停没反应」，而画面与遥测一切正常。
+
+        返回 ``None`` 表示无从判断（没上报 `fun`）——此时不要据此禁用按钮，
+        否则会把老机型也误伤。
+        """
+        if self.fun_bits is None:
+            return None
+        return bool(self.fun_bits & MQTT_SIGNATURE_REQUIRED)
+
+    @property
+    def developer_mode(self) -> Optional[bool]:
+        """是否**已开启** Developer Mode（= 不需要签名）。``None`` 表示未知。"""
+        needs = self.needs_mqtt_signature
+        return None if needs is None else (not needs)
 
     @property
     def state_text(self) -> str:
@@ -548,6 +676,9 @@ class PrinterStatus:
             self.tray_tar = _as_int(src.get("tray_tar"), self.tray_tar)
 
         self.wifi_signal = str(src.get("wifi_signal", self.wifi_signal) or "")
+        # `fun` 是十六进制字符串，表示固件功能位；bit 0x20000000 关系到能否下发控制命令
+        if "fun" in src:
+            self.fun_bits = _as_hex_int(src.get("fun"))
         ipcam = src.get("ipcam")
         if isinstance(ipcam, dict):
             rtsp = str(ipcam.get("rtsp_url", "") or "")

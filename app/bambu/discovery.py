@@ -371,9 +371,12 @@ def parse_announcement(data: bytes, source_ip: str = "") -> Optional[PrinterInfo
     if not (ip or serial):
         return None
 
-    model_name = headers.get("devmodel.bambu.com", "")
+    # `devmodel` 是代号（P1S=C12、A2L=N9、H2C=O1C/O1C2），与型号名毫无字面关系；
+    # `devname` 才是人可读的名字。两者必须**分开**传给 detect_model，
+    # 否则代号会被当成型号名去匹配关键字，永远匹配不上。
+    dev_model = headers.get("devmodel.bambu.com", "")
     name = headers.get("devname.bambu.com", "")
-    if not _looks_like_bambu(headers, serial, model_name, name):
+    if not _looks_like_bambu(headers, dev_model, name, serial=serial):
         # 局域网里其它 UPnP/SSDP 设备（路由器、NAS 等）的回包，直接忽略
         return None
     return PrinterInfo(
@@ -381,20 +384,28 @@ def parse_announcement(data: bytes, source_ip: str = "") -> Optional[PrinterInfo
         serial=serial,
         name=name,
         firmware=headers.get("devversion.bambu.com", ""),
-        model=detect_model(serial, f"{model_name} {name}"),
+        model=detect_model(serial, name, dev_model),
         discovered=True,
     )
 
 
 def _looks_like_bambu(
-    headers: dict[str, str], serial: str, model_name: str = "", name: str = ""
+    headers: dict[str, str],
+    dev_model: str = "",
+    name: str = "",
+    *,
+    serial: str = "",
 ) -> bool:
     """过滤掉非拓竹设备：要求带拓竹专有字段、拓竹 SSDP 标识、或像拓竹序列号的字符串。
 
-    注意最后那条是**兜底启发式**：拓竹序列号的长度并不固定（老机型 15 位、
+    参数全部用关键字传，避免位置歧义：``dev_model`` 是 ``devmodel.bambu.com`` 的代号
+    （C12 / N9 / O1C…），``name`` 是 ``devname.bambu.com``，``serial`` 是 ``usn``。
+    ``devmodel`` 既是「拓竹设备的标记」也参与机型识别，所以任一非空即认可。
+
+    最后那条是**兜底启发式**：拓竹序列号的长度并不固定（老机型 15 位、
     实测 A2L 18 位），所以用区间而不是等值判断，详见 ``_SERIAL_LENGTH_RANGE``。
     """
-    if model_name or headers.get("devname.bambu.com") or headers.get("devversion.bambu.com"):
+    if dev_model or headers.get("devname.bambu.com") or headers.get("devversion.bambu.com"):
         return True
     # 拓竹设备的 SSDP 标识：`nt` 出现在设备主动发出的 NOTIFY 里，
     # `st` 出现在对 M-SEARCH 的应答里（两者都要看，否则只带 ST 的回包会被漏判）
