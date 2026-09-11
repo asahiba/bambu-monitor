@@ -35,6 +35,9 @@ pytestmark = pytest.mark.usefixtures("no_network")
     [
         (PrinterModel.A1, "tcp6000"),
         (PrinterModel.A1MINI, "tcp6000"),
+        # A2L 是实测机型：8883 + 6000 开放、322 不可达（docs/FIELD_NOTES.md），
+        # 所以固定走 6000，不应该像未知机型那样先去白试一次 RTSPS
+        (PrinterModel.A2L, "tcp6000"),
         (PrinterModel.P1P, "tcp6000"),
         (PrinterModel.P1S, "tcp6000"),
         (PrinterModel.X2D, "rtsp"),
@@ -48,7 +51,7 @@ pytestmark = pytest.mark.usefixtures("no_network")
     ],
 )
 def test_video_channel_mapping(model, expected):
-    """契约：A1/P1 系列走 6000 端口，X2D/H2 系列走 RTSPS，X1 系列与未知机型为 auto。"""
+    """契约：A1/P1/A2L 走 6000 端口，X2D/H2/P2S 走 RTSPS，X1 系列与未知机型为 auto。"""
     assert model.video_channel == expected
 
 
@@ -64,13 +67,14 @@ def test_video_channel_mapping(model, expected):
         (PrinterModel.P2S, True),
         (PrinterModel.A1, False),
         (PrinterModel.A1MINI, False),
+        (PrinterModel.A2L, False),  # 实测 322 端口不可达
         (PrinterModel.P1P, False),
         (PrinterModel.P1S, False),
         (PrinterModel.UNKNOWN, False),
     ],
 )
 def test_supports_rtsp_mapping(model, expected):
-    """契约：只有 X1/X2D/H2/P2S 系列开放本地 RTSPS(322)，A1/P1 系列与未知机型没有。"""
+    """契约：只有 X1/X2D/H2/P2S 系列开放本地 RTSPS(322)，A1/P1/A2L 与未知机型没有。"""
     assert model.supports_rtsp is expected
 
 
@@ -81,6 +85,9 @@ def test_supports_rtsp_mapping(model, expected):
         (PrinterModel.P1P, False),
         (PrinterModel.A1, False),
         (PrinterModel.A1MINI, False),
+        # 保守假设：A2L 的腔温传感器尚未实测（docs/FIELD_NOTES.md）。
+        # 若日后确认它有腔温，把 A2L 加进 has_chamber_sensor 集合并改这条断言即可。
+        (PrinterModel.A2L, False),
         (PrinterModel.X2D, True),
         (PrinterModel.X1C, True),
         (PrinterModel.X1, True),
@@ -93,6 +100,33 @@ def test_supports_rtsp_mapping(model, expected):
 def test_has_chamber_sensor_mapping(model, expected):
     """契约：A1/P1 系列固件报的腔温是无效值（实测 P1S 常年 5℃），必须不显示；X1/H2/X2D/P2S 显示。"""
     assert model.has_chamber_sensor is expected
+
+
+@pytest.mark.parametrize(
+    "model, expected",
+    [
+        (PrinterModel.A1, True),
+        (PrinterModel.A1MINI, True),
+        (PrinterModel.A2L, True),
+        (PrinterModel.P1P, True),
+        (PrinterModel.P1S, True),
+        (PrinterModel.P2S, True),
+        (PrinterModel.H2D, True),
+        (PrinterModel.H2S, True),
+        (PrinterModel.X1, True),
+        (PrinterModel.X1C, True),
+        (PrinterModel.X1E, True),
+        (PrinterModel.X2D, True),
+        (PrinterModel.UNKNOWN, False),
+    ],
+)
+def test_is_known_mapping(model, expected):
+    """契约：``is_known`` 取代散落各处的 ``model.value != "未知机型"`` 魔术字符串比较。
+
+    它被用于「发现结果合并时不要用未知机型覆盖已知机型」等逻辑
+    （``discovery`` / ``headless`` / ``main_window`` / ``discover_dialog``）。
+    """
+    assert model.is_known is expected
 
 
 # --------------------------------------------------------------------------- 机型识别
@@ -112,6 +146,9 @@ def test_has_chamber_sensor_mapping(model, expected):
         ("03WABC123", PrinterModel.X1E),
         ("01SABC123", PrinterModel.P1P),
         ("22EABC123", PrinterModel.P2S),
+        # 实测：A2L 的序列号是 26A00A000000000000（18 位），前缀 26A
+        ("26A00A000000000000", PrinterModel.A2L),
+        ("26AABC123", PrinterModel.A2L),
     ],
 )
 def test_detect_model_by_serial_prefix(serial, expected):
@@ -153,13 +190,17 @@ def test_detect_model_model_name_wins_over_serial(serial, model_name, expected):
         ("  P2S  ", PrinterModel.P2S),
         ("H2D", PrinterModel.H2D),
         ("Bambu Lab X1C", PrinterModel.X1C),
+        # A2L：真机 SSDP 的 devname 就是 "A2L"（devmodel 为空），见 docs/FIELD_NOTES.md
+        ("A2L", PrinterModel.A2L),
+        ("a2l", PrinterModel.A2L),
+        ("Bambu Lab A2L", PrinterModel.A2L),
     ],
 )
 def test_detect_model_normalizes_case_and_separators(model_name, expected):
     """契约：型号名关键字匹配忽略大小写、空格与 ``-`` / ``_``（``_normalize_model_text``）。
 
     关键字表顺序保证更具体的型号优先：``x1carbon`` / ``x1c`` 必须先于 ``x1`` 命中，
-    否则 X1C 会被误认成 X1。
+    否则 X1C 会被误认成 X1；同理 ``a2l`` 在 ``a1`` 之前。
     """
     assert detect_model("", model_name) is expected
 

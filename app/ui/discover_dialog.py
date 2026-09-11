@@ -211,7 +211,7 @@ class DiscoverDialog(QDialog):
             name = f"{name}（已添加）" if name else "（已添加）"
         values = [
             name,
-            info.model.label if info.model.value != "未知机型" else "",
+            info.model.label if info.model.is_known else "",
             info.ip,
             info.serial,
             (known.access_code if known else "") or "",

@@ -488,7 +488,7 @@ class DiscoveryService:
                     existing.name = info.name
                 if not existing.firmware and info.firmware:
                     existing.firmware = info.firmware
-                if existing.model.value == "未知机型" and info.model.value != "未知机型":
+                if not existing.model.is_known and info.model.is_known:
                     existing.model = info.model
                 is_new = False
         if is_new:
@@ -675,6 +675,6 @@ def merge_devices(existing: Iterable[PrinterInfo], found: Iterable[PrinterInfo])
                 match.name = info.name
             if not match.firmware:
                 match.firmware = info.firmware
-            if match.model.value == "未知机型" and info.model.value != "未知机型":
+            if not match.model.is_known and info.model.is_known:
                 match.model = info.model
     return result

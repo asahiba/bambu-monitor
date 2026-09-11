@@ -15,7 +15,14 @@ from . import hms as hms_codes
 
 
 class PrinterModel(str, Enum):
-    """支持的机型。"""
+    """支持的机型。
+
+    新增机型时要同步 5 个地方（顺序无要求，但漏一个就会出现「识别不出来」或
+    「走错视频通道」）：
+    ``PrinterModel`` 枚举、``supports_rtsp``、``has_chamber_sensor``、
+    ``video_channel``、``SERIAL_PREFIX_MODEL`` / ``MODEL_NAME_HINTS``。
+    另外记得补 ``tests/test_models.py`` 的契约断言。
+    """
 
     X1C = "X1C"
     X1 = "X1"
@@ -24,6 +31,9 @@ class PrinterModel(str, Enum):
     P1S = "P1S"
     A1 = "A1"
     A1MINI = "A1 mini"
+    #: A2L：实测机型（见 docs/FIELD_NOTES.md）。8883 + 6000 可用、322 不可达，
+    #: 因此与 A1/P1 同属「6000 端口机型」；固件 01.01.00.00。
+    A2L = "A2L"
     P2S = "P2S"
     H2D = "H2D"
     H2S = "H2S"
@@ -38,8 +48,21 @@ class PrinterModel(str, Enum):
         return self.value
 
     @property
+    def is_known(self) -> bool:
+        """机型是否已识别。
+
+        替代散落各处的 ``model.value != "未知机型"`` 魔术字符串比较
+        （``main_window`` / ``discover_dialog`` / ``discovery`` / ``headless`` 都曾这么写，
+        改机型文案时会静默失效）。
+        """
+        return self is not PrinterModel.UNKNOWN
+
+    @property
     def supports_rtsp(self) -> bool:
-        """X1/P2S/H2/X2D 系列带本地 RTSPS(322) 服务，A1/P1 只有 6000 端口 JPEG 流。"""
+        """是否提供本地 RTSPS(322) 服务。
+
+        X1/P2S/H2/X2D 系列带 RTSPS；A1/P1 系列**以及实测的 A2L** 只有 6000 端口 JPEG 流。
+        """
         return self in (
             PrinterModel.X1C,
             PrinterModel.X1,
@@ -79,10 +102,13 @@ class PrinterModel(str, Enum):
         * X1C（固件 01.11.02.00）：322 端口 1.5 秒出画面，6000 端口同样被拒；
           但更老的 X1 固件是靠 6000 端口取画面的，所以这里返回 auto：
           优先 RTSPS，失败再退 6000，并由看门狗在两种情况下自动纠正。
+        * A2L（固件 01.01.00.00）：8883 与 6000 开放、**322 不可达**（实测见
+          docs/FIELD_NOTES.md）→ 与 A1/P1 同型，固定 6000，不去白试 RTSPS。
         """
         if self in (
             PrinterModel.A1,
             PrinterModel.A1MINI,
+            PrinterModel.A2L,
             PrinterModel.P1P,
             PrinterModel.P1S,
         ):
@@ -93,7 +119,13 @@ class PrinterModel(str, Enum):
         return "auto"
 
 
-#: 序列号前缀 -> 机型（依据社区逆向资料，用于自动识别）
+#: 序列号前缀 -> 机型。
+#:
+#: 来源分两类，可信度不同：
+#: * 社区逆向资料（老机型，已被大量实机验证）；
+#: * **真机实测**（A2L 的 ``26A``，见 docs/FIELD_NOTES.md）。
+#: 未实测到的新机型前缀不要凭猜测写进来 —— 猜错会让用户看到错误的机型与错误的视频通道，
+#: 而「未知机型」只是少显示一个名字，且走 auto 通道仍能出画面，代价小得多。
 SERIAL_PREFIX_MODEL: dict[str, PrinterModel] = {
     "00M": PrinterModel.X1C,
     "00W": PrinterModel.X1,
@@ -102,13 +134,17 @@ SERIAL_PREFIX_MODEL: dict[str, PrinterModel] = {
     "01P": PrinterModel.P1S,
     "030": PrinterModel.A1MINI,
     "039": PrinterModel.A1,
+    "26A": PrinterModel.A2L,  # 实测：26A00A000000000000
     "22E": PrinterModel.P2S,
     "093": PrinterModel.H2S,
     "094": PrinterModel.H2D,
     "20P": PrinterModel.X2D,
 }
 
-#: 型号名关键字（大小写不敏感）-> 机型，用于解析 SSDP 的 devmodel/devname 字段
+#: 型号名关键字（大小写不敏感）-> 机型，用于解析 SSDP 的 devmodel/devname 字段。
+#:
+#: **顺序即优先级**：更具体的型号必须排在更宽泛的前面（例如 ``x1carbon`` 在 ``x1`` 之前，
+#: ``a2l`` 在 ``a1`` 之前），否则会被短关键字抢先命中。
 MODEL_NAME_HINTS: list[tuple[str, PrinterModel]] = [
     ("x2d", PrinterModel.X2D),
     ("x1carbon", PrinterModel.X1C),
@@ -118,6 +154,7 @@ MODEL_NAME_HINTS: list[tuple[str, PrinterModel]] = [
     ("p2s", PrinterModel.P2S),
     ("p1s", PrinterModel.P1S),
     ("p1p", PrinterModel.P1P),
+    ("a2l", PrinterModel.A2L),
     ("a1mini", PrinterModel.A1MINI),
     ("a1 mini", PrinterModel.A1MINI),
     ("a1m", PrinterModel.A1MINI),

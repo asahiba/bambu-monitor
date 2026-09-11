@@ -234,7 +234,7 @@ class MainWindow(QMainWindow):
                 existing.info.access_code = info.access_code or existing.info.access_code
                 existing.info.name = info.name or existing.info.name
                 existing.info.model = (
-                    info.model if info.model.value != "未知机型" else existing.info.model
+                    info.model if info.model.is_known else existing.info.model
                 )
                 if autostart and not existing.running:
                     existing.start()

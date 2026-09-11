@@ -97,7 +97,7 @@ def _cmd_discover(config: AppConfig, timeout: float) -> int:
         else:
             existing.ip = info.ip or existing.ip
             existing.name = existing.name or info.name
-            existing.model = info.model if info.model.value != "未知机型" else existing.model
+            existing.model = info.model if info.model.is_known else existing.model
     config.save()
     print(f"共发现 {len(found)} 台，新增 {added} 台；已写入配置")
     print("提示：访问代码需要另外填写（--add-printer \"名称 IP 访问代码\"），否则只看得到进度、看不到画面")
