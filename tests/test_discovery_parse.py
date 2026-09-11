@@ -175,18 +175,28 @@ def test_自己发出的M_SEARCH被忽略():
         ({"nt": "urn:bambulab-com:device:3dprinter:1"}, "", "", "", True),
         # M-SEARCH 的应答用 ST（设备主动通知才用 NT），两者都要能识别
         ({"st": "urn:bambulab-com:device:3dprinter:1"}, "01P00A123456789", "", "", True),
-        # 只看 ST、且序列号不合法 —— 修复前这里会因为不检查 st 而被漏掉
+        # 只看 ST、序列号又不像序列号 —— 修复前这里会因为不检查 st 而被漏掉
         ({"st": "urn:bambulab-com:device:3dprinter:1"}, "short", "", "", True),
         ({"st": "urn:bambulab-com:device:3dprinter:1"}, "not-a-serial", "", "", True),
         ({"st": "urn:schemas-upnp-org:device:MediaRenderer:1"}, "short", "", "", False),
         ({}, "01p00a123456789", "", "", False),  # 小写序列号：不像拓竹
-        ({}, "01P00A12345678", "", "", False),  # 14 位：长度不对
+        ({}, "01P00A12345678", "", "", True),  # 14 位：老规则会拒，现按区间接受
+        # 实测 A2L 的序列号是 18 位（docs/FIELD_NOTES.md）：不能因为长度不等于 15 就漏判
+        ({}, "26A00A000000000000", "", "", True),
+        ({}, "26A00A0000000000000", "", "", True),  # 19 位，仍在区间内
+        ({}, "12345678901", "", "", False),  # 11 位：太短，不像序列号
+        ({}, "A" * 25, "", "", False),  # 25 位：太长
         ({}, "", "", "", False),
         ({}, "uuid:1234", "", "", False),
+        ({}, "AA:BB:CC:DD:EE:FF", "", "", False),  # MAC 地址：含冒号
     ],
 )
 def test_拓竹设备识别规则(headers, serial, model_name, name, expected):
-    """契约：优先看拓竹专有字段、NT/ST 通知类型，其次要求 15 位大写字母数字序列号。"""
+    """契约：优先看拓竹专有字段、NT/ST 通知类型；
+
+    兜底才看序列号，且长度取**区间**而非固定 15 位（实测 A2L 为 18 位），
+    只要求「大写字母数字」以排除 uuid:、MAC 之类。
+    """
     assert _looks_like_bambu(dict(headers), serial, model_name, name) is expected
 
 

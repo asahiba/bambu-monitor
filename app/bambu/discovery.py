@@ -41,6 +41,11 @@ SWEEP_INTERVAL = 4.0
 #: 接收缓冲区（并发回包较多时防止丢包）
 RCVBUF = 1 << 20
 
+#: 拓竹序列号的长度区间。老机型是 15 位（01P09A470310013 / 20P6BJ632400723），
+#: 但实测新机型 A2L 是 18 位（26A00A000000000000），因此不能写死单一长度。
+#: 该区间只用于「没有任何拓竹专有字段时」的兜底判定，用来排除 uuid:、MAC 之类。
+_SERIAL_LENGTH_RANGE = (12, 24)
+
 MSEARCH = (
     "M-SEARCH * HTTP/1.1\r\n"
     f"HOST: {SSDP_ADDR}:{SSDP_PORT}\r\n"
@@ -384,7 +389,11 @@ def parse_announcement(data: bytes, source_ip: str = "") -> Optional[PrinterInfo
 def _looks_like_bambu(
     headers: dict[str, str], serial: str, model_name: str = "", name: str = ""
 ) -> bool:
-    """过滤掉非拓竹设备：要求带拓竹专有字段或符合拓竹序列号格式。"""
+    """过滤掉非拓竹设备：要求带拓竹专有字段、拓竹 SSDP 标识、或像拓竹序列号的字符串。
+
+    注意最后那条是**兜底启发式**：拓竹序列号的长度并不固定（老机型 15 位、
+    实测 A2L 18 位），所以用区间而不是等值判断，详见 ``_SERIAL_LENGTH_RANGE``。
+    """
     if model_name or headers.get("devname.bambu.com") or headers.get("devversion.bambu.com"):
         return True
     # 拓竹设备的 SSDP 标识：`nt` 出现在设备主动发出的 NOTIFY 里，
@@ -394,8 +403,13 @@ def _looks_like_bambu(
         if "bambulab" in notification or "3dprinter" in notification:
             return True
     serial = (serial or "").strip()
-    # 拓竹序列号为 15 位大写字母数字，例如 01P09A470310013 / 20P6BJ632400723
-    return len(serial) == 15 and serial.isalnum() and serial.upper() == serial
+    # 拓竹序列号是大写字母数字，长度**并非固定 15 位**：
+    # 实测 A2L（序列号 26A00A000000000000）就是 18 位（见 docs/FIELD_NOTES.md）。
+    # 以前写死 15 位，会让「只带 ST 头、不带 dev* 头」的新机型被当成陌生设备漏掉，
+    # 所以这里放宽成一个区间，只用于排除明显不是序列号的字符串（uuid:、MAC 等）。
+    return _SERIAL_LENGTH_RANGE[0] <= len(serial) <= _SERIAL_LENGTH_RANGE[1] and (
+        serial.isalnum() and serial.upper() == serial
+    )
 
 
 class DiscoveryService:
