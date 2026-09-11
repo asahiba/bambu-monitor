@@ -9,9 +9,12 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from . import hms as hms_codes
+
+if TYPE_CHECKING:  # 只用于类型标注：运行时不导入，避免与 app.core 形成环
+    from ..core.capabilities import DeviceCapabilities
 
 
 class PrinterModel(str, Enum):
@@ -137,6 +140,51 @@ class PrinterModel(str, Enum):
             return "rtsp"
         # X1 / X1C / X1E 以及未知机型：先 RTSPS，失败再退 6000
         return "auto"
+
+    @property
+    def has_enclosure_light(self) -> bool:
+        """是否有可控的舱灯。
+
+        A1 / A1 mini 是开放式机型，**没有舱灯**；A2L 同为开放式（官方规格：
+        open-frame Cartesian）。其余带封闭腔体的机型都有 `chamber_light` 节点。
+        """
+        return self in (
+            PrinterModel.X1C,
+            PrinterModel.X1,
+            PrinterModel.X1E,
+            PrinterModel.X2D,
+            PrinterModel.P1P,
+            PrinterModel.P1S,
+            PrinterModel.P2S,
+            PrinterModel.H2D,
+            PrinterModel.H2D_PRO,
+            PrinterModel.H2S,
+            PrinterModel.H2C,
+        )
+
+    @property
+    def capabilities(self) -> "DeviceCapabilities":
+        """该机型「能做什么」。
+
+        界面与网页应当读 ``PrinterSession.capabilities``（它会把运行时观测叠加进来），
+        只有拿不到会话时才退而读这里的机型固有能力。
+        """
+        from ..core.capabilities import DeviceCapabilities
+
+        return DeviceCapabilities(
+            video_channel=self.video_channel,
+            has_camera=True,
+            has_chamber_sensor=self.has_chamber_sensor,
+            nozzle_count=2 if self in (PrinterModel.H2D, PrinterModel.H2D_PRO, PrinterModel.H2C, PrinterModel.X2D) else 1,
+            has_wifi_signal=True,
+            supports_ams=True,
+            supports_external_spool=True,
+            can_pause=True,
+            can_stop=True,
+            can_control_light=self.has_enclosure_light,
+            can_set_speed=True,
+            has_hms=True,
+        )
 
 
 #: 序列号前缀 -> 机型。

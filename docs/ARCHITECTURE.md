@@ -18,6 +18,10 @@
 │   app/headless.py        Linux/Docker 无界面：网页 + 管理命令  │
 │   run_app.py             PyInstaller 打包入口                 │
 ├──────────────────────────────────────────────────────────────┤
+│ 设备无关内核（不依赖任何厂商模块，也不依赖 Qt）                │
+│   app/core/__init__.py       DeviceSession 协议（界面依赖的契约）│
+│   app/core/capabilities.py   DeviceCapabilities：设备「能做什么」│
+├──────────────────────────────────────────────────────────────┤
 │ 界面层（只有它依赖 Qt Widgets）                               │
 │   app/ui/main_window.py   监控墙、工具栏、布局、轮巡、配置     │
 │   app/ui/tile.py          单路画面 + 状态条（进度/温度/耗材）  │
@@ -53,6 +57,25 @@
 │   app/sim/simulator.py 虚拟打印机（UDP 响应 + MQTT broker + 视频）│
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### 2.0 关于「按能力而不是按机型」
+
+`app/core/capabilities.py` 的 `DeviceCapabilities` 解决一个具体的历史问题：
+界面与网页里曾有三处**重复的机型分支**（`ui/tile.py`、`web/server.py`、`main.py`
+各写了一遍 `info.model.has_chamber_sensor`），以及「只看遥测在线就显示灯按钮」
+（导致开放机型 A1/A1 mini/A2L 得到一个按不动的灯按钮）。
+
+现在的规则是：
+
+* **要功能** → 问 `session.capabilities`（例如 `has_chamber_sensor`、`can_control_light`）；
+* **要读数** → 读 `session.snapshot()`（例如 `chamber_temper`）；
+* **不要**直接读 `session.info.model.*` 来判断显示什么。
+
+`app/core/__init__.py` 里的 `DeviceSession` 是结构化协议（不是基类），
+把「界面与网页实际依赖会话的哪些成员」写成可检查的契约，由
+`tests/test_contracts.py` 与 `tests/test_capabilities.py` 双重锚定。
+接入第三方设备族时，只要新适配器满足该协议、并按自己的能力表回答上述问题，
+**界面与网页不需要改动**。
 
 **关键约束**：协议层不得 `import` 任何 Qt。`app/web/server.py` 只在转码时**延迟
 import** PySide6，因此无 Qt 的 Docker 也能跑（代价是转码失败，见 KNOWN_ISSUES）。

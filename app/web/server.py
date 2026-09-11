@@ -303,6 +303,7 @@ class _Handler(BaseHTTPRequestHandler):
                 }
 
             active = status.active_tray
+            caps = session.capabilities
             items.append(
                 {
                     "index": len(items),
@@ -319,6 +320,16 @@ class _Handler(BaseHTTPRequestHandler):
                     # 新机型固件会要求 MQTT 命令签名，未开 Developer Mode 时控制会被静默忽略；
                     # 前端据此解释「为什么按钮是灰的」（只增字段，不改已有键）
                     "controls_blocked_reason": getattr(session, "controls_blocked_reason", ""),
+                    # 能力声明：让前端按「能力」而不是「机型」决定显示什么，
+                    # 这样接入第三方设备族时前端不必改动（只增字段）
+                    "capabilities": {
+                        "chamber": caps.has_chamber_sensor,
+                        "light": caps.can_control_light,
+                        "wifi": caps.has_wifi_signal,
+                        "camera": caps.has_camera,
+                        "nozzles": caps.nozzle_count,
+                        "hms": caps.has_hms,
+                    },
                     "state_text": status.state_text if (mqtt or status.gcode_state) else "离线",
                     "progress": max(0, min(100, status.progress)),
                     "remaining_text": status.remaining_text,
@@ -330,7 +341,8 @@ class _Handler(BaseHTTPRequestHandler):
                     "bed_target": f"{status.bed_target_temper:.0f}",
                     "chamber": (
                         f"{status.chamber_temper:.0f}"
-                        if status.chamber_temper is not None and info.model.has_chamber_sensor
+                        if status.chamber_temper is not None
+                        and session.capabilities.has_chamber_sensor
                         else ""
                     ),
                     "wifi": status.wifi_signal,

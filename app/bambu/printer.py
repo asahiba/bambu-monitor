@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .camera import CameraStream
 from .models import PrinterInfo, PrinterStatus
 from .mqtt_worker import MqttWorker
+
+if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避免与 app.core 形成环
+    from ..core.capabilities import DeviceCapabilities
 
 
 class PrinterSession:
@@ -390,6 +393,24 @@ class PrinterSession:
                 stream.set_max_fps(fps)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------ 能力
+    @property
+    def capabilities(self) -> "DeviceCapabilities":
+        """这台设备「能做什么」（机型固有能力 + 运行时观测）。
+
+        界面与网页一律读这个，**不要**再去读 `info.model.has_chamber_sensor` 这类
+        机型属性——那样会把「按能力分支」退化成「按机型分支」，接入第三方设备族时
+        每一处都要改。运行时叠加的部分：
+
+        * `nozzle_count`：H2D 这类双喷嘴机型只有在上报第二路温度时才真的是 2。
+        """
+        from ..core.capabilities import DeviceCapabilities  # noqa: F401  （运行时按需导入）
+
+        base = self.info.model.capabilities
+        if self.status.nozzle_temper_2 is not None:
+            return base.merged(nozzle_count=max(2, base.nozzle_count))
+        return base
 
     # ------------------------------------------------------------------ 控制
     @property

@@ -2,16 +2,17 @@
 
 ## 为什么需要它
 
-现在的界面与网页里到处是这类判断：
+改造前，界面与网页里到处是这类判断（同一段表达式在三处重复）：
 
 * 「这台机器有没有腔温传感器」→ 决定要不要显示仓温
+  （`ui/tile.py`、`web/server.py`、`main.py` 各写了一遍 `info.model.has_chamber_sensor`）
 * 「走 6000 端口还是 RTSPS」→ 决定视频通道
 * 「有没有 AMS」→ 决定要不要显示耗材行
 
 其中一部分是**机型固有属性**（腔温、RTSPS），一部分是**运行时才知道的**
 （是否挂了 AMS、当前是单喷嘴还是双喷嘴）。把它们统一成 ``DeviceCapabilities``
-之后，界面只问能力，不问品牌，将来接入第三方设备族（Klipper/Moonraker、
-OctoPrint、Snapmaker 等）时，UI 与网页**不需要任何改动**。
+之后，界面只问能力、不问品牌，接入第三方设备族（Klipper/Moonraker、
+OctoPrint、Snapmaker 等）时 UI 与网页**不需要任何改动**。
 
 ## 与 PrinterStatus 的分工
 
@@ -20,13 +21,23 @@ OctoPrint、Snapmaker 等）时，UI 与网页**不需要任何改动**。
 
 例如 ``capabilities.has_chamber_sensor`` 表示「这机器有腔温探头」，
 而 ``status.chamber_temper`` 是当前温度值；两者都为真才显示仓温。
+
+## 层次
+
+``DeviceCapabilities`` 放在 `app/core/` 而不是 `app/bambu/`：它是**设备无关**的契约，
+第三方适配器（`app/adapters/*`）与界面都依赖它，不应该让它们反向依赖拓竹协议包。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-#: 视频通道标识
+#: 视频通道标识。
+#:
+#: ⚠️ 这三个取值源自拓竹的协议名（6000 端口 / RTSPS 322 / 自动），是**拓竹族**的
+#: 通道命名。接入第三方设备族时不要往这里塞新通道名，而应当在适配器里把各自的通道
+#: （MJPEG、HTTP 快照、WebRTC…）映射到自己的 ``video_channel`` 值域；
+#: 界面只把它当字符串展示（``video_backend``）。
 VIDEO_TCP6000 = "tcp6000"
 VIDEO_RTSP = "rtsp"
 VIDEO_AUTO = "auto"

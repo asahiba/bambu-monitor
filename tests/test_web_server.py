@@ -114,6 +114,9 @@ class FakeSession:
             access_code="12345678",
         )
         self.can_control = can_control
+        # 能力声明：真实会话由「机型固有能力 + 运行时观测」得出，这里取该机型的固有能力
+        self.capabilities = self.info.model.capabilities
+        self.controls_blocked_reason = ""
         self.video_backend = "TCP6000"
         self.camera_fps = 12.5
         self.mqtt_auth_error = False

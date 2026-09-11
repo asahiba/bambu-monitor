@@ -118,9 +118,14 @@ def ui_selftest_report(window) -> str:
         )
         active = status.active_tray.label if status.active_tray else "无"
         lines.append(f"    耗材: AMS {len(status.ams_trays)} 槽 [{trays}] 外挂={external} 当前={active}")
+        caps = session.capabilities
+        chamber_text = (
+            f"{status.chamber_temper:.1f}℃"
+            if (status.chamber_temper is not None and caps.has_chamber_sensor)
+            else ("无传感器" if not caps.has_chamber_sensor else "--")
+        )
         lines.append(
-            f"    环境: 仓温="
-            f"{f'{status.chamber_temper:.1f}℃' if (status.chamber_temper is not None and session.info.model.has_chamber_sensor) else ('无传感器' if not session.info.model.has_chamber_sensor else '--')}"
+            f"    环境: 仓温={chamber_text}"
             f" WiFi={status.wifi_signal or '--'}"
             f"({status.wifi_level}格) 预计完成={status.finish_time_text}"
             f" 舱灯={'开' if status.light_on else ('关' if status.light_on is False else '未知')}"

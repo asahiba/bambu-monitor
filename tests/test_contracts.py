@@ -172,6 +172,10 @@ def _fake_session():
                 access_code="12345678",
                 tile_span=2,
             )
+            # 能力声明：真实会话由机型固有能力 + 运行时观测得出，
+            # 假会话直接给出等价的一组（网页载荷会用到它）
+            self.capabilities = PrinterModel.P1S.capabilities
+            self.controls_blocked_reason = ""
             self.status = PrinterStatus(
                 mqtt_online=True,
                 camera_online=True,
@@ -227,6 +231,7 @@ PRINTER_PAYLOAD_KEYS = frozenset(
         "camera_online",
         "can_control",
         "controls_blocked_reason",
+        "capabilities",
         "state_text",
         "progress",
         "remaining_text",

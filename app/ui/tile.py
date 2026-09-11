@@ -373,7 +373,7 @@ class CameraTile(QFrame):
             f"热床 <b style='color:{accent}'>{status.bed_temper:.0f}</b>"
             f"<span style='color:{dim}'>/{status.bed_target_temper:.0f}℃</span>",
         ]
-        if status.chamber_temper is not None and self.session.info.model.has_chamber_sensor:
+        if status.chamber_temper is not None and self.session.capabilities.has_chamber_sensor:
             parts.append(f"仓温 {status.chamber_temper:.0f}℃")
         if status.total_layer_num > 0:
             parts.append(f"层 {status.layer_num}/{status.total_layer_num}")
@@ -449,8 +449,11 @@ class CameraTile(QFrame):
         self.pause_button.setEnabled(online and printing)
         self.stop_button.setVisible(printing and gcode != "FINISH")
         self.stop_button.setEnabled(online and printing)
-        self.light_button.setVisible(status.light_on is not None or online)
-        self.light_button.setEnabled(online)
+        # 灯按钮按**能力**决定显隐：A1 / A1 mini / A2L 是开放机型、没有舱灯，
+        # 以前只看「遥测在线」会给它们显示一个按不动的灯按钮
+        caps = self.session.capabilities
+        self.light_button.setVisible(caps.can_control_light)
+        self.light_button.setEnabled(caps.can_control_light and online)
         self._apply_control_block_hint()
         self._apply_button_labels(paused)
 
