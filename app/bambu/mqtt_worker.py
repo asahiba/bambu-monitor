@@ -17,6 +17,7 @@ import time
 from typing import Any, Callable, Optional
 
 from . import tlsutil
+from .ports import MQTT_PORT
 
 LOGGER = logging.getLogger("bambu-monitor.mqtt")
 
@@ -126,10 +127,10 @@ class MqttWorker:
         self._thread.start()
 
     def _start_blocking(self) -> None:
-        self._set_state(self.STATE_CONNECTING, "正在连接 MQTT 8883")
+        self._set_state(self.STATE_CONNECTING, f"正在连接 MQTT {MQTT_PORT}")
         # 先探测该打印机可用的 TLS 参数（证书链 + 安全级别），再交给 paho
         context, verified = tlsutil.select_context(
-            self.host, 8883, self.serial or None, timeout=4.0
+            self.host, MQTT_PORT, self.serial or None, timeout=4.0
         )
         if self._stop_requested:
             return
@@ -154,7 +155,7 @@ class MqttWorker:
                 pass
             return
         try:
-            client.connect_async(self.host, 8883, keepalive=60)
+            client.connect_async(self.host, MQTT_PORT, keepalive=60)
             client.loop_start()
         except (OSError, ValueError) as exc:
             self._set_state(self.STATE_OFFLINE, f"MQTT 连接失败：{exc}")

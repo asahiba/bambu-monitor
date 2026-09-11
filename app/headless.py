@@ -23,6 +23,7 @@ import threading
 import time
 
 from .bambu.models import PrinterInfo, detect_model
+from .bambu.ports import DEFAULT_ACCESS_CODE
 from .bambu.printer import PrinterSession
 from .config import AppConfig, config_path
 from .util import secret
@@ -58,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", default="", help="目标打印机 IP 或名称（留空表示全部）")
     parser.add_argument("--yes", action="store_true", help="stop 指令必须显式加 --yes 才会执行")
     parser.add_argument("--sim", type=int, default=0, metavar="N", help="启动 N 台模拟打印机（演示/自测）")
-    parser.add_argument("--sim-code", default="12345678", help="模拟打印机的访问代码")
+    parser.add_argument("--sim-code", default=DEFAULT_ACCESS_CODE, help="模拟打印机的访问代码")
     parser.add_argument("--status-interval", type=float, default=10.0, help="终端状态行输出间隔（0 表示关闭）")
     parser.add_argument("--timeout", type=float, default=20.0, help="单轮自动搜索时长")
     return parser

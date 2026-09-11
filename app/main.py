@@ -10,6 +10,7 @@ import sys
 import threading
 
 from . import __version__
+from .bambu.ports import DEFAULT_ACCESS_CODE
 
 LOGGER = logging.getLogger("bambu-monitor")
 
@@ -59,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--core-test", action="store_true", help="无界面端到端自检（内置模拟器）")
     parser.add_argument("--sim", action="store_true", help="随软件启动 4 台虚拟打印机（演示/测试）")
     parser.add_argument("--sim-count", type=int, default=4, help="虚拟打印机数量")
-    parser.add_argument("--code", default="12345678", help="虚拟打印机的访问代码")
+    parser.add_argument("--code", default=DEFAULT_ACCESS_CODE, help="虚拟打印机的访问代码")
     parser.add_argument("--screenshot", metavar="PATH", help="启动后自动截图并退出（自检用）")
     parser.add_argument("--exit-after", type=float, default=10.0, help="配合 --screenshot 的等待秒数")
     parser.add_argument(

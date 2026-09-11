@@ -15,6 +15,8 @@ import time
 from typing import Callable, Optional
 from urllib.parse import quote
 
+from .ports import RTSP_PORT
+
 # 自签证书 + 强制 TCP 传输，必须在导入 cv2 之前设置
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|tls_verify;0")
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
@@ -70,7 +72,7 @@ class RtspStream(threading.Thread):
 
     def url(self, scheme: str = "rtsps", path: str = "/streaming/live/1") -> str:
         code = quote(self.access_code, safe="")
-        return f"{scheme}://bblp:{code}@{self.host}:322{path}"
+        return f"{scheme}://bblp:{code}@{self.host}:{RTSP_PORT}{path}"
 
     def set_target_size(self, width: int, height: int) -> None:
         """按画面控件的尺寸编码，避免为看不见的像素白白消耗 CPU。"""
@@ -145,7 +147,7 @@ class RtspStream(threading.Thread):
         while not self._stop_event.is_set():
             path = self._paths[self._path_index % len(self._paths)]
             self._set_state(
-                self.STATE_CONNECTING, f"正在连接 RTSPS {self.host}:322{path}"
+                self.STATE_CONNECTING, f"正在连接 RTSPS {self.host}:{RTSP_PORT}{path}"
             )
             capture = None
             try:

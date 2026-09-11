@@ -11,10 +11,11 @@ import sys
 import time
 
 from .bambu.discovery import discover
+from .bambu.ports import DEFAULT_ACCESS_CODE
 from .bambu.probe import probe_printer
 from .sim.simulator import SIM_DIR, start_simulator, stop_simulator
 
-ACCESS_CODE = "12345678"
+ACCESS_CODE = DEFAULT_ACCESS_CODE
 
 
 def run_core_test() -> int:

@@ -40,6 +40,7 @@ import time
 from typing import Callable, Optional
 
 from . import tlsutil
+from .ports import CAMERA_PORT
 
 AUTH_USERNAME = "bblp"
 AUTH_TYPE = 0x3000
@@ -78,7 +79,7 @@ class CameraStream(threading.Thread):
         host: str,
         access_code: str,
         serial: str = "",
-        port: int = 6000,
+        port: int = CAMERA_PORT,
         on_frame: Optional[Callable[[bytes], None]] = None,
         on_state: Optional[Callable[[str, str], None]] = None,
         name: str = "",

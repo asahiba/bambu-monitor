@@ -317,6 +317,7 @@ bambu-monitor/
 │  ├─ selftest.py                无界面端到端自检
 │  ├─ headless.py                Linux/Docker 无界面服务模式
 │  ├─ bambu/                     协议层（不依赖 GUI，可单独测试）
+│  │  ├─ ports.py                端口与共享常量（8883 / 6000 / 322）
 │  │  ├─ discovery.py            自动搜索（SSDP + 2021 广播）
 │  │  ├─ mqtt_worker.py          MQTT over TLS 遥测
 │  │  ├─ camera.py               6000 端口 JPEG 流

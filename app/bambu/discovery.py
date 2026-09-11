@@ -289,19 +289,6 @@ def local_interfaces() -> list[LocalInterface]:
     return sorted(interfaces, key=sort_key)
 
 
-def local_ipv4_addresses() -> list[str]:
-    """兼容旧调用：只返回地址列表。"""
-    return [iface.ip for iface in local_interfaces()]
-
-
-def _broadcast_addresses() -> list[str]:
-    """有限广播 + 各网卡定向广播。"""
-    targets = {"255.255.255.255"}
-    for iface in local_interfaces():
-        targets.add(iface.broadcast)
-    return sorted(targets)
-
-
 def _new_socket(bind_ip: str = "", bind_port: int = 0, multicast_if: str = "") -> Optional[socket.socket]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     for option, value in (

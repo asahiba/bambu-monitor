@@ -26,8 +26,9 @@ import threading
 import time
 from typing import Optional
 
+from ..bambu.ports import CAMERA_PORT, DEFAULT_ACCESS_CODE, MQTT_PORT, RTSP_PORT
+
 SIM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".sim")
-DEFAULT_ACCESS_CODE = "12345678"
 
 SIM_MODELS = [
     # 序列号必须是 15 位大写字母数字（真机格式，见 discovery._looks_like_bambu）：
@@ -298,11 +299,11 @@ class MiniMqttBroker(threading.Thread):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            server.bind((self.printer.ip, 8883))
+            server.bind((self.printer.ip, MQTT_PORT))
             server.listen(4)
             server.settimeout(0.5)
         except OSError as exc:
-            print(f"[sim] MQTT 端口绑定失败 {self.printer.ip}:8883 -> {exc}")
+            print(f"[sim] MQTT 端口绑定失败 {self.printer.ip}:{MQTT_PORT} -> {exc}")
             return
         self._server = server
         while not self._stop.is_set():
@@ -520,7 +521,7 @@ class FakePrinter:
                 "ipcam": {
                     "ipcam_dev": "1",
                     "resolution": "1080p",
-                    "rtsp_url": f"rtsps://{self.ip}:322/streaming/live/1",
+                    "rtsp_url": f"rtsps://{self.ip}:{RTSP_PORT}/streaming/live/1",
                 },
             }
         }
@@ -570,11 +571,11 @@ class FakePrinter:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            server.bind((self.ip, 6000))
+            server.bind((self.ip, CAMERA_PORT))
             server.listen(4)
             server.settimeout(0.5)
         except OSError as exc:
-            print(f"[sim] 摄像头端口绑定失败 {self.ip}:6000 -> {exc}")
+            print(f"[sim] 摄像头端口绑定失败 {self.ip}:{CAMERA_PORT} -> {exc}")
             return
         context = make_server_context()
         while not self._stop.is_set():

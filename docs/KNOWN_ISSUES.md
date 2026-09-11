@@ -122,21 +122,29 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 | --- | --- | --- |
 | 1 | ~~`app/bambu/__init__.py` 的包级 re-export 无人使用~~ **已修**：移除 re-export 并写明理由，`from app.bambu import tlsutil` 不再连带拉起 paho | `app/bambu/__init__.py` |
 | 2 | ~~`app/web/__init__.py` 的 `from .server import WebServer` 零调用方~~ **已修**：同样移除 | `app/web/__init__.py` |
-| 3 | 死代码：`secret.is_encrypted()`、`discovery.local_ipv4_addresses()`、`discovery._broadcast_addresses()`、`discovery.merge_devices()` 全文无调用（**注**：`merge_devices` 其实被 `tests/test_discovery_parse.py` 覆盖了，可考虑保留并去掉「死代码」标签；其余三个确认无用） | `app/util/secret.py:73`、`app/bambu/discovery.py:279,284,632` |
+| 3 | 死代码：`secret.is_encrypted()`（仅被测试引用）、`discovery.local_ipv4_addresses()`、`discovery._broadcast_addresses()` 全文无调用。**后两个已删除**；`is_encrypted()` 保留（它是 `dpapi:` 前缀判断的反向工具，且有测试）。`discovery.merge_devices()` 有完整测试覆盖且语义有用，已从「死代码」改为「待接入」——理想是让搜索对话框的累积逻辑改用它，避免两套去重实现 | `app/util/secret.py` |
 | 4 | 生产代码里唯一的 `assert`（`python -O` 下会静默失效） | `app/bambu/camera.py:59` |
-| 5 | 端口 8883/6000/322 硬编码散落 6 个文件；各超时（6/25/30/4/20/15 秒…）没有统一常量表；默认访问代码 `"12345678"` 散落 9 处 | 详见下表 |
+| 5 | ~~端口硬编码散落~~ **已修**：新增 `app/bambu/ports.py` 集中 `MQTT_PORT`/`CAMERA_PORT`/`RTSP_PORT`/`DEFAULT_ACCESS_CODE`，`camera.py`、`mqtt_worker.py`、`rtsp.py`、`simulator.py`、`diagnose_dialog.py`、`main.py`、`headless.py`、`selftest.py` 全部改为引用常量。**超时常量尚未收敛**（见下方「仍待处理」） | `app/bambu/ports.py` |
 | 6 | `tools/layout_check.py` 已被 `tools/layout_fit_check.py` 取代（前者无退出码、无字体度量）。**已加 `.. deprecated::` 说明**，未删除（保留作对照） | `tools/layout_check.py` |
-| 7 | `tools/diagnose.py` 与 `app/ui/diagnose_dialog.py` 是同一套诊断流程的两份实现；`tools/rtsp_describe.py` 与 `diagnose_dialog.py` 重复实现 RTSP DESCRIBE | `tools/diagnose.py:43-96`、`app/ui/diagnose_dialog.py:52-150` |
+| 7 | `tools/diagnose.py` 与 `app/ui/diagnose_dialog.py` 是同一套诊断流程的两份实现；`tools/rtsp_describe.py` 与 `diagnose_dialog.py` 重复实现 RTSP DESCRIBE。**未合并**：合并需要引入一个共用的诊断模块并同时改动 CLI 与 GUI，属于真正的重构，建议单独排期 | `tools/diagnose.py:43-96`、`app/ui/diagnose_dialog.py:52-150` |
 | 8 | ~~`tools/README.md` 只登记 25 个脚本~~ **已修**：重新按用途分类登记全部 33 个，并标注已过时脚本与「不是可执行脚本」的 `_common.py` | `tools/README.md` |
 | 9 | ~~导出配置默认目录用 `os.path.expanduser("~")`~~ **已修**：改用 `QStandardPaths.DocumentsLocation`，与抓拍保持一致 | `app/ui/main_window.py` |
 | 10 | `import_from()` 只恢复 printers/columns/max_fps/refresh_ms/web_port/web_token/web_fps/web_max_width，**不恢复** `last_timeout` / `show_timestamp` / `auto_connect` / `web_enabled` / `window_geometry`；另外 `PrinterInfo.discovered` 会被 `to_json()` 写出但 `_parse()` 从不读取（往返后丢成 False） | `app/config.py` |
 
-硬编码项明细（建议收敛成常量模块，例如 `app/bambu/ports.py`）：
+硬编码项明细（**端口与默认访问代码已收敛到 `app/bambu/ports.py`**，以下是尚未收敛的部分）：
 
-* **8883**：`mqtt_worker.py:127,143`、`probe.py:38,90,123`、`diagnose_dialog.py:52,59,86`、`simulator.py:299,303`
-* **6000**：`camera.py:81`、`probe.py:39,130`、`diagnose_dialog.py:52,59,67`、`simulator.py:571,575`
-* **322**：`rtsp.py:73,148`、`diagnose_dialog.py:52,59,79,112,120`、`simulator.py:521`
-* **`"12345678"`**：`app/main.py:62`、`app/headless.py:61`、`app/sim/simulator.py:30`、`app/selftest.py:17`、`tools/control_check.py:27`、`tools/control_cli_check.py:30`、`tools/debug_mqtt_worker.py:17`、`tools/web_check.py:28`、`tools/raw_mqtt_check.py:13`、`tools/headless_check.py:48`
+* **各超时/间隔没有统一常量表**（只有 `tlsutil.py:83 HANDSHAKE_TIMEOUT=15.0` 与
+  `web/server.py:28-38` 是集中的）：`camera.py:169`(30.0)`:202`(6.0)`:223`(25.0)`:240`(30.0)`；
+  `mqtt_worker.py:127`(4.0)；`rtsp.py:38 open_timeout_ms=6000`；`probe.py:131` `min(12.0, timeout+4)`；
+  `diagnose_dialog.py:61`(4.0)`:91`(10.0)`:104`(3.0)`:112`(5.0)`；`add_dialog.py:50`(10.0)`；
+  `printer.py:94`(15.0)`:239`(4.0)`；`discovery.py:457`(1.5)`:463`(0.1)`:624,632`(0.05)`；
+  `web/server.py:36 PASSTHROUGH_BYTES=90_000`、`:38 CLIENT_TTL=6.0`、`:440`(0.02)`:546`(0.05)`。
+  对比：`config.py:69 last_timeout` 可配（15–60s），同类 MQTT/摄像头超时却不可配。
+  建议参照 `ports.py` 再建一个 `app/bambu/timeouts.py`。
+* **`time.sleep` 硬编码**：`headless.py:157`(0.3)`:182`(2.0)`、`printer.py:148`(0.2)`:239`(4.0)`、
+  `probe.py:108`(0.2)、`selftest.py:31`(1.0)、`simulator.py` 若干。
+* **监听地址**：`headless.py:41` 与 `web/server.py` 的 `--host` 默认 `0.0.0.0`（有意为之，
+  但值得在文档里写明「会监听所有网卡」）。
 
 ### P1：平台与安全
 

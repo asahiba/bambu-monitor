@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from ..bambu import tlsutil
 from ..bambu.camera import CameraStream
 from ..bambu.models import PrinterInfo
+from ..bambu.ports import CAMERA_PORT, MQTT_PORT, RTSP_PORT
 from ..bambu.probe import probe_printer
 from . import theme
 
@@ -49,14 +50,18 @@ class _DiagThread(QThread):
 
         # 1. 端口可达性
         self._emit("① 端口连通性")
-        for port, name in ((8883, "MQTT 遥测"), (6000, "JPEG 画面"), (322, "RTSPS 画面")):
+        for port, name in (
+            (MQTT_PORT, "MQTT 遥测"),
+            (CAMERA_PORT, "JPEG 画面"),
+            (RTSP_PORT, "RTSPS 画面"),
+        ):
             ok = self._tcp(port)
             self._emit(f"   {port:>5} {name}: {'可连接 ✓' if ok else '不可达 ✗'}")
 
         # 2. TLS 参数
         self._emit("")
         self._emit("② TLS 参数（证书链 + 安全级别）")
-        for port in (8883, 6000, 322):
+        for port in (MQTT_PORT, CAMERA_PORT, RTSP_PORT):
             try:
                 sock, verified = tlsutil.connect_tls(info.ip, port, timeout=4.0)
                 sock.close()
@@ -109,7 +114,7 @@ class _DiagThread(QThread):
     def _rtsp_describe(self) -> None:
         try:
             tls, verified = tlsutil.connect_tls(
-                self.info.ip, 322, timeout=5.0, server_hostname=self.info.ip
+                self.info.ip, RTSP_PORT, timeout=5.0, server_hostname=self.info.ip
             )
         except Exception as exc:  # noqa: BLE001
             self._emit(f"   TLS 连接失败 ✗  {exc}")
@@ -117,7 +122,7 @@ class _DiagThread(QThread):
         try:
             auth = base64.b64encode(f"bblp:{self.info.access_code}".encode()).decode()
             request = (
-                f"DESCRIBE rtsps://{self.info.ip}:322/streaming/live/1 RTSP/1.0\r\n"
+                f"DESCRIBE rtsps://{self.info.ip}:{RTSP_PORT}/streaming/live/1 RTSP/1.0\r\n"
                 "CSeq: 1\r\n"
                 "Accept: application/sdp\r\n"
                 f"Authorization: Basic {auth}\r\n\r\n"

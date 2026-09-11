@@ -36,6 +36,7 @@
 │   app/bambu/printer.py  PrinterSession：遥测 + 视频聚合成一台  │
 ├──────────────────────────────────────────────────────────────┤
 │ 协议层（不含 GUI，可单独测试/复用）                            │
+│   app/bambu/ports.py       端口与共享常量（8883/6000/322 等）  │
 │   app/bambu/discovery.py   SSDP + 2021 广播自动搜索、网卡枚举  │
 │   app/bambu/mqtt_worker.py MQTT over TLS 8883 遥测与控制下发   │
 │   app/bambu/camera.py      TCP 6000 帧流（TLS + 80 字节鉴权）  │
