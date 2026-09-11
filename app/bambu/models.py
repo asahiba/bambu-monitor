@@ -127,12 +127,25 @@ MODEL_NAME_HINTS: list[tuple[str, PrinterModel]] = [
 ]
 
 
+def _normalize_model_text(text: str) -> str:
+    """把机型描述压成便于子串匹配的形式：去掉空白与 ``-``/``_``、转小写。
+
+    真机的 SSDP 字段经常带空格（例如 ``Bambu Lab X1 Carbon``），
+    只匹配 ``x1carbon`` 会漏掉它，进而退化成匹配到 ``x1``（把 X1C 认成 X1）。
+    """
+    return "".join(text.strip().lower().split()).replace("-", "").replace("_", "")
+
+
 def detect_model(serial: str = "", model_name: str = "") -> PrinterModel:
-    """综合 SSDP 型号名与序列号前缀推断机型。"""
-    text = (model_name or "").strip().lower().replace("-", "").replace("_", "")
+    """综合 SSDP 型号名与序列号前缀推断机型。
+
+    型号名匹配时会忽略空格与 ``-``/``_``，因此 ``X1 Carbon``、``X1-Carbon``、
+    ``x1carbon`` 都能识别为 X1C（关键字表的顺序保证先匹配更具体的型号）。
+    """
+    text = _normalize_model_text(model_name)
     if text:
         for keyword, model in MODEL_NAME_HINTS:
-            if keyword in text:
+            if _normalize_model_text(keyword) in text:
                 return model
     sn = (serial or "").strip().upper()
     if len(sn) >= 3:

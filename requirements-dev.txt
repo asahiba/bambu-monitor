@@ -1,0 +1,11 @@
+# 开发/测试依赖（运行软件本身只需要 requirements.txt）
+#
+# 安装：
+#   .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+-r requirements.txt
+
+# 测试框架
+pytest>=8.0
+
+# 静态检查（未使用导入 / 未定义名字 / import 排序）
+ruff>=0.6

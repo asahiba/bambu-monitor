@@ -400,9 +400,12 @@ def _looks_like_bambu(
     """过滤掉非拓竹设备：要求带拓竹专有字段或符合拓竹序列号格式。"""
     if model_name or headers.get("devname.bambu.com") or headers.get("devversion.bambu.com"):
         return True
-    notification = headers.get("nt", "").lower()
-    if "bambulab" in notification or "3dprinter" in notification:
-        return True
+    # 拓竹设备的 SSDP 标识：`nt` 出现在设备主动发出的 NOTIFY 里，
+    # `st` 出现在对 M-SEARCH 的应答里（两者都要看，否则只带 ST 的回包会被漏判）
+    for header in ("nt", "st"):
+        notification = headers.get(header, "").lower()
+        if "bambulab" in notification or "3dprinter" in notification:
+            return True
     serial = (serial or "").strip()
     # 拓竹序列号为 15 位大写字母数字，例如 01P09A470310013 / 20P6BJ632400723
     return len(serial) == 15 and serial.isalnum() and serial.upper() == serial

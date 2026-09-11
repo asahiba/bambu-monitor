@@ -1,13 +1,31 @@
-* text=auto
+# 仓库里的文本文件一律以 LF 存储、检出时也用 LF。
+#
+# 为什么不按平台自动转换：本项目同时要有 Windows 桌面版和 Linux/Docker 服务版，
+# shell 脚本一旦带上 CRLF，在 Linux 上会报 "bad interpreter: /bin/bash^M"。
+# 全仓库统一 LF 可以让 Windows 上的脚本、Python、配置文件与 Linux 完全一致，
+# 避免「在 Windows 改一行、到 Linux 就跑不起来」这类问题。
+# 代价：用记事本打开批处理可能显示成一行（推荐 VS Code / Notepad++）。
+* text=auto eol=lf
 
-# Shell 脚本必须是 LF，否则在 Linux 上会报 "bad interpreter"
+# 明确要求 LF 的文件（即使有人改了全局配置也保持 LF）
 *.sh text eol=lf
+*.bat text eol=lf
+*.cmd text eol=lf
 Dockerfile text eol=lf
 *.service text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.py text eol=lf
 
-# 二进制
+# 二进制：不要做任何行尾或编码转换
 *.png binary
 *.ico binary
 *.exe binary
+*.pem binary
+*.gz binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
+
+# Git 的 diff 展示：把压缩数据当二进制处理，避免 diff 卡住
+*.gz -diff

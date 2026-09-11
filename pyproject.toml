@@ -1,0 +1,40 @@
+# 开发工具配置：pytest（测试）与 ruff（静态检查）
+#
+# 本项目不是可安装的包（没有打包元数据），这个文件只用来集中存放工具配置，
+# 因此不声明 [project] / [build-system]。运行方式见 docs/DEVELOPING.md。
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# tests/local_config.py 提供「把配置目录指到临时目录」的夹具；
+# 它通过 tests/conftest.py 里的 `pytest_plugins` 注册，任何测试都能直接用夹具名。
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: 端到端慢测试（内置模拟器 + 真实端口），需要 BAMBU_RUN_SLOW=1 才运行",
+]
+# 不要因为收集到 app/、tools/ 里的模块而误报
+norecursedirs = [".venv", "dist", "build", ".git", ".sim", "tools"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+exclude = [".venv", "dist", "build", ".sim", "app/web/icons.py"]
+
+[tool.ruff.lint]
+# 只开启低噪音、高价值的规则：语法错误、未定义名字、未使用导入、import 排序
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = [
+    # 项目风格：允许一行里写多个语句（少量紧凑写法），以及 lambda 赋值等
+    "E731",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tools/ 是一次性排查脚本：需要在 import app.* 之前先 sys.path.insert，
+# 因此 E402 是刻意的；也允许未使用的导入/变量
+"tools/*" = ["E402", "F401", "F841"]
+# 测试需要在 import PySide6 之前设置 QT_QPA_PLATFORM=offscreen，同样是刻意为之
+"tests/*" = ["E402", "F401", "F841"]
+# 模拟器里有较长的内联数据与测试用常量
+"app/sim/simulator.py" = ["E501"]

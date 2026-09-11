@@ -9,6 +9,12 @@ _*.log
 _*.png
 _*.txt
 
+# 测试与静态检查的缓存
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # 编辑器
 .vscode/
 .idea/

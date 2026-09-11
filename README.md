@@ -306,12 +306,16 @@ python -m app.headless --control stop   --target 192.168.31.110 --yes   # 必须
 ```
 bambu-monitor/
 ├─ run.bat / demo.bat / sim.bat / selftest.bat / build_exe.bat
-├─ requirements.txt
+├─ test.bat                      跑自动化测试（Windows）
+├─ requirements.txt              运行依赖
+├─ requirements-dev.txt          开发依赖（pytest / ruff）
+├─ pyproject.toml                pytest 与 ruff 配置
 ├─ run_app.py                    打包与开发入口
 ├─ app/
 │  ├─ main.py                    命令行入口与演示模式
 │  ├─ config.py                  配置读写（DPAPI 加密访问代码）
 │  ├─ selftest.py                无界面端到端自检
+│  ├─ headless.py                Linux/Docker 无界面服务模式
 │  ├─ bambu/                     协议层（不依赖 GUI，可单独测试）
 │  │  ├─ discovery.py            自动搜索（SSDP + 2021 广播）
 │  │  ├─ mqtt_worker.py          MQTT over TLS 遥测
@@ -322,11 +326,41 @@ bambu-monitor/
 │  │  ├─ models.py               机型识别 / 状态数据模型
 │  │  └─ tlsutil.py              打印机 TLS 上下文
 │  ├─ ui/                        PySide6 界面（监控墙 / 单路状态条 / 对话框）
-│  └─ sim/simulator.py           虚拟打印机（发现 + MQTT + 画面）
-└─ docs/PROTOCOL.md              协议与实现说明
+│  ├─ web/                       内置网页服务与 PWA 前端
+│  ├─ sim/simulator.py           虚拟打印机（发现 + MQTT + 画面）
+│  └─ util/                      DPAPI 封装、控制台编码兜底
+├─ tests/                        pytest 测试（离线，基于内置模拟器）
+├─ tools/                        诊断与自检脚本（连真机用，见 tools/README.md）
+├─ linux/                        Linux 安装/服务/打包脚本
+└─ docs/
+   ├─ PROTOCOL.md                协议与实现说明
+   ├─ DEPLOY.md                  Linux / Docker / 安卓部署
+   ├─ ARCHITECTURE.md            架构、线程模型、代码地图（开发前先看这个）
+   ├─ DEVELOPING.md              开发环境、测试、调试手段
+   └─ KNOWN_ISSUES.md            已知问题与技术债清单
 ```
 
-## 7. 已验证情况
+## 7. 开发与测试
+
+改代码前建议先读 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（分层、线程模型、
+改一处要同步改哪几处），环境与调试手段见 [`docs/DEVELOPING.md`](docs/DEVELOPING.md)，
+已知问题与待办见 [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md)。
+
+```
+test.bat                                   :: 跑自动化测试（Windows）
+bash linux/run-tests.sh                    :: 同上（Linux）
+set BAMBU_RUN_SLOW=1 && test.bat -m slow    :: 端到端慢测试（内置模拟器，离线验证全链路）
+```
+
+测试不需要真实打印机：内置模拟器会在回环地址上伪造完整的打印机
+（UDP 发现响应 + MQTT broker + 6000 端口画面），因此「搜索 → 遥测 → 画面」全链路都能离线验证。
+
+> 环境提示：本项目虚拟环境不可搬迁（`.venv\pyvenv.cfg` 写死了基础解释器路径）。
+> 如果 `.venv\Scripts\python.exe` 报 `did not find executable at ...`，删掉 `.venv`
+> 重新运行 `run.bat` 即可。判断环境是否可用不要用 `if exist`，直接跑
+> `.venv\Scripts\python.exe -c "import sys"`。
+
+## 8. 已验证情况
 
 本项目在交付前跑过以下验证（`selftest.bat`、`demo.bat` 可复现）：
 
@@ -366,7 +400,7 @@ bambu-monitor/
 仍未在真机上验证的一处：RTSPS(322) **成功**拉流（需要真实访问代码）。
 X1C 的 322 端口已确认可连通并能完成 TLS 握手与鉴权交互（错误代码返回 401，路径正确）。
 
-## 8. 说明与免责
+## 9. 说明与免责
 
 * 本项目使用打印机**官方局域网接口**（MQTT/摄像头/SSDP），数据只在本地网络内传输，不上传云端。
 * 证书校验：默认使用内置的 Bambu Lab CA 做证书链校验；若个别固件证书异常，会自动回退为

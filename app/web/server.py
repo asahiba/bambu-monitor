@@ -570,7 +570,9 @@ class WebServer:
         self.fps = fps
         self.host = host
         self.verbose = verbose
-        self.cache = WebFrameCache(get_sessions, fps=fps, max_width=max_width)
+        #: 记住画面最大宽度：start() 重建转码线程时要原样恢复（否则重启后静默退回默认值）
+        self.max_width = max(240, int(max_width))
+        self.cache = WebFrameCache(get_sessions, fps=fps, max_width=self.max_width)
         self.stopping = True
         self._httpd: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
@@ -590,16 +592,29 @@ class WebServer:
         httpd.app = self  # type: ignore[attr-defined]
         self._httpd = httpd
         self.stopping = False
-        self.cache.stop()
-        self.cache = WebFrameCache(self.get_sessions, fps=self.fps)
+        # 重新开启服务时要把旧的转码线程收干净，否则反复开关会累积线程。
+        # 注意：__init__ 里建的那个 cache 从未 start()，对未启动的线程 join()
+        # 会抛 RuntimeError，所以必须先判断 is_alive()。
+        self._stop_cache(self.cache)
+        # max_width 必须一起传：漏传会让网页画面宽度静默退回默认 720，与用户设置不符
+        self.cache = WebFrameCache(
+            self.get_sessions, fps=self.fps, max_width=self.max_width
+        )
         self.cache.start()
         self._thread = threading.Thread(target=httpd.serve_forever, name="web-server", daemon=True)
         self._thread.start()
         return True
 
+    @staticmethod
+    def _stop_cache(cache: "WebFrameCache") -> None:
+        """停掉转码线程并等它退出（线程从未启动时只置标志，不 join）。"""
+        cache.stop()
+        if cache.is_alive():
+            cache.join(timeout=2.0)
+
     def stop(self) -> None:
         self.stopping = True
-        self.cache.stop()
+        self._stop_cache(self.cache)
         httpd, self._httpd = self._httpd, None
         if httpd is not None:
             try:
@@ -610,7 +625,9 @@ class WebServer:
                 httpd.server_close()
             except Exception:
                 pass
-        self._thread = None
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
 
     # ------------------------------------------------------------------ 信息
     def urls(self) -> list[str]:

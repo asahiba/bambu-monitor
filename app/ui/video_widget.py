@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from . import theme
 
+
 class VideoWidget(QWidget):
     """显示 JPEG 画面的控件。
 

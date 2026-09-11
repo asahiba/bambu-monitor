@@ -83,6 +83,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(600, self.auto_discover)
         if config.web_enabled:
             QTimer.singleShot(1500, lambda: self.start_web_server(show_dialog=False))
+        if config.last_error:
+            # 读取配置时已有降级（例如访问代码解不开），启动后立刻让用户看到
+            QTimer.singleShot(300, self.warn_config_problem)
 
     # ------------------------------------------------------------------ 界面搭建
     def _build_toolbar(self) -> None:
@@ -546,23 +549,44 @@ class MainWindow(QMainWindow):
         self._persist()
         from ..config import config_path
 
+        if self.config.last_error:
+            # 以前写盘失败是静默的：用户看到「已保存」，其实配置根本没落盘
+            QMessageBox.warning(
+                self,
+                "配置未能完整保存",
+                f"{self.config.last_error}\n\n目标文件：{config_path()}",
+            )
+            self._notify(f"⚠ {self.config.last_error}")
+            return
         self._notify(f"配置已保存（{len(self.sessions)} 台）→ {config_path()}")
 
-    def export_config(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
+    def warn_config_problem(self) -> None:
+        """启动时提示配置读取阶段的降级（例如访问代码解不开）。"""
+        if not self.config.last_error:
+            return
+        self._notify(f"⚠ {self.config.last_error}")
 
+    def export_config(self) -> None:
+        from PySide6.QtWidgets import QFileDialog, QStandardPaths
+
+        # 与抓拍一致，默认落到「文档」而不是用户主目录，避免用户找不到导出文件
+        base = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or os.path.expanduser("~")
         path, _ = QFileDialog.getSaveFileName(
             self,
             "导出配置",
-            os.path.join(os.path.expanduser("~"), "bambu-monitor-config.json"),
+            os.path.join(base, "bambu-monitor-config.json"),
             "JSON 文件 (*.json)",
         )
         if not path:
             return
         if self.config.export_to(path):
+            if self.config.last_error:
+                QMessageBox.warning(self, "导出提示", self.config.last_error)
             self._notify(f"配置已导出：{path}")
         else:
-            QMessageBox.warning(self, "导出失败", "无法写入该文件，请换一个位置再试。")
+            QMessageBox.warning(
+                self, "导出失败", self.config.last_error or "无法写入该文件，请换一个位置再试。"
+            )
 
     def import_config(self) -> None:
         from PySide6.QtWidgets import QFileDialog

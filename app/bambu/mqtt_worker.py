@@ -95,6 +95,7 @@ class MqttWorker:
         self.topic_request = f"device/{serial}/request" if serial else ""
         self.tls_verified = True
         self._stop_requested = False
+        self._thread: Optional[threading.Thread] = None
 
     def update_serial(self, serial: str) -> None:
         """在未知序列号（通配订阅）场景下，从报文中补全序列号。"""
@@ -117,8 +118,12 @@ class MqttWorker:
         if mqtt is None:  # pragma: no cover
             self._set_state(self.STATE_OFFLINE, f"缺少依赖 paho-mqtt：{_IMPORT_ERROR}")
             return
+        self._stop_requested = False
         # 证书探测 + 建连放到后台线程，避免阻塞界面
-        threading.Thread(target=self._start_blocking, name=f"mqtt-{self.host}", daemon=True).start()
+        self._thread = threading.Thread(
+            target=self._start_blocking, name=f"mqtt-{self.host}", daemon=True
+        )
+        self._thread.start()
 
     def _start_blocking(self) -> None:
         self._set_state(self.STATE_CONNECTING, "正在连接 MQTT 8883")
@@ -139,6 +144,15 @@ class MqttWorker:
         client.tls_set_context(context)
         client.reconnect_delay_set(min_delay=1, max_delay=30)
         self._client = client
+        if self._stop_requested:
+            # 竞态：stop() 发生在 TLS 探测之后、这里之前。此时若照常
+            # loop_start()，就再也没人能回收这条连接（僵尸 MQTT）。
+            self._client = None
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            return
         try:
             client.connect_async(self.host, 8883, keepalive=60)
             client.loop_start()
@@ -158,6 +172,9 @@ class MqttWorker:
                 client.loop_stop()
             except Exception:
                 pass
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
         self._set_state(self.STATE_OFFLINE, "已断开")
 
     def request_pushall(self, force: bool = False) -> None:

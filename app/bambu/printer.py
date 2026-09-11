@@ -33,6 +33,10 @@ class PrinterSession:
         self.warnings: list[str] = []
         self.video_channel = "tcp6000"
         self._stream_lock = threading.Lock()
+        #: 串行化视频通道的建立（看门狗切换与首帧建立不能同时进行）
+        self._video_setup_lock = threading.Lock()
+        #: 仍在运行的「建立视频通道」线程；stop() 必须能等到它们结束
+        self._video_threads: list[threading.Thread] = []
         self._watchdog: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
 
@@ -45,10 +49,7 @@ class PrinterSession:
         self._start_telemetry()
         if self.info.access_code:
             # 视频通道（尤其 RTSPS 探测）可能阻塞数秒，放到后台线程，避免卡住界面
-            thread = threading.Thread(
-                target=self._start_camera, name=f"video-setup-{self.info.ip}", daemon=True
-            )
-            thread.start()
+            self._spawn_video_thread(self._start_camera, "video-setup")
             self._watchdog_stop.clear()
             self._watchdog = threading.Thread(
                 target=self._video_watchdog, name=f"video-watch-{self.info.ip}", daemon=True
@@ -60,6 +61,9 @@ class PrinterSession:
     def stop(self) -> None:
         self.running = False
         self._watchdog_stop.set()
+        # 等待「建立/切换通道」线程收尾后再停流：否则它可能在我们停流之后
+        # 又把流建起来，留下一个没人引用的连接。
+        self._join_video_threads(2.0)
         self._stop_streams()
         if self._mqtt is not None:
             self._mqtt.stop()
@@ -69,6 +73,34 @@ class PrinterSession:
             self._watchdog = None
         self.status.mqtt_online = False
         self.status.camera_online = False
+
+    # ------------------------------------------------------- 视频线程生命周期
+    def _spawn_video_thread(self, target, tag: str, *args) -> None:
+        """启动一个「建立/切换视频通道」线程，并保留引用以便 stop() 收尾。
+
+        这些线程可能阻塞在 RTSPS 取首帧上（单次最长 20 秒），因此必须能被 stop()
+        等待或识别为已退出，否则反复重连会不断累积游离线程。
+        """
+        with self._stream_lock:
+            alive: list[threading.Thread] = []
+            for thread in self._video_threads:
+                if thread.is_alive():
+                    alive.append(thread)
+                else:
+                    thread.join(timeout=0.1)  # 已退出，回收引用
+            self._video_threads = alive
+            thread = threading.Thread(
+                target=target, args=args, name=f"{tag}-{self.info.ip}", daemon=True
+            )
+            self._video_threads.append(thread)
+            thread.start()
+
+    def _join_video_threads(self, timeout: float) -> None:
+        with self._stream_lock:
+            threads = [thread for thread in self._video_threads if thread.is_alive()]
+            self._video_threads = []
+        for thread in threads:
+            thread.join(timeout=timeout)
 
     def _stop_streams(self) -> None:
         with self._stream_lock:
@@ -136,12 +168,7 @@ class PrinterSession:
                 return
 
     def _switch_channel(self, target: str) -> None:
-        threading.Thread(
-            target=self._start_camera,
-            args=(target,),
-            name=f"video-switch-{self.info.ip}",
-            daemon=True,
-        ).start()
+        self._spawn_video_thread(self._start_camera, "video-switch", target)
 
     def restart(self) -> None:
         self.stop()
@@ -193,9 +220,22 @@ class PrinterSession:
         return "rtsp" if RtspStream.available() else "tcp6000"
 
     def _start_camera(self, prefer: Optional[str] = None) -> None:
-        """启动视频通道；prefer 为空时按机型能力自动选择。"""
+        """启动视频通道；prefer 为空时按机型能力自动选择。
+
+        整个过程用 ``_video_setup_lock`` 串行化：看门狗的通道切换与首帧建立
+        若并发执行，会互相把对方的流停掉，表现为「画面刚出来又断」。
+        """
         if not self.running:
             return
+        with self._video_setup_lock:
+            self._start_camera_locked(prefer)
+
+    def _start_camera_locked(self, prefer: Optional[str] = None) -> None:
+        """真正建立视频通道（调用方必须已持有 ``_video_setup_lock``）。"""
+        if not self.running:
+            return
+        # 换道前先停掉旧流，否则旧通道会变成没人引用的游离线程继续占用连接。
+        # 这里只取 _stream_lock，不会与 _video_setup_lock 形成环。
         self._stop_streams()
         channel = (prefer or self._preferred_channel()).lower()
         rtsp_only = self.info.model.video_channel == "rtsp"

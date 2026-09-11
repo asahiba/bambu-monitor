@@ -22,7 +22,7 @@ MX: 2
 ```text
 HTTP/1.1 200 OK
 Location: 192.168.1.50          ← IP
-USN: 01P00A1234567              ← 序列号
+USN: 01P00A123456789            ← 序列号（15 位大写字母数字）
 devmodel.bambu.com: P1S         ← 机型
 devname.bambu.com: 3DP-001      ← 名称
 devversion.bambu.com: 01.05.00.00
@@ -35,9 +35,14 @@ devconnect.bambu.com: lan
 打印机把 JSON 回给源端口：
 
 ```json
-{"dev_ip":"192.168.1.50","dev_id":"01P00A1234567","dev_name":"3DP-001",
+{"dev_ip":"192.168.1.50","dev_id":"01P00A123456789","dev_name":"3DP-001",
  "dev_version":"01.05.00.00","dev_signal":"-50","dev_connect":"lan"}
 ```
+
+判定一台设备是不是拓竹打印机：优先看响应里有没有 `devmodel` / `devname` /
+`devversion` / `devconnect` 这几个头；如果都没有，则要求序列号是
+**15 位大写字母数字**（`discovery._looks_like_bambu()`）。
+因此内置模拟器的序列号也必须是 15 位，否则这条「仅凭序列号识别」的路径在模拟器上走不通。
 
 ### 1.3 机型识别
 
@@ -50,8 +55,15 @@ devconnect.bambu.com: lan
 | `03W` | X1E | `22E` | P2S |
 | `01S` | P1P | `093` | H2S |
 | `01P` | P1S | `094` | H2D |
+| `20P` | X2D | | |
 
-新机型（如 X2D）若前缀未收录，会在界面上显示「未知机型」，但**连接与显示不受影响**。
+匹配型号名时会**忽略空格与 `-`/`_`**：真机的 `devmodel` 常写成
+`Bambu Lab X1 Carbon` 这种带空格的形式，若不归一化会退化成命中 `x1` 关键字、
+把 X1C 误判成 X1（`app/bambu/models.py::_normalize_model_text`）。
+
+新机型（如 X2D 早先、以及实测发现的 **A2L**）若前缀未收录，会在界面上显示
+「未知机型」，但**连接与显示不受影响**——遇到这类设备时，把它的前缀补进
+`SERIAL_PREFIX_MODEL` 即可。
 
 ## 2. 遥测（MQTT over TLS）
 
