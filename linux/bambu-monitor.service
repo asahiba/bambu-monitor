@@ -1,0 +1,24 @@
+[Unit]
+Description=Bambu Monitor (拓竹打印机监控台 · 无界面服务)
+Documentation=file:///opt/bambu-monitor/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际安装路径修改
+WorkingDirectory=/opt/bambu-monitor
+Environment=BAMBU_MONITOR_CONFIG_DIR=/opt/bambu-monitor/data
+Environment=BAMBU_WEB_PORT=8080
+Environment=BAMBU_WEB_FPS=4
+Environment=BAMBU_MAX_FPS=10
+# 局域网自动搜索需要能收发广播/组播
+ExecStart=/opt/bambu-monitor/.venv/bin/python -m app.headless --status-interval 0
+Restart=always
+RestartSec=5
+# 允许绑定 8080 等端口并收发广播
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

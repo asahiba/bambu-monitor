@@ -1,0 +1,7 @@
+# 服务端（Linux / Docker / NAS）依赖：不含 Qt，体积小很多
+paho-mqtt>=2.0
+# X1 / X2D / H2 / P2S 的 RTSPS(322) 通道需要 OpenCV（headless 版无 GUI 依赖）
+opencv-python-headless>=4.8
+numpy>=1.24
+# 仅内置模拟器（--sim 演示模式）用来生成自签证书
+cryptography>=41

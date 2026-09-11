@@ -1,0 +1,6 @@
+PySide6-Essentials>=6.5
+paho-mqtt>=2.0
+# 可选依赖：X1 / P2S / H2 / X2D 的 RTSPS(322) 视频通道（更流畅）
+opencv-python>=4.8
+# 可选依赖：仅内置模拟器（--sim / --core-test）需要，用于生成自签证书
+cryptography>=41

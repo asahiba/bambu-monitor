@@ -1,0 +1,16 @@
+.venv/
+dist/
+build/
+build_*/
+data/
+.sim/
+__pycache__/
+*.pyc
+*.log
+_*.png
+_*.json
+tools/
+docs/
+*.bat
+*.spec
+README.md

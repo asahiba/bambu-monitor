@@ -1,0 +1,14 @@
+# 运行/打包产物
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+.sim/
+_*.log
+_*.png
+_*.txt
+
+# 编辑器
+.vscode/
+.idea/
