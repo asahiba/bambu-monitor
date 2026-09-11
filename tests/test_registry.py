@@ -1,0 +1,126 @@
+"""设备族注册表的契约。
+
+注册表是「新增一个品牌 = 注册一条数据」的落点。这里锁定三件事：
+
+1. **向后兼容**：老配置里的 `PrinterInfo` 没有 `family` 字段，
+   必须解析为拓竹族 —— 否则升级后老用户的所有设备都会失去归属；
+2. **不臆造**：只登记已经能用的族（提前登记会让界面出现用不了的选项）；
+3. **凭据策略可被界面消费**：标签/是否必填/是否隐藏都由数据决定，
+   不再是写死的「访问代码」。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from app.bambu.models import PrinterInfo, PrinterModel
+from app.core import registry
+
+
+def test_拓竹族已登记且是默认族():
+    """契约：拓竹族必须已登记，且 id 固定为 ``bambu``（配置兼容性的一部分）。"""
+    descriptor = registry.get(registry.FAMILY_BAMBU)
+    assert descriptor is not None
+    assert descriptor.family == "bambu"
+    assert descriptor.label
+    assert descriptor.default_port == 8883
+
+
+def test_老配置没有family字段时解析为拓竹():
+    """契约（**向后兼容的关键**）：`PrinterInfo` 没有 family 字段时归入拓竹族。
+
+    历史上写出的所有 config.json 都是这个形态；升级后它们必须继续可用，
+    不需要任何迁移步骤。
+    """
+    legacy = PrinterInfo(ip="192.168.1.50", model=PrinterModel.P1S)
+    assert not hasattr(legacy, "family") or legacy.family == ""
+    resolved = registry.resolve_family(legacy)
+    assert resolved.family == registry.FAMILY_BAMBU
+
+
+def test_未知family值退回拓竹而不是崩掉():
+    """契约：配置里出现本版本不认识的 family（例如来自更新的版本）时，
+    退回拓竹族而不是让界面拿到 None 崩掉。"""
+
+    class Weird:
+        family = "some-future-family"
+
+    assert registry.resolve_family(Weird()).family == registry.FAMILY_BAMBU
+
+
+def test_只登记已经能用的设备族():
+    """契约：注册表里不出现「已登记但用不了」的族。
+
+    Moonraker / OctoPrint 要等对应适配器落地时才登记——提前登记会让
+    界面显示出一个选了也没用的选项，比没有更糟。
+    """
+    families = {descriptor.family for descriptor in registry.all_families()}
+    assert registry.FAMILY_BAMBU in families
+    for family in families:
+        descriptor = registry.get(family)
+        assert descriptor is not None
+        assert descriptor.label, f"{family} 缺少展示名"
+        assert descriptor.credential.label, f"{family} 缺少凭据标签"
+
+
+def test_拓竹族的凭据策略是必填访问代码():
+    """契约：拓竹需要 8 位访问代码，界面据此要求填写。"""
+    policy = registry.get(registry.FAMILY_BAMBU).credential
+    assert policy.key == "access_code", "配置字段名不能改（老配置依赖它）"
+    assert policy.label == "访问代码"
+    assert policy.required is True
+    assert policy.secret is True
+    assert "局域网" in policy.hint
+
+
+def test_拓竹族的候选端口覆盖三个服务():
+    """契约：诊断与手动添加要能拿到 8883 / 6000 / 322 三个端口。"""
+    descriptor = registry.get(registry.FAMILY_BAMBU)
+    assert set(descriptor.candidate_ports) == {8883, 6000, 322}
+
+
+def test_描述符记录了发现方式与注意事项():
+    """契约：发现方式与已知坑要随描述符一起带上，供界面提示与诊断展示。
+
+    「新机型需 Developer Mode」这条来自真机实测，写进描述符是为了让
+    界面/诊断能直接引用，而不是散落在各处注释里。
+    """
+    descriptor = registry.get(registry.FAMILY_BAMBU)
+    assert descriptor.discoveries, "应记录发现方式"
+    assert any("SSDP" in item for item in descriptor.discoveries)
+    assert "Developer Mode" in descriptor.notes
+
+
+def test_登记与查询是一致的():
+    """契约：`register` / `get` / `is_registered` 三者必须一致。"""
+    custom = registry.FamilyDescriptor(
+        family="unit-test-family",
+        label="单元测试族",
+        credential=registry.CredentialPolicy(label="API Key", required=False, secret=True),
+    )
+    try:
+        registry.register(custom)
+        assert registry.is_registered("unit-test-family")
+        assert registry.get("unit-test-family") is custom
+        assert custom in registry.all_families()
+    finally:
+        # 清理，避免污染其它测试
+        registry._REGISTRY.pop("unit-test-family", None)
+    assert not registry.is_registered("unit-test-family")
+
+
+def test_注册表按id排序保证展示顺序稳定():
+    """契约：`all_families()` 顺序稳定（界面按它渲染，顺序跳动会让人困惑）。"""
+    names = [descriptor.family for descriptor in registry.all_families()]
+    assert names == sorted(names)
+
+
+@pytest.mark.parametrize("family", [registry.FAMILY_MOONRAKER, registry.FAMILY_OCTOPRINT])
+def test_未落地生态的id已预留但未登记(family):
+    """契约：Moonraker / OctoPrint 的 id 已定义为常量，但**尚未登记**。
+
+    常量先定义是为了让适配器实现时不用改公共接口；未登记是刻意的
+    （见 `test_只登记已经能用的设备族`）。
+    """
+    assert not registry.is_registered(family)
+    assert family

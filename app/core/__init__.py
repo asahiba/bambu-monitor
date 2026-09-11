@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol, runtime_checkable
 
+from . import registry  # noqa: F401  （对外转出，便于一处导入）
 from .adapter import PollingDeviceSession  # noqa: F401  （对外转出）
 from .capabilities import DeviceCapabilities  # noqa: F401  （对外转出，便于一处导入）
 from .device import (
@@ -40,12 +41,24 @@ from .device import (
     MAPPABLE_FIELDS,
     DeviceStatus,
 )
+from .registry import (  # noqa: F401  （对外转出）
+    FAMILY_BAMBU,
+    FAMILY_MOONRAKER,
+    FAMILY_OCTOPRINT,
+    CredentialPolicy,
+    FamilyDescriptor,
+)
 
 __all__ = [
+    "CredentialPolicy",
     "DeviceCapabilities",
     "DeviceSession",
     "DeviceSnapshot",
     "DeviceStatus",
+    "FAMILY_BAMBU",
+    "FAMILY_MOONRAKER",
+    "FAMILY_OCTOPRINT",
+    "FamilyDescriptor",
     "PollingDeviceSession",
     "JOB_ACTIVE_STATES",
     "JOB_FAILED",
@@ -58,6 +71,7 @@ __all__ = [
     "JOB_STATE_TEXT",
     "JOB_UNKNOWN",
     "MAPPABLE_FIELDS",
+    "registry",
 ]
 
 

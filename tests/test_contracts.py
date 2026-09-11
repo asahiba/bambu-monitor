@@ -519,6 +519,12 @@ def test_文件名与命令入口未被改名():
         "app/bambu/tlsutil.py",
         "app/bambu/ports.py",
         "app/sim/simulator.py",
+        # 设备无关内核：第三方适配器与界面共同依赖的契约
+        "app/core/__init__.py",
+        "app/core/capabilities.py",
+        "app/core/device.py",
+        "app/core/adapter.py",
+        "app/core/registry.py",
     ):
         assert (PROJECT_ROOT / relative).is_file(), f"模块被移动或改名：{relative}"
 
