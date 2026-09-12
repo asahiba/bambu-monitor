@@ -1,4 +1,4 @@
-﻿# 把所有成品归集到一个交付目录，并生成校验清单。
+﻿﻿# 把所有成品归集到一个交付目录，并生成校验清单。
 #
 # 用法（项目根目录）：
 #     powershell -ExecutionPolicy Bypass -File make-bundle.ps1
@@ -68,7 +68,7 @@ $artifacts = @(
         Label = "Docker 单文件镜像"
     },
     @{
-        Path = "dist-android\BambuMonitor-1.0.0-arm64.apk"
+        Path = "dist-android\BambuMonitor-1.0.1-arm64.apk"
         Dest = "android\BambuMonitor-arm64.apk"
         Label = "安卓 APK（arm64）"
     }

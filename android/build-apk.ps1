@@ -1,4 +1,4 @@
-﻿# 构建安卓 APK（平板/手机可独立运行的完整版）。
+﻿﻿# 构建安卓 APK（平板/手机可独立运行的完整版）。
 #
 # 用法（在项目根目录或 android/ 下均可）：
 #     powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
@@ -228,7 +228,7 @@ $apk = Join-Path $Here "app\build\outputs\apk\debug\app-debug.apk"
 if (-not (Test-Path $apk)) { throw "构建结束但找不到 APK：$apk" }
 $outDir = Join-Path $ProjectRoot "dist-android"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$target = Join-Path $outDir "BambuMonitor-1.0.0-arm64.apk"
+$target = Join-Path $outDir "BambuMonitor-1.0.1-arm64.apk"
 Copy-Item $apk $target -Force
 $mb = [math]::Round((Get-Item $target).Length / 1MB, 1)
 
