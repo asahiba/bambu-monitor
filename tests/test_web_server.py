@@ -531,6 +531,51 @@ def test_command_can_control为假时返回400(make_server):
     assert session.calls == []
 
 
+def test_签名挡住的只是print段命令_can_control仍为真(make_server):
+    """契约：固件要求签名时，`can_control` 必须仍是 True，只有 `print` 段命令被挡。
+
+    这条守的是一个**误导性提示**的根因：网页端只要拿到非空的
+    `controls_blocked_reason` 就会在状态条上显示提示。若把签名要求也算进
+    `can_control`，灯控（走 `system` 段、**实测可用**）也会被一起判成不可用，
+    用户就会看到"控制不可用"却发现灯明明能开关 —— 提示与事实矛盾。
+
+    所以这里断言：
+    * 遥测在线 + 需要签名 -> `can_control` 为 True（连接是好的）
+    * `controls_blocked_reason` 非空（界面据此提示"部分命令被挡"）
+    * 但灯控**不在**被挡之列
+    """
+    status = online_status()
+    # `fun` 的 bit 0x20000000 置位 = 固件要求 MQTT 命令签名（未开开发者模式）
+    status.apply_report({"print": {"fun": "100d122002fbd"}})
+    assert status.needs_mqtt_signature is True, "前提没造出来"
+    session = FakeSession(status=status)
+    # 真实会话由 command_blocked 按命令判定；这里对齐同样的语义
+    session.command_blocked = lambda cmd: (
+        "固件要求签名" if cmd in ("pause", "resume", "stop", "speed") else ""
+    )
+    session.controls_blocked_reason = "固件要求签名"
+
+    _, port = make_server(sessions=[session])
+    status_code, _, body = request(port, "/api/printers")
+    assert status_code == 200
+    item = json.loads(body.decode("utf-8"))["printers"][0]
+
+    assert item["can_control"] is True, (
+        "需要签名不等于连不上：把它算进 can_control 会让灯控一起被锁"
+    )
+    assert item["controls_blocked_reason"], "必须把原因带给界面，否则按钮灰了却不说为什么"
+
+    # 灯控照常可用
+    code, _, body = post_command(port, {"index": 0, "action": "light_on"})
+    assert code == 200, "灯控走 system 段，不该被签名要求挡住"
+    assert ("light", True) in session.calls
+
+    # 暂停被挡，且原因回给用户
+    code, _, body = post_command(port, {"index": 0, "action": "pause"})
+    assert code == 400
+    assert "签名" in json.loads(body.decode("utf-8"))["detail"]
+
+
 def test_command_未知动作返回400(make_server):
     """契约：未知 action 返回 400 且说明是未知指令。"""
     session = FakeSession(status=online_status())

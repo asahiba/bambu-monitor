@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import sys
@@ -671,6 +672,55 @@ def test_发布工作流用的exe与实际产出的一致():
     # spec 里 name="BambuMonitor" / name="BambuMonitor-cli" -> 产物即上面两个
     assert 'name="BambuMonitor"' in spec
     assert 'name="BambuMonitor-cli"' in spec
+
+
+def test_控制被挡的提示不能笼统说成控制不可用():
+    """契约：签名要求只挡 `print` 段命令，提示文案不能说成"控制不可用"。
+
+    踩过的坑：状态条的提示原本文案是「⚠ 控制不可用（点此查看原因）」，
+    而它的触发条件是 `controls_blocked_reason` 非空 —— 也就是**固件要求签名**。
+    但签名只覆盖 `print` 段的暂停/停止/速度，**灯控走 `system` 段、实测可用**。
+    于是安卓用户看到"控制不可用"，随手点一下灯却发现能用：提示与事实矛盾，
+    比不提示更糟。
+
+    这条测试静态守住三件事（都放在源码上断言，不依赖 node 等外部命令）：
+    1. 提示文案里不得再出现笼统的"控制不可用"；
+    2. 提示必须**按具体被挡的命令**算（出现 blockedActs 那段逻辑）；
+    3. 提示必须写明"开关灯不受影响"这类限定，而不是让用户以为全都不能用。
+    """
+    from app.web.page import INDEX_HTML
+
+    # 只看真正赋值给提示的那几行；注释里提到历史文案是允许的
+    marker = "hint.textContent"
+    lines = [ln.strip() for ln in INDEX_HTML.splitlines() if marker in ln]
+    assert lines, "页面里找不到给 hint.textContent 赋值的地方"
+
+    for line in lines:
+        assert "控制不可用" not in line, (
+            "提示文案又变回笼统的「控制不可用」了：" + line
+        )
+
+    # 按具体命令算，而不是一刀切
+    assert "blockedActs" in INDEX_HTML, (
+        "提示应当按具体被挡的命令（暂停/停止）来算，而不是笼统地说控制不可用"
+    )
+    assert "style.display !== 'none'" in INDEX_HTML, (
+        "算被挡命令时要排除当前没显示的按钮，否则空闲时会误报"
+    )
+
+    # 必须明确告诉用户"哪部分仍然可用"，否则用户会以为整个控制都坏了
+    assert "开关灯不受影响" in INDEX_HTML, (
+        "提示里必须写明灯控不受影响 —— 否则用户看到提示会以为灯也不能用"
+    )
+
+    # 内嵌 JS 本身必须语法正确（HTML 里的 `<` 等字符容易把脚本写坏）
+    if importlib.util.find_spec("esprima") is None:  # pragma: no cover
+        pytest.skip("未安装 esprima，跳过内嵌 JS 语法解析")
+
+    import esprima
+
+    script = INDEX_HTML.split("<script>", 1)[-1].rsplit("</script>", 1)[0]
+    esprima.parseScript(script)  # 语法错会直接抛
 
 
 if __name__ == "__main__":  # pragma: no cover

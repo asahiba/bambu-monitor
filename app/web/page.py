@@ -467,10 +467,29 @@ function applyStatus(data){
     });
     // 触屏看不到 tooltip，所以在状态条里显示一条可点击的提示条。
     // 这条提示是"用户能自己解决问题"的关键：告诉他去打印机上开开发者模式。
+    //
+    // ⚠️ 文案必须**逐条命令**说清楚，不能笼统写"控制不可用"。
+    // 固件签名要求只覆盖 `print` 段的命令（暂停/停止/速度），
+    // 而灯控走 `system` 段、**不受影响**。曾经这里统一显示
+    // 「⚠ 控制不可用」，结果在安卓上用户看到"控制不可用"却发现灯明明能开关
+    // —— 提示与事实矛盾，比不提示更糟。
     const hint = element.querySelector('.ctrl-hint');
     if (blocked){
+      // 与后端 SIGNATURE_SENSITIVE_COMMANDS 一致：哪些命令真的被挡
+      const blockedActs = (info.printing ? ['pause', 'stop'] : [])
+        .filter(act => {
+          const button = element.querySelector('button[data-act="' + act + '"]');
+          return button && button.style.display !== 'none';
+        });
+      const hurt = blockedActs.length > 0;
+      if (hurt){
+        hint.textContent = '⚠ ' + blockedActs.length + ' 项控制被固件挡住（点此查看原因）';
+      } else {
+        // 当前没有被挡住的可见控制（例如空闲时没有暂停/停止按钮），
+        // 此时不该报"控制不可用" —— 灯控等仍然可用
+        hint.textContent = 'ℹ 部分命令（暂停/停止/速度）被固件挡住；开关灯不受影响（点此查看原因）';
+      }
       hint.style.display = '';
-      hint.textContent = '⚠ 控制不可用（点此查看原因）';
       hint.onclick = (event) => {
         event.stopPropagation();
         alert(blocked);

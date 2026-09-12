@@ -37,11 +37,14 @@ jobs:
       # 只装协议层依赖。**刻意不装 PySide6**：套件在没有 Qt 时会自动跳过
       # 界面相关断言（实测 688 passed），而 PySide6 有上百 MB，
       # 装上只为了让几条断言不跳过并不划算。
+      #
+      # esprima 是例外（极小）：装了才会真正解析 app/web/page.py 里内嵌的 JS，
+      # 否则那条断言会跳过 —— 而前端 JS 没有编译期检查，写坏只会白屏。
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-server.txt
-          python -m pip install pytest
+          python -m pip install pytest esprima
 
       # Qt 平台插件在无显示环境下的兜底（即使没装 PySide6 也无害）
       - name: 回归测试
