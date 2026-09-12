@@ -26,6 +26,23 @@ set BAMBU_RUN_SLOW=1 && test.bat -m slow
 > `app/web/page.py` 的前端 JS（无前端测试与语法检查）、
 > `app/headless.py` 的 `--discover` / `--add-printer` 命令行管理流程。
 
+### 安卓版踩过的坑（都在通用代码里，桌面版看不出来）
+
+这三个问题**只在安卓上暴露**，但根因都在共用代码中，值得单独记一笔：
+
+| 症状 | 根因 | 修法 |
+| --- | --- | --- |
+| 首次打开就是 `{"error": "unauthorized"}` | `AppConfig.load()` 在无配置文件时**不幂等**（每次调用新生成令牌且不落盘）；宿主与服务各 load 一次，拿到两个令牌 | 令牌解析收敛到 `app.headless.resolved_web_token()`，先落盘再返回 |
+| 自动搜索里同一台设备出现两次 | `DiscoveryService._register` 只按 `serial or ip` 当键；同一台机器被两条通道发现、其中一条没带 `USN` 时，会以「序列号键」和「IP 键」各登记一次 | 改为按序列号与 IP **双重索引**；`WebHost.discover()` 再兜底去一次重 |
+| 添加设备报「添加失败当前系统没有 DPAPI」，但设备其实加上了 | 安卓没有 DPAPI，`encrypt_text` 按设计退回明文保存 —— 这是**正常降级**，却写进了 `AppConfig.last_error`，而 `WebHost.add_printer` 见 `last_error` 非空即判失败 | 诊断分两级：`last_error`（阻断，写盘失败）与 `warnings`（提示，不阻断） |
+
+回归测试：`tests/test_android_bootstrap_token.py`、
+`tests/test_android_discovery_and_dpapi.py`（共 17 项）。
+
+> 另一个只有 3.10/3.11 才暴露的坑见 `docs/PACKAGING.md`：
+> 给 `threading.Thread` 子类挂 `self._stop` 会遮蔽 `Thread._stop()`，
+> 让 `join()` 抛 `TypeError`。3.13 改了实现，所以桌面版一直正常。
+
 ---
 
 ## 一、已修（本次）

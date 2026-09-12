@@ -436,6 +436,9 @@ class DiscoveryService:
         self._on_finished = on_finished
         self.timeout = timeout
         self._found: dict[str, PrinterInfo] = {}
+        #: IP -> 已登记记录。用于避免「同一台设备被两条通道各登记一次」
+        #: （一条带序列号、一条只认得出 IP 时会变成两条）。见 :meth:`_register`。
+        self._by_ip: dict[str, PrinterInfo] = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._sockets: list[socket.socket] = []
@@ -481,26 +484,52 @@ class DiscoveryService:
 
     # ------------------------------------------------------------------ 内部实现
     def _register(self, info: PrinterInfo) -> None:
+        """登记一台设备，**保证同一台设备只出现一次**。
+
+        只用 ``serial or ip`` 当键是不够的：同一台打印机可能被两条通道分别发现，
+        而两条通道给出的信息不一定都带序列号 —— 例如 SSDP 应答里没带 ``USN``
+        （或带了别的东西）时只能退回用 IP 当键，于是同一台机器会以
+        「序列号键」和「IP 键」各登记一次，用户就在搜索列表里看到重复项。
+
+        所以这里**双重索引**：序列号与 IP 各查一遍，命中任一个就认为是同一台，
+        并把信息合并到已有记录上（缺什么补什么）。
+        """
         if not info.ip and not info.serial:
             return
-        key = info.serial or info.ip
+        serial = (info.serial or "").strip()
+        ip = (info.ip or "").strip()
+        key = serial or ip
         # 记录出过结果的网段，供后续扫描聚焦
-        if info.ip.count(".") == 3:
-            self._productive_prefixes.add(_prefix_of(info.ip))
+        if ip.count(".") == 3:
+            self._productive_prefixes.add(_prefix_of(ip))
         with self._lock:
             existing = self._found.get(key)
+            if existing is None and ip:
+                # 同一个 IP 之前是以序列号为键登记的（或反之）：算同一台
+                existing = self._by_ip.get(ip)
             if existing is None:
                 self._found[key] = info
+                if ip:
+                    self._by_ip[ip] = info
                 is_new = True
             else:
-                if not existing.ip and info.ip:
-                    existing.ip = info.ip
+                # 补充信息；注意也补序列号，这样后续两条通道能对到同一条记录上
+                if not existing.ip and ip:
+                    existing.ip = ip
+                    self._by_ip[ip] = existing
+                if not existing.serial and serial:
+                    existing.serial = serial
                 if not existing.name and info.name:
                     existing.name = info.name
                 if not existing.firmware and info.firmware:
                     existing.firmware = info.firmware
                 if not existing.model.is_known and info.model.is_known:
                     existing.model = info.model
+                # 补齐序列号后，原来那个以 IP 为键的条目要并到序列号键下，
+                # 否则 results 会同时吐出两条指向同一台设备的记录
+                if existing.serial and key != existing.serial and existing.serial not in self._found:
+                    self._found.pop(key, None)
+                    self._found[existing.serial] = existing
                 is_new = False
         if is_new:
             if info.ip.count(".") == 3:
@@ -659,33 +688,58 @@ class DiscoveryService:
 
 
 def discover(timeout: float = 12.0) -> list[PrinterInfo]:
-    """阻塞式自动搜索，返回找到的打印机列表。"""
+    """阻塞式自动搜索，返回找到的打印机列表。
+
+    返回前统一过一遍 :func:`merge_devices` 去重 —— 这是**唯一的收口点**，
+    桌面端、网页端、安卓版都从这里拿结果，所以在这之前不管哪条通道多报了
+    一条，调用方都不会看到重复项（用户看到的就是「同一台设备出现两次」）。
+    """
     found: list[PrinterInfo] = []
     service = DiscoveryService(found.append, timeout=timeout)
-    return service.run_blocking()
+    return merge_devices([], service.run_blocking())
 
 
 def merge_devices(existing: Iterable[PrinterInfo], found: Iterable[PrinterInfo]) -> list[PrinterInfo]:
-    """把搜索结果合并进已有列表（按序列号或 IP 去重）。"""
+    """把搜索结果合并进已有列表（按序列号或 IP 去重）。
+
+    与 :meth:`DiscoveryService._register` 同样的道理：只按
+    ``serial or ip`` 去重是不够的 —— 同一台设备在一条记录里带序列号、
+    在另一条里只认得出 IP 时，会被当成两台加进去。所以序列号与 IP 都要查。
+    """
     result: list[PrinterInfo] = []
     index: dict[str, PrinterInfo] = {}
+
+    def lookup(info: PrinterInfo) -> Optional[PrinterInfo]:
+        if info.serial and info.serial in index:
+            return index[info.serial]
+        if info.ip and info.ip in index:
+            return index[info.ip]
+        return None
+
+    def remember(info: PrinterInfo) -> None:
+        if info.serial:
+            index[info.serial] = info
+        if info.ip:
+            index[info.ip] = info
+
     for info in existing:
-        key = info.serial or info.ip
-        index[key] = info
         result.append(info)
+        remember(info)
     for info in found:
-        key = info.serial or info.ip
-        match = index.get(key)
+        match = lookup(info)
         if match is None:
-            index[key] = info
             result.append(info)
+            remember(info)
         else:
             if not match.ip:
                 match.ip = info.ip
+            if not match.serial:
+                match.serial = info.serial
             if not match.name:
                 match.name = info.name
             if not match.firmware:
                 match.firmware = info.firmware
             if not match.model.is_known and info.model.is_known:
                 match.model = info.model
+            remember(match)  # 补齐后新键也要指向同一条记录
     return result

@@ -558,13 +558,19 @@ class MainWindow(QMainWindow):
             )
             self._notify(f"⚠ {self.config.last_error}")
             return
+        # 保存成功，但有需要告知的情况（例如本平台没有 DPAPI、凭据是明文）
+        warning = getattr(self.config, "warnings", "")
+        if warning:
+            self._notify(f"⚠ {warning}")
         self._notify(f"配置已保存（{len(self.sessions)} 台）→ {config_path()}")
 
     def warn_config_problem(self) -> None:
-        """启动时提示配置读取阶段的降级（例如访问代码解不开）。"""
-        if not self.config.last_error:
-            return
-        self._notify(f"⚠ {self.config.last_error}")
+        """启动时提示配置读取阶段的降级（写盘失败算错误，凭据解不开算提示）。"""
+        if self.config.last_error:
+            self._notify(f"⚠ {self.config.last_error}")
+        warning = getattr(self.config, "warnings", "")
+        if warning:
+            self._notify(f"提示：{warning}")
 
     def export_config(self) -> None:
         from PySide6.QtWidgets import QFileDialog, QStandardPaths
@@ -580,8 +586,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if self.config.export_to(path):
-            if self.config.last_error:
-                QMessageBox.warning(self, "导出提示", self.config.last_error)
+            warning = getattr(self.config, "warnings", "")
+            if warning:
+                QMessageBox.information(self, "导出提示", warning)
             self._notify(f"配置已导出：{path}")
         else:
             QMessageBox.warning(
@@ -616,6 +623,10 @@ class MainWindow(QMainWindow):
         self.rebuild_grid()
         self._persist()
         self._notify(f"已导入 {len(self.tiles)} 台打印机")
+        # 导入成功；个别凭据解不开只是提示（重填即可），不是导入失败
+        warning = getattr(self.config, "warnings", "")
+        if warning:
+            self._notify(f"提示：{warning}")
 
     # ------------------------------------------------------------------ 网页监控
     def open_settings_dialog(self) -> None:

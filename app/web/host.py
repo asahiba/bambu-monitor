@@ -60,13 +60,25 @@ class WebHost:
 
     # ------------------------------------------------------------------ 发现
     def discover(self) -> list:
-        """扫描局域网。用与桌面端相同的实现（SSDP + 2021 广播）。"""
+        """扫描局域网。用与桌面端相同的实现（SSDP + 2021 广播）。
+
+        返回前再按「序列号或 IP」去一次重。`discovery.discover()` 自己已经去过重，
+        这里再做一遍是**兜底**：网页端是安卓版唯一的入口，列表里出现重复项会让
+        用户以为搜到了两台机器（改动前就是这个症状），代价只是几行判断。
+        """
         from ..bambu.discovery import discover as _discover
+        from ..bambu.discovery import merge_devices
 
         self.stats["discover"] += 1
         timeout = float(getattr(self.config, "last_timeout", 20.0) or 20.0)
+        try:
+            unique = merge_devices([], list(_discover(timeout=timeout)))
+        except Exception:
+            LOGGER.exception("自动搜索失败")
+            raise
+        known_ips = {getattr(item, "ip", "") for item in self._sessions()}
         found = []
-        for info in _discover(timeout=timeout):
+        for info in unique:
             found.append(
                 {
                     "ip": info.ip,
@@ -74,6 +86,7 @@ class WebHost:
                     "name": info.name,
                     "model": info.model.label,
                     "firmware": info.firmware,
+                    "known": info.ip in known_ips,
                 }
             )
         LOGGER.info("网页端自动搜索：发现 %d 台", len(found))
@@ -129,8 +142,13 @@ class WebHost:
                 self.config.printers.append(info)
 
             self.config.save()
+            # ⚠️ 只有 `last_error`（写盘真的失败）才算失败。
+            # `warnings` 是「凭据只能明文存」这类提示 —— 在安卓/Linux 上必然出现，
+            # 和设备有没有加上毫无关系。曾经把 warnings 也当失败，于是安卓上
+            # 设备已经加进去了、界面却报「添加失败当前系统没有 DPAPI」。
             if self.config.last_error:
                 return {"ok": False, "detail": self.config.last_error}
+            warning = getattr(self.config, "warnings", "") or ""
 
             # 已有会话就重启它（换了访问代码必须重连），没有就新建
             sessions = self._sessions()
@@ -152,7 +170,11 @@ class WebHost:
         LOGGER.info("网页端添加设备：%s（%s）", ip, detail)
         self._notify_change()
         total = len(self._sessions())
-        return {"ok": True, "detail": f"{detail}（共 {total} 台）"}
+        result = {"ok": True, "detail": f"{detail}（共 {total} 台）"}
+        if warning:
+            # 明确告诉用户"加上了，但有件事要知道"，不要让提示看起来像失败
+            result["warning"] = warning
+        return result
 
     # ------------------------------------------------------------------ 管理
     def manage_printer(
@@ -184,12 +206,17 @@ class WebHost:
                         item.access_code = access_code
                     break
             self.config.save()
+            # 同 add_printer：只认 last_error，warnings 不阻断
             if self.config.last_error:
                 return {"ok": False, "detail": self.config.last_error}
             # 改了访问代码要重连才生效
             session.restart()
             self._notify_change()
-            return {"ok": True, "detail": "已保存并重连"}
+            result = {"ok": True, "detail": "已保存并重连"}
+            warning = getattr(self.config, "warnings", "") or ""
+            if warning:
+                result["warning"] = warning
+            return result
 
         if action == "remove":
             session.stop()

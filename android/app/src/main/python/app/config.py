@@ -117,6 +117,7 @@ def _parse(data: dict[str, Any]) -> "AppConfig":
         web_max_width=_coerce_int(data, "web_max_width", 720, 240, 1920),
         # 凭据解密若有降级（例如换了 Windows 用户），在这里一并报给调用方
         last_error=secret.last_error() or "",
+        warnings=secret.last_warning() or "",
     )
 
 
@@ -143,9 +144,13 @@ class AppConfig:
     web_max_width: int = 720
     #: 为 False 时不写盘（演示/测试模式）
     persist: bool = True
-    #: 最近一次读写配置的失败/降级说明（保存失败、凭据只以明文保存、口令解不开…）；
-    #: 空字符串表示没有问题。界面据此提示用户，避免「以为存好了，其实没存」。
+    #: 最近一次读写配置的**失败**说明（保存失败、导出失败、导入失败…）；
+    #: 空字符串表示没有问题。调用方据此判定"操作是不是真的失败了"。
     last_error: str = ""
+    #: 最近一次读写配置的**提示**（不阻断操作）：例如「本平台没有 DPAPI，
+    #: 访问代码以明文保存」「某台打印机的访问代码解不开，请重填」。
+    #: 与 last_error 分开是必须的：把提示当错误会让安卓上成功的添加被报成失败。
+    warnings: str = ""
 
     # ------------------------------------------------------------------ 读写
     @classmethod
@@ -211,10 +216,20 @@ class AppConfig:
         return json.dumps(data, ensure_ascii=False, indent=2)
 
     def save(self) -> None:
-        """写盘；失败原因记录在 ``last_error``（不再静默吞掉）。"""
+        """写盘；失败原因记录在 ``last_error``（不再静默吞掉）。
+
+        注意区分两条通道（登录见 `app/util/secret.py` 的模块文档）：
+
+        * ``last_error`` —— **写盘真的失败了**，调用方应当判定操作失败；
+        * ``warnings``   —— 凭据只能明文存之类的提示，操作本身是成功的。
+
+        以前把后者也塞进 ``last_error``，导致安卓上「添加成功」被报成
+        「添加失败当前系统没有 DPAPI」。
+        """
         if not self.persist:
             return
         self.last_error = ""
+        self.warnings = ""
         path = config_path()
         # 先备份上一份，避免意外写坏或误删导致配置丢失
         try:
@@ -235,12 +250,15 @@ class AppConfig:
             LOGGER.error("配置保存失败：%s", exc)
             self.last_error = f"配置保存失败：{exc}"
             return
-        # 凭据加密若有降级（例如 Linux 没有 DPAPI），必须让用户知道
-        if secret.last_error():
-            self.last_error = secret.last_error() or ""
+        # 凭据加密若有降级（例如安卓/Linux 没有 DPAPI），只作为提示告知用户，
+        # **不**影响"保存成功"这个结论
+        warning = secret.last_warning()
+        if warning:
+            self.warnings = warning
 
     def export_to(self, path: str) -> bool:
         self.last_error = ""
+        self.warnings = ""
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(self.to_json())
@@ -248,13 +266,15 @@ class AppConfig:
             LOGGER.error("配置导出失败：%s", exc)
             self.last_error = f"配置导出失败：{exc}"
             return False
-        if secret.last_error():
-            self.last_error = secret.last_error() or ""
+        warning = secret.last_warning()
+        if warning:
+            self.warnings = warning
         return True
 
     def import_from(self, path: str) -> bool:
         """从导出的配置里恢复打印机列表（访问代码需为同一 Windows 用户加密的）。"""
         self.last_error = ""
+        self.warnings = ""
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -270,7 +290,8 @@ class AppConfig:
             return False
         if not loaded.printers:
             return False
-        self.last_error = loaded.last_error
+        # 导入成功；原文件里的凭据解不开只是提示（用户重填即可），不算导入失败
+        self.warnings = loaded.warnings
         self.printers = loaded.printers
         self.columns = loaded.columns
         self.max_fps = loaded.max_fps

@@ -196,6 +196,12 @@ function initToken(){
 function api(path){
   return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token);
 }
+/* 成功响应里可能带 warning（不阻断操作的提示，例如"本平台没有 DPAPI，
+   访问代码以明文保存"）。拼成一句附在成功提示后面 —— 关键是**不能**把它
+   当成失败，否则安卓上设备明明加上了却显示"添加失败"。 */
+function warnSuffix(result){
+  return (result && result.warning) ? '（提示：' + result.warning + '）' : '';
+}
 function showLogin(show){ document.getElementById('login').style.display = show ? 'flex' : 'none'; }
 
 /* ---------------------------------------------------------------- 时钟 */
@@ -684,7 +690,11 @@ async function runDiscover(){
         // 缺了会导致「有画面但永远没有进度/温度」
         serial: item.serial || ''
       });
-      toast(result.ok ? (result.detail || '已添加') : ('添加失败：' + (result.detail || '')));
+      // 注意 result.warning：像「本平台没有 DPAPI，凭据按明文保存」这类提示
+      // 不影响添加结果，但要让用户知道。之前把提示当错误，安卓上会报
+      // 「添加失败当前系统没有 DPAPI」—— 其实设备已经加上了。
+      toast(result.ok ? (result.detail || '已添加') + warnSuffix(result)
+                      : ('添加失败：' + (result.detail || '')));
       if (result.ok){ row.querySelector('.tag') || row.appendChild(makeTag('已添加')); }
       add.disabled = false;
     });
@@ -736,7 +746,7 @@ function openAdd(){
       model: document.getElementById('add-model').value.trim()
     });
     if (result.ok){
-      toast(result.detail || '已添加');
+      toast((result.detail || '已添加') + warnSuffix(result));
       closeModal();
       pollStatus();
     } else {
@@ -830,7 +840,7 @@ function openEdit(item){
       access_code: document.getElementById('ed-code').value.trim()
     });
     if (result.ok){
-      toast('已保存');
+      toast((result.detail || '已保存') + warnSuffix(result));
       await openManage();
     } else {
       status.textContent = '保存失败：' + (result.detail || '未知原因');
