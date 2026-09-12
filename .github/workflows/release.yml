@@ -219,9 +219,13 @@ jobs:
           cp "$(pick BambuMonitor-headless)"  release/BambuMonitor-linux-headless-x64
           cp "$(pick BambuMonitor-linux)"     release/BambuMonitor-linux-gui-x64
 
-          # 名字里带 tag 的两个产物按后缀找：
-          #   Docker: bambu-monitor-latest-image.tar.gz（注意有 "latest-"，
-          #           曾经在本地演练时因为写漏它而 cp 失败）
+          # 名字里带 tag/版本的两个产物按后缀找：
+          #   Docker: bambu-monitor-image.tar.gz
+          #           （注意工作流里是 `docker save > dist-docker/bambu-monitor-image.tar.gz`，
+          #            而本地 build-docker-image.ps1 产出的是
+          #            bambu-monitor-latest-image.tar.gz —— 两个名字不一样，
+          #            曾经照着本地的名字写死模式，结果 CI 上找不到。
+          #            这里用宽松模式，两边都匹配得上）
           #   APK   : BambuMonitor-1.0.0-arm64.apk
           copy_by_suffix() {
             local pattern="$1" dest="$2"
@@ -234,8 +238,8 @@ jobs:
             fi
             cp "$found" "$dest"
           }
-          copy_by_suffix 'bambu-monitor-*-image.tar.gz' release/BambuMonitor-docker-image.tar.gz
-          copy_by_suffix '*.apk'                        release/BambuMonitor-android-arm64.apk
+          copy_by_suffix 'bambu-monitor*.tar.gz' release/BambuMonitor-docker-image.tar.gz
+          copy_by_suffix '*.apk'                 release/BambuMonitor-android-arm64.apk
 
           chmod +x release/BambuMonitor-linux-headless-x64 release/BambuMonitor-linux-gui-x64
 
