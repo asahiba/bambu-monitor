@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -119,16 +120,36 @@ def test_save_load_roundtrip_preserves_printers():
 
 
 def test_save_load_roundtrip_preserves_access_code():
-    """契约：访问代码经 DPAPI 加密落盘（明文不出现），load() 能还原成原文。"""
+    """契约：访问代码能原样往返；在 Windows 上还必须**不以明文落盘**。
+
+    ⚠️ 这条测试以前写成「明文不得落盘」一刀切，于是**只在 Windows 上能过**：
+    非 Windows 平台没有 DPAPI，`secret.encrypt_text` 按设计退回明文保存
+    （见 `app/util/secret.py` 的模块文档与 `SECURITY.md`）。
+    这种写法会让 CI 的 Linux 任务必然失败 —— 而它确实失败了，
+    因为本地只在 Windows 上跑过全量回归。
+
+    所以这里按平台分别断言：**往返是共同契约**，加密落盘是 Windows 专有行为。
+    非 Windows 上反过来盯住「它是明文」这件事，避免哪天变成静默的意外。
+    """
     cfg = config.AppConfig()
     cfg.printers = [PrinterInfo(ip="10.0.0.5", access_code="12345678")]
     cfg.save()
 
     raw = _main_path().read_text(encoding="utf-8")
-    assert "12345678" not in raw  # 明文不得落盘
-    assert "dpapi:" in raw
 
+    # 共同契约：不管哪个平台，都要能原样读回来
     assert config.AppConfig.load().printers[0].access_code == "12345678"
+
+    if sys.platform == "win32":
+        assert "12345678" not in raw, "Windows 上明文不得落盘"
+        assert "dpapi:" in raw
+    else:
+        # 没有 DPAPI：明文保存是既定行为，且必须留下提示告诉用户
+        assert "12345678" in raw, (
+            "非 Windows 平台预期以明文保存访问代码；"
+            "若这里失败，说明加密策略变了，请同步更新 SECURITY.md 与 secret.py 的说明"
+        )
+        assert cfg.warnings, "明文保存必须留下 warnings 提示，不能静默"
 
 
 def test_save_load_roundtrip_of_switches_and_numbers():
