@@ -25,6 +25,39 @@ Set-Location $Here
 # 用本地 wheel 补上（见 app/build.gradle 的 pip 段）。
 # Chaquopy 17 起还要求 buildPython 的主次版本与 chaquopy.version 完全一致。
 function Get-BuildPython {
+    # 复用的两段小逻辑：读某解释器的主次版本 / 确保 .venv310 存在后返回它
+    function Get-PyMinor($exe) {
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $ver = (& $exe -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null)
+        $ErrorActionPreference = $savedEap
+        return "$ver".Trim()
+    }
+    function Use-Py310($exe) {
+        $venv = Join-Path $ProjectRoot ".venv310\Scripts\python.exe"
+        if (-not (Test-Path $venv)) {
+            Write-Host "  正在创建 Python 3.10 构建用虚拟环境 .venv310 ..."
+            & $exe -m venv (Join-Path $ProjectRoot ".venv310")
+        }
+        if (Test-Path $venv) { return $venv }
+        return $exe  # 建不出来就直接用原解释器，Chaquopy 也能干活
+    }
+
+    # 1) 显式指定优先。CI（GitHub Actions 的 setup-python）会把解释器装在
+    #    hostedtoolcache 下，下面的注册表/固定路径都找不到它，必须留这个口子。
+    if ($env:BAMBU_BUILD_PYTHON -and (Test-Path $env:BAMBU_BUILD_PYTHON)) {
+        $exe = $env:BAMBU_BUILD_PYTHON
+        $minor = Get-PyMinor $exe
+        if ($minor -eq "3.10") { return Use-Py310 $exe }
+        Write-Host "  ⚠ BAMBU_BUILD_PYTHON 指向的不是 3.10（实际 $minor），已忽略" -ForegroundColor Yellow
+    }
+
+    # 2) 当前正在跑的解释器（CI 里 setup-python 之后它就是 3.10）
+    $self = (Get-Process -Id $PID).Path
+    if ($self -and (Split-Path $self -Leaf) -match '^python') {
+        if ((Get-PyMinor $self) -eq "3.10") { return Use-Py310 $self }
+    }
+
     $candidates = @(
         (Join-Path $ProjectRoot ".venv310\Scripts\python.exe")
     )
@@ -48,20 +81,8 @@ function Get-BuildPython {
 
     foreach ($exe in $candidates) {
         if (-not (Test-Path $exe)) { continue }
-        $savedEap = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        $ver = (& $exe -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null)
-        $ErrorActionPreference = $savedEap
-        if ("$ver".Trim() -ne "3.10") { continue }
-
-        # 项目内的 .venv310 优先；不存在就从找到的 3.10 解释器建一个
-        $venv = Join-Path $ProjectRoot ".venv310\Scripts\python.exe"
-        if (-not (Test-Path $venv)) {
-            Write-Host "  正在创建 Python 3.10 构建用虚拟环境 .venv310 ..."
-            & $exe -m venv (Join-Path $ProjectRoot ".venv310")
-            if (-not (Test-Path $venv)) { continue }
-        }
-        return $venv
+        if ((Get-PyMinor $exe) -ne "3.10") { continue }
+        return Use-Py310 $exe
     }
     return $null
 }

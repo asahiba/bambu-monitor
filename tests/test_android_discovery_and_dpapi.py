@@ -17,7 +17,6 @@ from app.bambu.discovery import DiscoveryService, merge_devices
 from app.bambu.models import PrinterInfo, PrinterModel
 from app.util import secret
 
-
 # --------------------------------------------------------------- 搜索去重
 
 

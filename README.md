@@ -1,48 +1,99 @@
 # 拓竹打印机监控台 · Bambu Monitor
 
-一个运行在 Windows 上的拓竹（Bambu Lab）打印机**多画面实时监控软件**，界面参照小区/工厂监控软件：
-上方是实时画面墙，**每一路画面下方显示该打印机当前的工作进度、喷嘴温度和热床温度**。
+[![CI](https://github.com/asahiba/bambu-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/asahiba/bambu-monitor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/asahiba/bambu-monitor?include_prereleases&sort=semver)](https://github.com/asahiba/bambu-monitor/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
+
+一个**局域网内**的拓竹（Bambu Lab）打印机多画面实时监控台：上方是实时画面墙，
+每一路画面下方显示该打印机当前的工作进度、喷嘴/热床/腔体温度与料盘余量。
+
+**四种交付形态，同一套内核**：Windows 单文件 exe、Linux 单文件、Docker 单文件镜像、
+安卓 APK（内置 Python，平板可脱离电脑独立运行）。**网页端是各平台统一的操作界面。**
 
 * 通过 **IP + 访问代码**（局域网访问码）直连打印机，**不经过 Bambu 云端**
-* **自动搜索**：SSDP 组播 + 2021 端口广播双通道，一键发现局域网内所有拓竹打印机
-* 支持机型：**A1 / A1 mini / P1P / P1S / X1C / X1 / X1E / P2S / H2D / H2S / X2D**（未知机型也能连，协议通用）
+* **自动搜索**：SSDP 组播 + 单播补扫 + 2021 端口广播三通道，一键发现局域网内打印机
+* 支持机型：**A1 / A1 mini / P1P / P1S / X1 / X1C / X1E / A2L / P2S / H2D / H2D Pro / H2C / X2D**
+  （未知机型也能连，协议通用）
+* 不止拓竹：通过**设备族抽象**接入第三方开源/品牌打印机，已内置 Klipper / Moonraker
+  （覆盖 Snapmaker U1 等）—— 见 [架构说明](docs/ARCHITECTURE.md)
 * 监控墙特性：自适应分屏、单画面放大、轮巡、抓拍、时间戳叠加、离线提示、断线自动重连
+* **完全离线可开发**：内置打印机模拟器，没有真机也能跑通全链路
 
 ---
 
-## 1. 快速开始
+## 0. 下载安装包（不想自己编译）
 
-**方式 A：Windows 免安装 exe（推荐，目标电脑无需装 Python）**
+到 [Releases](https://github.com/asahiba/bambu-monitor/releases) 下载对应平台的单文件产物，
+目标机**什么都不用装**：
+
+| 平台 | 下载文件 | 用法 |
+| --- | --- | --- |
+| Windows | `BambuMonitor-windows-x64.exe` | 双击运行 |
+| Linux（无界面服务版） | `BambuMonitor-linux-headless-x64` | `chmod +x` 后 `./BambuMonitor-linux-headless-x64 --port 8080` |
+| Linux（带界面版） | `BambuMonitor-linux-gui-x64` | `chmod +x` 后直接运行（需图形环境） |
+| Docker | `BambuMonitor-docker-image.tar.gz` | `docker load -i ...` 见下 |
+| 安卓 | `BambuMonitor-android-arm64.apk` | 传到平板/手机安装（需允许"未知来源"） |
+
+每个 Release 都附带 `SHA256SUMS.txt`，下载后可核对：
+
+```bash
+sha256sum -c SHA256SUMS.txt        # Linux / macOS
+```
+
+> **安卓版说明**：APK 内置完整的 Python 运行时与 OpenCV，在平板本机跑 HTTP 服务，
+> 界面用 WebView 打开，所以**平板可以完全脱离电脑独立使用**；服务绑在 `0.0.0.0`，
+> 同一 Wi-Fi 下的其它设备也能访问这台平板的页面。
+> 目前是 debug 签名，仅供自用安装；上架应用商店需要换正式签名。
+>
+> ⚠️ 安卓版尚未在真机上跑过完整回归（开发机没有安卓设备）。如果你遇到问题，
+> 欢迎提 issue —— 出错时应用会把 Python 异常直接显示在界面上，方便定位。
+
+---
+
+## 1. 快速开始（从源码）
+
+```bash
+git clone https://github.com/asahiba/bambu-monitor.git
+cd bambu-monitor
+
+python -m venv .venv
+.venv/Scripts/activate         # Windows
+# source .venv/bin/activate    # Linux / macOS
+pip install -r requirements.txt
+```
+
+**方式 A：图形界面**
 
 ```
-双击 dist\BambuMonitor\BambuMonitor.exe
+python -m app                  # 或双击 run.bat（首次会自动建环境装依赖）
 ```
 
-> 该版本已打包好（PySide6 + paho-mqtt + OpenCV 全部内置），整个 `dist\BambuMonitor` 文件夹
-> 可以整体拷贝到其它 Windows 电脑直接运行。
-> 也可以带参数运行：`BambuMonitor.exe --sim`（演示模式）、`BambuMonitor.exe --ui-selftest`（界面自检）、
-> `BambuMonitor.exe --headless`（无界面服务模式）、`BambuMonitor.exe --export-config D:\backup.json`（备份配置）。
-
-**方式 B：从源码运行（Windows）**
+**方式 B：无界面服务版（浏览器当界面）**
 
 ```
-双击 run.bat          # 首次会自动创建虚拟环境并安装依赖（约 2-5 分钟）
+python -m app.headless --host 0.0.0.0 --port 8080 --status-interval 0
 ```
 
-**方式 C：Linux / Docker / 安卓** —— 见 [`docs/DEPLOY.md`](docs/DEPLOY.md)
+首次启动会生成随机访问令牌，日志里会打印带令牌的完整地址。
+网页端也支持「添加到主屏幕」当 PWA 用。
+
+**方式 C：Linux / Docker** —— 见 [`docs/DEPLOY.md`](docs/DEPLOY.md)、[`docs/PACKAGING.md`](docs/PACKAGING.md)
 
 ```
-./linux/install.sh && ./linux/run-headless.sh     # Linux 无界面服务（不含 Qt）
+./linux/run-headless.sh                           # 已装依赖时直接起服务
 docker compose up -d                              # Docker（host 网络，可自动搜索）
-手机浏览器打开监控地址 → 「添加到主屏幕」          # 安卓 PWA，全屏运行
 ```
 
-想先看效果、手边没有打印机：
+**手边没有打印机？** 内置模拟器会伪造完整的打印机（含 TLS、JPEG 帧、发现协议）：
 
 ```
-双击 demo.bat         # Windows：4 台虚拟打印机 + 图形界面
-双击 selftest.bat     # Windows：无界面自检（搜索 → 遥测 → 画面）
-docker run --rm -p 8080:8080 bambu-monitor python -m app.headless --sim 4   # Docker 演示
+python -m app --sim 4          # 4 台虚拟打印机 + 图形界面
+python -m app --core-test      # 无界面自检（搜索 → 遥测 → 画面）
+bash demo.bat / sim.bat        # Windows 快捷方式
+docker run --rm -p 8080:8080 bambu-monitor python -m app.headless --sim 4
+```
+
 ```
 
 命令行方式：
@@ -427,3 +478,33 @@ X1C 的 322 端口已确认可连通并能完成 TLS 握手与鉴权交互（错
 * 控制指令（暂停/继续/停止/开关灯/速度档位）通过打印机官方 MQTT 接口下发，与 Bambu Studio 行为一致；
   停止不可恢复，桌面端与网页端都有二次确认，命令行必须加 `--yes`。
 * 本项目非 Bambu Lab 官方软件，机型与固件差异可能导致个别功能不可用，欢迎按 `docs/PROTOCOL.md` 补充。
+* 本项目与 Bambu Lab 无隶属关系，也未获得其背书。商标归各自所有者。
+
+## 10. 参与贡献
+
+欢迎 issue 与 PR。**不需要真打印机**就能开发 —— 内置模拟器会把整条链路
+（TLS 遥测、6000 端口 JPEG、发现协议）都伪造出来：
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q          # 回归套件，完全离线
+python -m pytest -q -m slow  # 慢速端到端（模拟器 + 真实端口）
+ruff check .                 # 静态检查
+```
+
+改动前建议先读 [`CONTRIBUTING.md`](CONTRIBUTING.md)（含几条硬性约定，
+以及 PowerShell 脚本的两个格式坑）；要接新品牌请看
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 的设备族抽象一节。
+
+安全问题请按 [`SECURITY.md`](SECURITY.md) 私下报告，不要开公开 issue。
+
+## 11. 许可证
+
+[MIT](LICENSE) © 2026 asahiba
+
+第三方资源的许可与出处：
+
+* HMS 错误码中文文案取自 [ha-bambulab](https://github.com/greghesp/ha-bambulab)（MIT），
+  见 `app/bambu/data/`；
+* 内置的 Bambu Lab CA 证书用于校验打印机自签证书；
+* 安卓版通过 [Chaquopy](https://chaquo.com/chaquopy/) 内嵌 CPython。

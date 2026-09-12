@@ -1,0 +1,178 @@
+name: Release
+
+# 打一个形如 v1.0.0 的 tag 就会：
+#   1. 在 Windows / Linux 两个 runner 上构建全部产物
+#   2. 打包前先在干净容器里做**冒烟验证**（起服务 + 健康检查）
+#   3. 建 Release 并把单文件产物挂上去
+#
+# 为什么要跨平台两个 runner：PyInstaller **不能跨平台编译**，
+# Windows 的 exe 必须在 Windows 上打，Linux 的 ELF 必须在 Linux 上打。
+# 安卓 APK 也放在 Windows runner：`android/build-apk.ps1` 是 PowerShell 脚本，
+# 且 Chaquopy 在 Windows 上构建是验证过的路径（详见 docs/PACKAGING.md）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v1.0.0）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------- Windows
+  windows:
+    name: Windows 单文件 + 安卓 APK
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 桌面版固定 3.13：与本地开发一致，也是 requirements.txt 的目标
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: 构建 Windows 单文件
+        run: python -m PyInstaller --noconfirm --clean BambuMonitor-onefile.spec
+
+      # 产物必须真的能跑：--version 与 --core-test（模拟器全链路）都要过
+      - name: 冒烟验证 exe
+        shell: pwsh
+        run: |
+          $exe = "dist\BambuMonitor.exe"
+          if (-not (Test-Path $exe)) { throw "找不到产物 $exe" }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "--version 失败" }
+          & $exe --core-test
+          if ($LASTEXITCODE -ne 0) { throw "--core-test 失败" }
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/BambuMonitor.exe
+          if-no-files-found: error
+
+      # ---- 安卓 APK ----
+      # Chaquopy 要求 buildPython 的主次版本与 chaquopy.version 一致，
+      # 而安卓版锁定 3.10（Chaquopy 仓库在 android_24_arm64_v8a 上只有 cp310 的
+      # opencv）—— 详见 android/app/build.gradle 里的长注释。
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: actions/setup-python@v5
+        id: py310
+        with:
+          python-version: "3.10"
+
+      - name: 构建 APK
+        shell: pwsh
+        env:
+          # setup-python 把 3.10 装在 hostedtoolcache 下，脚本按注册表/固定路径
+          # 找不到它，所以显式告诉它。脚本里还有"当前解释器"与 py 启动器兜底。
+          #（Android SDK 由 setup-android 设好 ANDROID_HOME，脚本会自己认）
+          BAMBU_BUILD_PYTHON: ${{ steps.py310.outputs.python-path }}
+        run: |
+          # build-apk.ps1 会建 .venv310、下 numpy wheel、跑 Gradle
+          powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist-android/*.apk
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Linux
+  linux:
+    name: Linux 单文件 + Docker 镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 复用仓库自己的构建脚本而不是在 runner 上直接装 Qt：
+      # 那两个脚本把"构建环境 = 部署环境"这件事已经验证过了
+      # （带界面版缺 libxcb/libGL 会炸，脚本里为此专门分了构建镜像）。
+      - name: 构建 Linux 无界面版
+        run: bash linux/build-headless-docker.sh
+
+      - name: 构建 Linux 带界面版
+        run: bash linux/build-onefile-docker.sh
+
+      - name: 上传 Linux 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist-onefile-headless/BambuMonitor-headless
+            dist-onefile-linux/BambuMonitor-linux
+          if-no-files-found: error
+
+      - name: 构建 Docker 镜像并导出
+        run: |
+          docker build -t bambu-monitor:latest .
+          docker run -d --name smoke -p 18080:8080 bambu-monitor:latest || true
+          for i in $(seq 1 20); do
+            sleep 3
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
+              echo "健康检查通过"; break
+            fi
+          done
+          curl -fsS http://127.0.0.1:18080/health && echo
+          docker rm -f smoke || true
+          mkdir -p dist-docker
+          docker save bambu-monitor:latest | gzip -9 > dist-docker/bambu-monitor-image.tar.gz
+
+      - name: 上传 Docker 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker
+          path: dist-docker/bambu-monitor-image.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Release
+  release:
+    name: 发布
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 收集全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 整理文件名并生成校验清单
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/windows/BambuMonitor.exe                 release/BambuMonitor-windows-x64.exe
+          cp artifacts/linux/BambuMonitor-headless              release/BambuMonitor-linux-headless-x64
+          cp artifacts/linux/BambuMonitor-linux                 release/BambuMonitor-linux-gui-x64
+          cp artifacts/docker/bambu-monitor-image.tar.gz        release/BambuMonitor-docker-image.tar.gz
+          cp artifacts/android/*.apk                            release/BambuMonitor-android-arm64.apk
+          chmod +x release/BambuMonitor-linux-headless-x64 release/BambuMonitor-linux-gui-x64
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 建 Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
