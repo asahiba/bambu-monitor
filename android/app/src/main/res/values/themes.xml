@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 深色主题，与桌面版/网页版的配色一致（theme.py 与 page.py 的暗色系） -->
+    <!-- 深色全屏主题；与桌面版/网页版观感一致 -->
     <style name="Theme.BambuMonitor" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:statusBarColor">@color/panel</item>

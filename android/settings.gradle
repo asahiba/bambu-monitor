@@ -1,3 +1,39 @@
-plugins {
-    id 'com.android.application' version '8.7.3' apply false
+// 拓竹打印机监控台 · 安卓版（平板可独立运行）
+//
+// 架构：**把现有 Python 内核嵌进 APK**（Chaquopy），而不是用 Java 重写协议栈。
+//   * Python 侧直接复用 app/ 全部代码（协议层 + 网页服务 + 内置模拟器），
+//     这部分已有数百项回归测试覆盖；
+//   * Android 侧只做三件事：拉起 Python 服务、全屏 WebView 显示它、处理生命周期。
+//
+// 为什么不重写：MQTT over TLS、SSDP 发现、6000 端口鉴权帧格式、RTSPS 拉流、
+// HMS 错误码表、多路复用推流……这些都是本项目已经踩完坑并测试过的部分。
+// 用 Java 重写既慢又必然引入新 bug。
+//
+// 为什么平板能独立运行：Python 服务跑在设备本机（127.0.0.1），
+// 因此不需要电脑在旁边。同时它绑 0.0.0.0，所以手机也能连这台平板看监控。
+
+pluginManagement {
+    repositories {
+        // ⚠️ 这三个仓库都必须声明，缺一个就会报
+        // "Plugin [id: 'com.android.application', ...] was not found in any of the following sources"：
+        //   google()        —— Android Gradle Plugin
+        //   mavenCentral()  —— 一般依赖
+        //   chaquo.com/maven—— Chaquopy 插件本体（不在 mavenCentral 上）
+        google()
+        mavenCentral()
+        maven { url "https://chaquo.com/maven" }
+    }
 }
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        // Chaquopy 的 Python 原生包（numpy / cryptography / opencv…）从这里取
+        maven { url "https://chaquo.com/maven" }
+    }
+}
+
+rootProject.name = "BambuMonitor"
+include ':app'

@@ -1,46 +1,15 @@
-// 拓竹打印机监控台 · 安卓壳工程
+// 根工程构建文件（**不是**应用模块）。
 //
-// 这是一个**极薄的 WebView 壳**：把已在运行的网页监控墙（内置网页服务）
-// 全屏包进一个 APK，装到手机上点开即用，不需要在浏览器里输地址。
+// ⚠️ 这里只能 `apply false` 地声明插件版本，不能直接 `id 'com.android.application'`：
+// 直接 apply 会让 Gradle 把根工程本身当成一个 Android 应用模块，
+// 于是它去找 `android { ... }` 配置时用的是根目录，报出
+// "Plugin [id: 'com.android.application'] was not found"。
+// 真正的应用模块是 `:app`（见 app/build.gradle）。
 //
-// 为什么不做"真·原生安卓版"：监控软件的主体是**局域网内的打印机连接**
-// （MQTT/摄像头/发现），把整个 Python 运行时搬进手机会多出几百 MB
-// 且手机需要一直在前台，实用价值为负。正确形态是：
-//   电脑/服务器/NAS 跑服务端  →  手机看画面
-// 这也正是本项目既有的 PWA 方案所做的事；本 APK 只是把它变成"可安装"
-// 的形态，省掉"添加到主屏幕"这一步。
-//
-// 构建方式与前置条件见 android/README.md。
+// 历史教训：本文件曾经是旧版 WebView 壳的**模块级** build.gradle，
+// 加入 Chaquopy 版 app 模块后两者冲突，构建一直失败。
+// 想改应用配置请改 app/build.gradle。
 plugins {
-    id 'com.android.application'
-}
-
-android {
-    namespace 'com.bambumonitor.viewer'
-    compileSdk 34
-
-    defaultConfig {
-        applicationId "com.bambumonitor.viewer"
-        minSdk 24
-        targetSdk 34
-        versionCode 1
-        versionName "1.0.0"
-    }
-
-    buildTypes {
-        release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-}
-
-dependencies {
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.webkit:webkit:1.12.1'
+    id 'com.android.application' version '8.7.3' apply false
+    id 'com.chaquo.python' version '17.0.0' apply false
 }

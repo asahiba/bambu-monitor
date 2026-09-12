@@ -397,20 +397,28 @@ class PrinterSession:
     # ------------------------------------------------------------------ 能力
     @property
     def capabilities(self) -> "DeviceCapabilities":
-        """这台设备「能做什么」（机型固有能力 + 运行时观测）。
+        """这台设备「能做什么」（机型固有能力 + **运行时实际上报**）。
 
         界面与网页一律读这个，**不要**再去读 `info.model.has_chamber_sensor` 这类
         机型属性——那样会把「按能力分支」退化成「按机型分支」，接入第三方设备族时
-        每一处都要改。运行时叠加的部分：
+        每一处都要改。
 
-        * `nozzle_count`：H2D 这类双喷嘴机型只有在上报第二路温度时才真的是 2。
+        运行时观测覆盖机型推断的两处（都为修正实测与规格不符的情况）：
+
+        * ``can_control_light``：设备只要上报了 ``lights_report`` 节点，就说明它**真的有灯**。
+          实测教训：A2L 是开放式机型，按规格推断"无舱灯"，但真机上报了
+          ``chamber_light`` —— 于是界面把灯按钮藏了，用户没法开关灯。
+          **机型规格推不出灯光能力，只有设备上报才算数。**
+        * ``nozzle_count``：H2D 这类双喷嘴机型只有在上报第二路温度时才真的是 2。
         """
-        from ..core.capabilities import DeviceCapabilities  # noqa: F401  （运行时按需导入）
-
         base = self.info.model.capabilities
+        changes: dict[str, object] = {}
+        if self.status.lights:
+            # 设备上报了灯（哪怕只有一个节点）→ 允许控制
+            changes["can_control_light"] = True
         if self.status.nozzle_temper_2 is not None:
-            return base.merged(nozzle_count=max(2, base.nozzle_count))
-        return base
+            changes["nozzle_count"] = max(2, int(base.nozzle_count))
+        return base.merged(**changes) if changes else base
 
     # ------------------------------------------------------------------ 控制
     @property

@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">打印机监控</string>
+    <string name="starting_title">拓竹打印机监控台</string>
+    <string name="starting_message">正在启动内置服务…\n首次启动需要几秒钟</string>
+    <string name="retry">重试</string>
+    <string name="start_failed_title">无法启动内置服务</string>
+    <string name="start_failed_message">请把下面的信息反馈给开发者：</string>
+    <string name="copy_error">复制错误信息</string>
+    <string name="copied">已复制</string>
 </resources>

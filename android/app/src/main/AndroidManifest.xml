@@ -1,20 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  拓竹打印机监控台 · 安卓壳
+  拓竹打印机监控台 · 安卓版（平板可独立运行）
 
   权限说明：
-  * INTERNET                —— 访问局域网内的网页监控服务
-  * ACCESS_NETWORK_STATE    —— 判断当前是否连上 Wi-Fi（没连时给出可读提示）
-  * ACCESS_WIFI_STATE       —— 读取当前 Wi-Fi 名称，用于提示"是否与打印机同一网段"
+  * INTERNET             —— 连接局域网打印机（MQTT 8883 / 6000 / 322）与访问本机服务
+  * ACCESS_NETWORK_STATE —— 判断网络是否可用，给出可读提示
+  * ACCESS_WIFI_STATE    —— 读取当前 Wi-Fi，用于提示"是否与打印机同一网段"
 
-  ⚠️ 刻意**不申请**存储、位置、相机等权限：这个壳只做一件事——显示网页。
-  位置权限常被用来推断 Wi-Fi 列表，本应用不需要，申请了反而会让用户警惕。
+  ⚠️ 刻意**不申请**位置、存储、相机权限：
+  位置权限常被用来推断 Wi-Fi 列表，本应用不需要；申请了反而会让用户警惕。
+
+  关于 usesCleartextTraffic：打印机与内置网页服务都是 http://（局域网自签/无证书），
+  安卓 9+ 默认禁止明文流量，不开这个开关监控页会白屏。
+  局域网内自用是可接受的折中；若要暴露到公网请自行加 HTTPS 反向代理。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- 局域网监控：声明为可在大屏上运行，但手机同样可用 -->
+    <supports-screens
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:xlargeScreens="true" />
 
     <application
         android:allowBackup="true"
@@ -24,15 +34,9 @@
         android:theme="@style/Theme.BambuMonitor"
         android:usesCleartextTraffic="true">
 
-        <!--
-          usesCleartextTraffic 必须为 true：局域网监控服务是 http://（没有证书），
-          安卓 9+ 默认禁止明文流量，不开这个开关页面会白屏。
-          局域网内自用是可接受的折中；若日后要放到公网，请改用 HTTPS。
-        -->
-
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="fullSensor">

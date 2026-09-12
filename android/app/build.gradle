@@ -1,0 +1,84 @@
+// 拓竹打印机监控台 · 安卓版
+//
+// 关键点说明见 android/README.md 与 settings.gradle 的注释。
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.bambumonitor'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.bambumonitor"
+        minSdk 24              // Chaquopy 17 要求至少 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+
+        ndk {
+            // Python 解释器是原生组件，必须指定 ABI。
+            // arm64-v8a 覆盖当前绝大多数平板/手机；armeabi-v7a 只支持 Python 3.11 及更早，
+            // 因此本项目（3.13 语法）只出 arm64。
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        // 原生库不能压缩，否则 Chaquopy 运行时加载失败
+        jniLibs { useLegacyPackaging = true }
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        // 与项目其它部分一致的 Python 版本（代码用了 3.10+ 的语法）
+        version = "3.13"
+
+        // ⚠️ buildPython 必须指向**本机**的 Python 解释器：Chaquopy 用它来
+        // 解析/编译 pip 依赖。不指定的话它会在 PATH 里找 python3，
+        // 而本机 PATH 上的 python 是应用商店占位符（0 字节转发器），必然失败
+        // ——报错是 "Couldn't find Python 3.13"。
+        //
+        // 这里从 local.properties（Gradle 的本地配置文件，不入库）读取，
+        // 由 android/build-apk.ps1 写入；读不到就退回项目自带的 .venv。
+        def localProps = new Properties()
+        def localFile = rootProject.file("local.properties")
+        if (localFile.exists()) {
+            localFile.withInputStream { localProps.load(it) }
+        }
+        def venvPython = localProps.getProperty("bambu.python")
+        if (venvPython == null) {
+            venvPython = new File(rootProject.projectDir, "../.venv/Scripts/python.exe")
+                    .getCanonicalPath()
+        }
+        buildPython venvPython
+
+        pip {
+            // 纯 Python 包（从 PyPI 装）
+            install "paho-mqtt"
+            // 原生包（Chaquopy 自带预编译版本，从它的仓库装）
+            install "cryptography"            // 内置模拟器生成自签证书用
+            install "opencv-python-headless"  // RTSPS(322) 通道拉流用
+            install "numpy"                   // opencv 的依赖
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

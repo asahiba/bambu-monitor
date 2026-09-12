@@ -52,10 +52,12 @@ def test_双喷嘴机型在上报第二路温度后能力变为2():
 @pytest.mark.parametrize(
     "model, has_light",
     [
-        # 开放机型：没有舱灯，界面不该显示灯按钮
+        # 开放机型：按规格推断没有舱灯
         (PrinterModel.A1, False),
         (PrinterModel.A1MINI, False),
-        (PrinterModel.A2L, False),
+        # ⚠️ A2L 例外：开放式机型，但**实测有 chamber_light**，
+        # 且用官方 MQTT 报文开关灯被回读确认成功（见下一个用例）
+        (PrinterModel.A2L, True),
         # 封闭腔体机型：有舱灯
         (PrinterModel.P1P, True),
         (PrinterModel.P1S, True),
@@ -67,11 +69,45 @@ def test_双喷嘴机型在上报第二路温度后能力变为2():
     ],
 )
 def test_舱灯能力按机型区分(model, has_light):
-    """契约：A1/A1 mini/A2L 是开放机型、没有舱灯；其余封闭机型有。
+    """契约：按机型推断的舱灯能力（**仅供参考**，界面不应据此藏按钮）。
 
-    改造前界面只看「遥测在线」就显示灯按钮，会给 A1 用户一个**按不动的灯按钮**。
+    注意 A2L 为 True —— 它是开放式机型，我原先按规格推断"无舱灯"，
+    但真机上报了 `chamber_light`，导致灯按钮被藏、用户无法开关灯。
+    详见下一个用例：真正的判据是「设备是否上报了灯」。
     """
     assert model.capabilities.can_control_light is has_light
+
+
+def test_A2L有舱灯因为是实测的():
+    """契约：A2L 必须声明有舱灯。
+
+    实测（2026-09，固件 01.01.05.00）：
+    `lights_report = [{"node": "chamber_light", "mode": "off"}]`，
+    且用官方 MQTT `system/ledctrl` 报文开关灯都被回读确认成功。
+    机型规格（"open-frame"）推不出灯光能力，只有设备上报才算数。
+    """
+    assert PrinterModel.A2L.has_enclosure_light is True
+    assert PrinterModel.A2L.capabilities.can_control_light is True
+
+
+def test_会话采纳设备实际上报的灯能力():
+    """契约：只要设备上报了 `lights_report`，会话能力就允许控制灯。
+
+    这是根本修法：不再靠机型猜测。哪怕某机型的规格推断是"无灯"，
+    只要它真的上报了灯节点，界面就必须给出开关。
+    """
+    session = PrinterSession(PrinterInfo(ip="127.0.0.1", model=PrinterModel.A2L))
+    # A1 是我们认为"没有灯"的机型，用它验证"上报即允许"这条兜底逻辑
+    a1 = PrinterSession(PrinterInfo(ip="127.0.0.1", model=PrinterModel.A1))
+    assert a1.capabilities.can_control_light is False, "A1 机型能力确实是没有灯"
+
+    a1.status.apply_report({"print": {"lights_report": [{"node": "chamber_light", "mode": "on"}]}})
+    assert a1.capabilities.can_control_light is True, "设备上报了灯就必须允许控制"
+    assert a1.status.light_on is True
+
+    session.status.apply_report({"print": {"lights_report": [{"node": "chamber_light", "mode": "off"}]}})
+    assert session.capabilities.can_control_light is True
+    assert session.status.light_on is False
 
 
 @pytest.mark.parametrize(

@@ -303,15 +303,31 @@ def run_headless(argv: list[str] | None = None) -> int:
     for session in sessions:
         session.start()
 
+    from .web.host import WebHost
     from .web.server import WebServer
 
+    # 网页端要能自己搜设备、加设备、改设置 —— 安卓版没有桌面界面，
+    # 网页就是唯一入口。这里把配置与协议层接给它（见 app/web/host.py）。
+    def sync_web_settings() -> None:
+        """设置变更后让网页服务立刻用上新参数（帧率/画面宽度）。"""
+        try:
+            server.cache.set_fps(config.web_fps, config.web_max_width)
+        except Exception:  # noqa: BLE001 - 缓存还没建好时忽略，下次生效
+            pass
+
+    host = WebHost(config, lambda: sessions, on_change=sync_web_settings)
     server = WebServer(
-        get_sessions=lambda: list(sessions),
+        get_sessions=lambda: sessions,
         port=args.port,
         token=config.web_token,
         fps=args.fps,
         max_width=args.width,
         host=args.host,
+        discover_fn=host.discover,
+        add_printer_fn=host.add_printer,
+        manage_printer_fn=host.manage_printer,
+        get_settings_fn=host.get_settings,
+        update_settings_fn=host.update_settings,
     )
     if not server.start():
         print(f"✗ 无法监听 {args.host}:{args.port}（端口被占用？）")

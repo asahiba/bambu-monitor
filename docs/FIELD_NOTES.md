@@ -224,6 +224,40 @@ A2L 的 MQTT 报文里：
 * MQTT 里的 `devmodel`/`product_name` 字段（用于回答「A2L 的代号到底是不是 N9」）。
 * 320 端口不存在（已确认 322 不可达），故 A2L 固定走 6000 —— 与代码中的声明一致。
 
+---
+
+## 1.5 实测（五）：A2L **有舱灯** —— 纠正一次「按规格推断」的错误
+
+**背景**：A2L 是开放式机型（open-frame Cartesian），我据此在代码里把它归入
+「无舱灯」（与 A1 / A1 mini 同列），于是桌面界面的灯按钮被隐藏，用户无法开关灯。
+
+**实测结果（2026-09，固件 01.01.05.00）**：A2L 明确上报
+
+```json
+"lights_report": [{ "node": "chamber_light", "mode": "off" }]
+```
+
+并且用与 `PrinterSession.set_light()` **完全相同**的官方 MQTT 报文
+（`system/ledctrl` + `led_node=chamber_light`）实测：
+
+| 操作 | 下发 | 回读 `lights_report[0].mode` | 结果 |
+| --- | --- | --- | --- |
+| 开灯 | `led_mode=on` | `on` | ✓ 成功 |
+| 关灯 | `led_mode=off` | `off` | ✓ 成功 |
+
+**结论与修正**：
+
+1. A2L 有舱灯，且协议与老机型一致 —— 控制报文不需要任何改动，
+   问题**纯粹出在界面的能力判定上**。
+2. **机型规格推不出灯光能力。** 已做两处修正：
+   * `PrinterModel.A2L` 加入 `has_enclosure_light`；
+   * 更根本的：`PrinterSession.capabilities` 与界面改为**以设备实际上报为准** ——
+     只要 `lights_report` 里有节点就允许控制，不再依赖机型猜测。
+     这样即使将来又出现"规格说没有、实际有"的机型，也不会再把按钮藏掉。
+3. 同类教训值得记牢：本项目已经因为"按规格推断"错过两次
+   （另一次是把 A2L 归入 `has_chamber_sensor=False`，虽然腔温 5.0℃ 确实可疑，
+   但那是**读数可疑**，不是**功能不存在**）。**能实测就不要推断。**
+
 
 ---
 

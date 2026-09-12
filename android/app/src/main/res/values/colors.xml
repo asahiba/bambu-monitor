@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 与软件其它部分同一套暗色配色（见 app/ui/theme.py） -->
+    <!-- 与桌面版/网页版同一套暗色配色（见 app/ui/theme.py 与 app/web/page.py） -->
     <color name="bg">#0D1114</color>
     <color name="panel">#151C21</color>
     <color name="accent">#25C2D6</color>
+    <color name="text_dim">#8FA3AD</color>
 </resources>

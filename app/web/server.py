@@ -155,6 +155,31 @@ class _Handler(BaseHTTPRequestHandler):
     def app(self) -> "WebServer":
         return self.server.app  # type: ignore[attr-defined]
 
+    # ------------------------------------------------------------------ 宿主回调
+    # 设备管理与设置的真实实现由宿主（安卓版 / 桌面版）注入到 **WebServer** 上，
+    # 而处理器实例本身没有这些属性 —— 必须经 self.app 取。
+    # 这里统一做一层转发，避免在每个处理器里写 self.app.xxx（漏一处就是
+    # AttributeError: '_Handler' object has no attribute ...）。
+    @property
+    def discover_fn(self):
+        return self.app.discover_fn
+
+    @property
+    def add_printer_fn(self):
+        return self.app.add_printer_fn
+
+    @property
+    def manage_printer_fn(self):
+        return self.app.manage_printer_fn
+
+    @property
+    def get_settings_fn(self):
+        return self.app.get_settings_fn
+
+    @property
+    def update_settings_fn(self):
+        return self.app.update_settings_fn
+
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         if self.app.verbose:
             print(f"[web] {self.address_string()} {fmt % args}")
@@ -211,6 +236,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/api/printers":
             self._printers()
+        elif path == "/api/discover":
+            self._discover()
+        elif path == "/api/settings":
+            # 读取设置走 GET，修改走 POST（同一个处理器按 self.command 分支）
+            self._settings()
         elif path == "/api/live":
             self._live()
         elif path.startswith("/api/frame/"):
@@ -264,6 +294,51 @@ class _Handler(BaseHTTPRequestHandler):
     def _printers(self) -> None:
         self._send_bytes(
             json.dumps(self._status_payload(), ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+
+    def _discover(self) -> None:
+        """扫描局域网并把结果回给前端。
+
+        网页端原先只能**监控**已配置的设备，不能在界面上添加打印机 ——
+        在平板上尤其致命（安卓版没有桌面端的「自动搜索」对话框，
+        用户会被卡在"没有设备"这一步）。这里把发现能力暴露成 API。
+
+        ``discover_fn`` 由宿主注入：桌面/无界面版传 None（返回"不支持"），
+        安卓版注入内置实现。这样既不把 Android 专有代码塞进通用服务端，
+        也让测试能注入假实现。
+        """
+        if self.discover_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不支持在网页上搜索设备"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        try:
+            found = self.discover_fn()
+        except Exception as exc:  # noqa: BLE001 - 搜索失败要让前端看到原因
+            self._send_bytes(
+                json.dumps(
+                    {"supported": True, "error": f"{type(exc).__name__}: {exc}"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+        known_ips = {session.info.ip for session in self._sessions()}
+        items = []
+        for item in found or []:
+            entry = dict(item)
+            entry["known"] = entry.get("ip") in known_ips
+            items.append(entry)
+        self._send_bytes(
+            json.dumps({"supported": True, "total": len(items), "printers": items},
+                       ensure_ascii=False).encode("utf-8"),
             "application/json; charset=utf-8",
         )
 
@@ -472,7 +547,11 @@ class _Handler(BaseHTTPRequestHandler):
             return False
 
     def do_POST(self) -> None:  # noqa: N802
-        """控制接口：POST /api/command  {"index":0,"action":"pause"}"""
+        """控制与设备管理接口。
+
+        * ``POST /api/command``       ``{"index":0,"action":"pause"}``
+        * ``POST /api/add_printer``   ``{"name":"","ip":"","access_code":""}``
+        """
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         path = parsed.path.rstrip("/") or "/"
@@ -482,6 +561,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
                 HTTPStatus.UNAUTHORIZED,
             )
+            return
+        if path == "/api/add_printer":
+            self._add_printer()
+            return
+        if path == "/api/printers":
+            self._manage_printer()
+            return
+        if path == "/api/settings":
+            self._settings()
             return
         if path != "/api/command":
             self._send_bytes(b"not found", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
@@ -507,6 +595,168 @@ class _Handler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8",
             HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
         )
+
+    def _add_printer(self) -> None:
+        """添加/更新一台打印机，并在**不重启服务**的前提下让监控墙出现它。
+
+        这是「平板上没有桌面端那个添加对话框」的补偿：网页里就能把设备加进来。
+        实现要点：`add_printer_fn`（安卓版注入）负责落盘与构造会话；
+        返回的会话由宿主直接接到当前会话列表上，因此界面立刻能看到新设备。
+        """
+        if self.add_printer_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"ok": False, "detail": "该运行方式不支持在网页上添加设备"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.add_printer_fn(
+                name=str(body.get("name", "") or ""),
+                ip=str(body.get("ip", "") or ""),
+                access_code=str(body.get("access_code", "") or ""),
+                model_label=str(body.get("model", "") or ""),
+                # 序列号决定遥测订阅主题 device/<序列号>/report；
+                # 「自动搜索」的结果里带着它，前端必须一起回传。
+                serial=str(body.get("serial", "") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - 添加失败要让界面看到原因
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _manage_printer(self) -> None:
+        """设备管理：删除 / 重连 / 修改设置。``{"index":0,"action":"remove"}``
+
+        桌面端有右键菜单能做这些事，网页端原先只能看不能管 —— 对平板用户尤其致命
+        （安卓版没有桌面界面，网页就是唯一入口）。这里补齐。
+
+        支持的动作：
+        * ``remove``  删除该设备（同时从配置里移除）
+        * ``reconnect`` 重连（相当于桌面端的「重新连接」）
+        * ``update``  修改名称/访问代码（``name`` / ``access_code`` 可选）
+        """
+        if self.manage_printer_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"ok": False, "detail": "该运行方式不支持在网页上管理设备"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            index = int(body.get("index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        action = str(body.get("action", "") or "")
+        if action not in ("remove", "reconnect", "update"):
+            self._send_bytes(
+                json.dumps(
+                    {"ok": False, "detail": f"未知操作：{action or '（空）'}"}, ensure_ascii=False
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.manage_printer_fn(
+                index=index,
+                action=action,
+                name=str(body.get("name", "") or ""),
+                access_code=str(body.get("access_code", "") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _settings(self) -> None:
+        """读取/修改运行设置。
+
+        * ``GET  /api/settings`` 返回当前设置（网页帧率、每路帧率、界面刷新、列数…）
+        * ``POST /api/settings`` 部分更新（只改传来的字段）
+
+        对应桌面端的「⚙ 设置」对话框。网页端原先无法调整，用户只能改配置文件再重启。
+        """
+        if self.get_settings_fn is None or self.update_settings_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不支持在网页上修改设置"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        if self.command == "GET":
+            try:
+                payload = self.get_settings_fn()
+            except Exception as exc:  # noqa: BLE001
+                payload = {"error": f"{type(exc).__name__}: {exc}"}
+            self._send_bytes(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.update_settings_fn(body)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _read_json_body(self) -> Optional[dict]:
+        """读并解析请求体；格式不对返回 None（调用方回 400）。"""
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            length = 0
+        try:
+            parsed = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _single_frame(self, raw_index: str) -> None:
         try:
@@ -578,6 +828,11 @@ class WebServer:
         max_width: int = 720,
         host: str = "0.0.0.0",
         verbose: bool = False,
+        discover_fn: Optional[Callable[[], list]] = None,
+        add_printer_fn: Optional[Callable[..., dict]] = None,
+        manage_printer_fn: Optional[Callable[..., dict]] = None,
+        get_settings_fn: Optional[Callable[[], dict]] = None,
+        update_settings_fn: Optional[Callable[[dict], dict]] = None,
     ) -> None:
         self.get_sessions = get_sessions
         self.port = port
@@ -585,6 +840,15 @@ class WebServer:
         self.fps = fps
         self.host = host
         self.verbose = verbose
+        #: 可选的设备管理能力（各宿主注入，None 表示该运行方式不支持）。
+        #: 把这些做成回调而不是写死在服务里，是为了：
+        #:   1) 让服务端不依赖"谁在跑它"（安卓版与桌面版注入不同实现）；
+        #:   2) 测试能注入假实现，不需要真的连打印机。
+        self.discover_fn = discover_fn
+        self.add_printer_fn = add_printer_fn
+        self.manage_printer_fn = manage_printer_fn
+        self.get_settings_fn = get_settings_fn
+        self.update_settings_fn = update_settings_fn
         #: 记住画面最大宽度：start() 重建转码线程时要原样恢复（否则重启后静默退回默认值）
         self.max_width = max(240, int(max_width))
         self.cache = WebFrameCache(get_sessions, fps=fps, max_width=self.max_width)

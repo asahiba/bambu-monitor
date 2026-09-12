@@ -444,16 +444,19 @@ class CameraTile(QFrame):
         printing = status.is_printing
         paused = status.is_paused
         gcode = (status.gcode_state or "").upper()
+        caps = self.session.capabilities
 
         self.pause_button.setVisible(printing)
         self.pause_button.setEnabled(online and printing)
         self.stop_button.setVisible(printing and gcode != "FINISH")
         self.stop_button.setEnabled(online and printing)
-        # 灯按钮按**能力**决定显隐：A1 / A1 mini / A2L 是开放机型、没有舱灯，
-        # 以前只看「遥测在线」会给它们显示一个按不动的灯按钮
-        caps = self.session.capabilities
-        self.light_button.setVisible(caps.can_control_light)
-        self.light_button.setEnabled(caps.can_control_light and online)
+        # 灯按钮按**设备是否真的上报了灯**决定显隐，而不是按机型猜。
+        # 教训：A2L 是开放式机型，我据此推断它没有舱灯，实测却上报了
+        # chamber_light —— 结果界面把按钮藏了，用户没法开关灯。
+        # 遥测还没上来时（light_on 为 None）才退回机型能力作为兜底。
+        has_light = status.light_on is not None or caps.can_control_light
+        self.light_button.setVisible(has_light)
+        self.light_button.setEnabled(has_light and online)
         self._apply_control_block_hint()
         self._apply_button_labels(paused)
 

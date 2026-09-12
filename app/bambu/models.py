@@ -143,10 +143,15 @@ class PrinterModel(str, Enum):
 
     @property
     def has_enclosure_light(self) -> bool:
-        """是否有可控的舱灯。
+        """**猜测**该机型是否有可控的舱灯。
 
-        A1 / A1 mini 是开放式机型，**没有舱灯**；A2L 同为开放式（官方规格：
-        open-frame Cartesian）。其余带封闭腔体的机型都有 `chamber_light` 节点。
+        ⚠️ 这只是猜测，**不要用它决定界面上灯按钮的显隐** ——
+        请用 `PrinterStatus.light_on`（设备真的上报了 `lights_report` 才算数）。
+        本属性只在与设备还没建立遥测时作为兜底提示。
+
+        教训：A2L 是开放式机型，我据此推断它没有舱灯，但**实测它上报了
+        `{"node": "chamber_light", "mode": "off"}`** —— 于是界面把灯按钮藏了，
+        用户无法开关灯。机型规格推不出灯光能力，只有设备上报才算数。
         """
         return self in (
             PrinterModel.X1C,
@@ -160,6 +165,8 @@ class PrinterModel(str, Enum):
             PrinterModel.H2D_PRO,
             PrinterModel.H2S,
             PrinterModel.H2C,
+            # 实测有 chamber_light（见上）
+            PrinterModel.A2L,
         )
 
     @property
