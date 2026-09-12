@@ -19,6 +19,8 @@
   （覆盖 Snapmaker U1 等）—— 见 [架构说明](docs/ARCHITECTURE.md)
 * 监控墙特性：自适应分屏、单画面放大、轮巡、抓拍、时间戳叠加、离线提示、断线自动重连
 * **完全离线可开发**：内置打印机模拟器，没有真机也能跑通全链路
+* <img width="1919" height="1008" alt="屏幕截图 2026-09-12 140903" src="https://github.com/user-attachments/assets/609593a7-4da7-4f6d-aaef-3d01a3945416" />
+
 
 ---
 
