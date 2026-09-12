@@ -87,12 +87,21 @@ docker compose up -d                              # Docker（host 网络，可�
 
 **手边没有打印机？** 内置模拟器会伪造完整的打印机（含 TLS、JPEG 帧、发现协议）：
 
-```
+```bash
+# 任意平台，从源码
 python -m app --sim 4          # 4 台虚拟打印机 + 图形界面
 python -m app --core-test      # 无界面自检（搜索 → 遥测 → 画面）
-bash demo.bat / sim.bat        # Windows 快捷方式
+
+# Linux 辅助脚本
+bash linux/run-headless.sh --sim 4      # 起服务 + 模拟打印机，浏览器看
+bash linux/run-tests.sh                 # 跑测试
+
+# Docker
 docker run --rm -p 8080:8080 bambu-monitor python -m app.headless --sim 4
 ```
+
+Windows 上另有快捷方式：`demo.bat`（模拟器 + 界面）、`sim.bat`（仅模拟器）、
+`selftest.bat`（无界面自检）、`test.bat`（跑测试）。
 
 ```
 
