@@ -21,6 +21,12 @@ on:
 permissions:
   contents: write
 
+# 同一个 tag 重复触发时取消上一次：否则两个 run 并行上传同名 artifact 会互相干扰，
+# 而 Release 也会被建两次。
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   # ---------------------------------------------------------------- Windows
   windows:
@@ -76,6 +82,10 @@ jobs:
           }
           Write-Host "冒烟验证通过（CLI 版的版本号与模拟器自检都已确认）"
 
+      # ⚠️ 上传步骤**不能重复**：upload-artifact@v4 在同一个 workflow run 里
+      # 不允许同名 artifact 创建两次，第二次会报
+      # "(409) Conflict: an artifact with this name already exists on the workflow run"。
+      # 这里曾经因为这个文件里留了一个重复的"上传 Windows 产物"步骤而失败。
       - name: 上传 Windows 产物
         uses: actions/upload-artifact@v4
         with:
@@ -83,13 +93,6 @@ jobs:
           path: |
             dist/BambuMonitor.exe
             dist/BambuMonitor-cli.exe
-          if-no-files-found: error
-
-      - name: 上传 Windows 产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: dist/BambuMonitor.exe
           if-no-files-found: error
 
       # ---- 安卓 APK ----
@@ -125,7 +128,6 @@ jobs:
           name: android
           path: dist-android/*.apk
           if-no-files-found: error
-
   # ------------------------------------------------------------------ Linux
   linux:
     name: Linux 单文件 + Docker 镜像
