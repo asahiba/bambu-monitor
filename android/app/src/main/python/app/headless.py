@@ -28,7 +28,6 @@ from .bambu.printer import PrinterSession
 from .config import AppConfig, config_path
 from .util import secret
 
-
 #: ``run_headless`` 最终真正用于服务的那一个令牌。
 #: 给同一个进程内的宿主用（安卓版的 bootstrap 就靠它把带令牌的网址交给 WebView），
 #: 避免宿主自己去 ``AppConfig.load()`` 猜出一个**跟服务端不一致**的令牌。

@@ -151,7 +151,7 @@ def decrypt_text(text: str) -> str:
     try:
         payload = base64.b64decode(text[len(_PREFIX) :])
         return _crypt(payload, False).decode("utf-8", errors="replace")
-    except Exception as exc:
+    except Exception:
         _remember(
             "有打印机的访问代码解不开（可能是其它 Windows 用户或别的电脑加密的），"
             "请在设置里重新填写该打印机的访问代码",
