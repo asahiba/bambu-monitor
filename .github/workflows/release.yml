@@ -191,19 +191,72 @@ jobs:
       - name: 整理文件名并生成校验清单
         run: |
           set -euo pipefail
+
+          # ⚠️ 不假设 download-artifact 落盘的层级，按**文件名递归查找**。
+          #
+          # upload-artifact@v4 在 path 是目录或多文件时，会把共同父目录也保留在
+          # 归档里，于是解出来的路径是 artifacts/<artifact 名>/<原目录>/<文件>。
+          # 之前写死 `artifacts/linux/BambuMonitor-headless` 就在这一步挂了
+          # （cp: cannot stat）。按 basename 找一次，以后改上传方式也不会再断。
+          pick() {
+            local base="$1"
+            local found
+            found="$(find artifacts -type f -name "$base" | head -n 1)"
+            if [ -z "$found" ]; then
+              echo "::error::在下载的产物里找不到 $base，实际内容如下："
+              find artifacts -type f | head -n 40
+              exit 1
+            fi
+            echo "$found"
+          }
+
+          echo "=== 下载到的产物 ==="
+          find artifacts -type f -printf '%10s  %p\n' | sort -k2
+
           mkdir -p release
-          cp artifacts/windows/BambuMonitor.exe                 release/BambuMonitor-windows-x64.exe
-          cp artifacts/windows/BambuMonitor-cli.exe             release/BambuMonitor-windows-x64-cli.exe
-          cp artifacts/linux/BambuMonitor-headless              release/BambuMonitor-linux-headless-x64
-          cp artifacts/linux/BambuMonitor-linux                 release/BambuMonitor-linux-gui-x64
-          cp artifacts/docker/bambu-monitor-image.tar.gz        release/BambuMonitor-docker-image.tar.gz
-          cp artifacts/android/*.apk                            release/BambuMonitor-android-arm64.apk
+          cp "$(pick BambuMonitor.exe)"       release/BambuMonitor-windows-x64.exe
+          cp "$(pick BambuMonitor-cli.exe)"   release/BambuMonitor-windows-x64-cli.exe
+          cp "$(pick BambuMonitor-headless)"  release/BambuMonitor-linux-headless-x64
+          cp "$(pick BambuMonitor-linux)"     release/BambuMonitor-linux-gui-x64
+
+          # 名字里带 tag 的两个产物按后缀找：
+          #   Docker: bambu-monitor-latest-image.tar.gz（注意有 "latest-"，
+          #           曾经在本地演练时因为写漏它而 cp 失败）
+          #   APK   : BambuMonitor-1.0.0-arm64.apk
+          copy_by_suffix() {
+            local pattern="$1" dest="$2"
+            local found
+            found="$(find artifacts -type f -name "$pattern" | head -n 1)"
+            if [ -z "$found" ]; then
+              echo "::error::找不到匹配 $pattern 的产物，实际内容如下："
+              find artifacts -type f | head -n 40
+              exit 1
+            fi
+            cp "$found" "$dest"
+          }
+          copy_by_suffix 'bambu-monitor-*-image.tar.gz' release/BambuMonitor-docker-image.tar.gz
+          copy_by_suffix '*.apk'                        release/BambuMonitor-android-arm64.apk
+
           chmod +x release/BambuMonitor-linux-headless-x64 release/BambuMonitor-linux-gui-x64
+
+          echo "=== 发布文件 ==="
+          ls -lh release
+
+          # 逐项确认体积合理（防止把空文件或半截文件发出去）
+          for f in release/*; do
+            size=$(stat -c %s "$f")
+            if [ "$size" -lt 1000000 ]; then
+              echo "::error::$f 只有 $size 字节，明显不对"
+              exit 1
+            fi
+          done
+
           cd release
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          # 顺带确认 CLI 版真的在包里（它曾经"文档里说有、实际从没产出过"）
-          test -f BambuMonitor-windows-x64-cli.exe || { echo "缺少 Windows CLI 产物"; exit 1; }
+
+          # CLI 版必须真的在包里（它曾经"文档里说有、实际从没产出过"）
+          test -f BambuMonitor-windows-x64-cli.exe || { echo "::error::缺少 Windows CLI 产物"; exit 1; }
 
       - name: 建 Release 并上传
         uses: softprops/action-gh-release@v2
