@@ -46,26 +46,41 @@ build-onefile.bat
   它们是**运行时按设备族动态导入**的，PyInstaller 的静态分析可能漏掉；
 * 关掉 UPX（单文件 + UPX 极易被杀软误报），也排除了 QtWebEngine 等用不到的重型模块。
 
+### 一次产出两个 exe
+
+| 产物 | 引导器 | 用途 |
+| --- | --- | --- |
+| `BambuMonitor.exe` | windowed（`runw.exe`） | 双击启动图形界面，无控制台窗口 |
+| `BambuMonitor-cli.exe` | console（`run.exe`） | 命令行：`--version` / `--core-test` / `--headless` |
+
+**为什么必须两个**：windowed 引导器**根本没有控制台句柄**，
+`sys.stdout/stderr` 为 `None`，所以 ``BambuMonitor.exe --version``
+不只是"看不到输出"，而是**重定向和管道拿到的也是空的**
+（`> log.txt`、`| more`、CI 里捕获输出全是空文件），程序内部会把 print
+丢进 `os.devnull`，静默无提示。
+
+这一点坑过很久：CI 的冒烟验证跑 ``BambuMonitor.exe --version`` 拿到空字符串、
+进程却正常结束，一度被误判成"PowerShell 取不到退出码"。
+真相是引导器决定的。**所以命令行一律用 `BambuMonitor-cli.exe`。**
+
 **已验证**（在本机实测）：
 
 ```
-BambuMonitor.exe --version      → Bambu Monitor 1.0.0，退出码 0
-BambuMonitor.exe --core-test    → 自检结果：全部通过 ✓，退出码 0（约 14 秒）
+BambuMonitor-cli.exe --version    → Bambu Monitor 1.0.0（管道/重定向均可捕获）
+BambuMonitor-cli.exe --core-test  → 自检结果：全部通过 ✓（约 14 秒）
 BambuMonitor.exe --sim --screenshot shot.png --exit-after 14
-                                → 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标全部正常
+                                  → 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标全部正常
 ```
 
-### ⚠️ 已知限制：windowed 打包后看不到命令行输出
+### 无界面/自动化场景
 
-打包成 `--windowed`（无控制台窗口）后 `sys.stdout/stderr` 为 `None`，
-因此 `--help` / `--core-test` 的输出**不会显示在控制台里**（程序内部已做兜底，
-不会崩，只是没输出）。应对方式：
+* 日志：`%APPDATA%\BambuMonitor\logs\app.log`（无界面模式的输出都写这里）；
+* 要命令行输出：用 `BambuMonitor-cli.exe`（打包版）或
+  `.venv\Scripts\python.exe -m app ...`（源码运行）。
 
-* 看日志：`%APPDATA%\BambuMonitor\logs\app.log`（无界面模式的输出都写这里）；
-* 需要命令行输出时，用源码运行（`.venv\Scripts\python.exe -m app ...`）。
-
-改成 `console=True` 就能看到输出，但用户双击时会多一个黑色控制台窗口 ——
-这是打包形态的固有取舍，本项目选择了"像正常桌面软件"。
+GUI 版刻意保留 `console=False`：改成 `console=True` 用户双击时会多一个黑色
+控制台窗口 —— 这是打包形态的固有取舍，本项目选择"像正常桌面软件"，
+再单独给一个 CLI 版把命令行能力补回来。
 
 ## 2. Linux 单文件
 

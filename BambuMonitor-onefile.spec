@@ -1,19 +1,33 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 单文件打包配置。
 
-产物是**单个可执行文件**（Windows: `BambuMonitor.exe`，Linux: `BambuMonitor`），
-启动时把自身解包到临时目录再运行 —— 用户拿到一个文件就能跑，不需要装 Python。
+一次产出**两个**单文件可执行文件：
 
-## 为什么用 windowed（无控制台）
+| 产物 | 引导器 | 用途 |
+| --- | --- | --- |
+| `BambuMonitor.exe` | windowed | 双击启动图形界面（无控制台窗口） |
+| `BambuMonitor-cli.exe` | console | 命令行：`--version` / `--core-test` / `--headless` |
 
-打包成 `--windowed` 后 `sys.stdout/stderr` 为 `None`，因此 `app/main.py` 里
-有专门的兜底（把 print 重定向到空写入器）。**代价是 `--help` / `--core-test`
-这些命令行输出看不到**。为此：
+## 为什么要两个
 
-* CLI 用法请用打包时同时产出的**命令行版**（见 `build_packaging.py` 里的
-  ``console`` 目标），或直接用源码运行；
-* 无界面服务模式（`--headless`）的输出会写进日志文件
-  （`%APPDATA%\\BambuMonitor\\logs\\app.log`）。
+打包成 `--windowed` 后**根本没有控制台句柄**，`sys.stdout/stderr` 为 `None`，
+所以 ``BambuMonitor.exe --version`` 不会有任何输出 ——
+不只是"看不到"，而是重定向/管道拿到的也是空的
+（`> log.txt`、`| more`、CI 里捕获输出，全都是空文件）。
+
+这一点曾经坑过很久：CI 的冒烟验证跑 ``BambuMonitor.exe --version``
+拿到空字符串却看到进程正常结束，一度被当成"退出码取不到"的 PowerShell 怪癖。
+真相是 windowed 引导器（`runw.exe`）压根不接控制台。
+
+所以命令行用法一律用 `BambuMonitor-cli.exe`：
+
+* `BambuMonitor-cli.exe --version`
+* `BambuMonitor-cli.exe --core-test`（模拟器全链路自检，会打印结果）
+* `BambuMonitor-cli.exe --headless`（无界面服务；输出也会进日志文件
+  `%APPDATA%\\BambuMonitor\\logs\\app.log`）
+
+两个产物共用同一份 `Analysis`/`PYZ`（只是 EXE 引导器不同），
+所以打两个几乎不增加构建时间，只是各打一个包。
 
 ## 数据文件为什么要打进去
 
@@ -94,7 +108,31 @@ exe = EXE(
     upx=False,  # UPX 常被杀软误报，单文件模式尤其明显，因此关闭
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # 无控制台窗口；CLI 输出见文件头的说明
+    console=False,  # 无控制台窗口（双击启动图形界面用）
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=None,
+)
+
+#: 命令行版：同一份 Analysis，只是换成 console 引导器。
+#: 没有它的话 `--version` / `--core-test` 这类命令看不到任何输出（见文件头说明）。
+exe_cli = EXE(
+    pyz,
+    analysis.scripts,
+    analysis.binaries,
+    analysis.datas,
+    [],
+    name="BambuMonitor-cli",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,  # 关键：有控制台句柄，标准输出可被重定向/捕获
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

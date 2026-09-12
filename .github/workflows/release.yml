@@ -43,16 +43,47 @@ jobs:
       - name: 构建 Windows 单文件
         run: python -m PyInstaller --noconfirm --clean BambuMonitor-onefile.spec
 
-      # 产物必须真的能跑：--version 与 --core-test（模拟器全链路）都要过
+      # ⚠️ 冒烟验证要跑 **CLI 版**（BambuMonitor-cli.exe），不是 GUI 版。
+      #
+      # GUI 版用 windowed 引导器（runw.exe），**根本没有控制台句柄**，
+      # `--version` / `--core-test` 的输出既看不到、也重定向不到
+      # （这正是这个工作流第一次跑就失败的原因：拿到了空字符串）。
+      # CLI 版用 console 引导器（run.exe），输出可被捕获，才能真正断言。
       - name: 冒烟验证 exe
         shell: pwsh
         run: |
-          $exe = "dist\BambuMonitor.exe"
-          if (-not (Test-Path $exe)) { throw "找不到产物 $exe" }
-          & $exe --version
-          if ($LASTEXITCODE -ne 0) { throw "--version 失败" }
-          & $exe --core-test
-          if ($LASTEXITCODE -ne 0) { throw "--core-test 失败" }
+          $gui = "dist\BambuMonitor.exe"
+          $cli = "dist\BambuMonitor-cli.exe"
+          foreach ($p in @($gui, $cli)) {
+            if (-not (Test-Path $p)) {
+              Get-ChildItem dist -Recurse | Select-Object FullName
+              throw "找不到产物 $p"
+            }
+            Write-Host "$p : $([math]::Round((Get-Item $p).Length/1MB,1)) MB"
+          }
+
+          $versionOut = (& $cli --version) 2>&1 | Out-String
+          Write-Host $versionOut
+          if ($versionOut -notmatch "Bambu Monitor \d") {
+            throw "--version 没有打印出版本号，实际输出：'$versionOut'"
+          }
+
+          $coreOut = (& $cli --core-test) 2>&1 | Out-String
+          Write-Host $coreOut
+          if ($coreOut -notmatch "全部通过") {
+            throw ("--core-test 未报告自检通过，输出尾部：" +
+                   $coreOut.Substring([Math]::Max(0, $coreOut.Length - 1500)))
+          }
+          Write-Host "冒烟验证通过（CLI 版的版本号与模拟器自检都已确认）"
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/BambuMonitor.exe
+            dist/BambuMonitor-cli.exe
+          if-no-files-found: error
 
       - name: 上传 Windows 产物
         uses: actions/upload-artifact@v4
@@ -160,6 +191,7 @@ jobs:
           set -euo pipefail
           mkdir -p release
           cp artifacts/windows/BambuMonitor.exe                 release/BambuMonitor-windows-x64.exe
+          cp artifacts/windows/BambuMonitor-cli.exe             release/BambuMonitor-windows-x64-cli.exe
           cp artifacts/linux/BambuMonitor-headless              release/BambuMonitor-linux-headless-x64
           cp artifacts/linux/BambuMonitor-linux                 release/BambuMonitor-linux-gui-x64
           cp artifacts/docker/bambu-monitor-image.tar.gz        release/BambuMonitor-docker-image.tar.gz
@@ -168,6 +200,8 @@ jobs:
           cd release
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+          # 顺带确认 CLI 版真的在包里（它曾经"文档里说有、实际从没产出过"）
+          test -f BambuMonitor-windows-x64-cli.exe || { echo "缺少 Windows CLI 产物"; exit 1; }
 
       - name: 建 Release 并上传
         uses: softprops/action-gh-release@v2

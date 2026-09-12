@@ -8,6 +8,7 @@
 | 你的机器 | 下载 | 目标机需要装什么 |
 | --- | --- | --- |
 | Windows | `BambuMonitor-windows-x64.exe` | 什么都不用装，双击即运行 |
+| Windows（命令行） | `BambuMonitor-windows-x64-cli.exe` | 终端里跑 `--core-test` / `--headless` 等 |
 | Linux 服务器 / NAS | `BambuMonitor-linux-headless-x64` | 什么都不用装 |
 | Linux 桌面（要窗口） | `BambuMonitor-linux-gui-x64` | 什么都不用装（需图形环境） |
 | Docker | `BambuMonitor-docker-image.tar.gz` | 只需 Docker |
@@ -18,8 +19,11 @@
 
 ## 怎么用（最短路径）
 
-**Windows**：双击 exe → 点「🔍 自动搜索」→ 填访问代码（打印机屏幕 →
-设置 → 网络 → 局域网访问代码）→ 添加。
+**Windows**：双击 `BambuMonitor-windows-x64.exe` → 点「🔍 自动搜索」→
+填访问代码（打印机屏幕 → 设置 → 网络 → 局域网访问代码）→ 添加。
+
+> 需要命令行（自检、无界面服务、备份配置）请用 `BambuMonitor-windows-x64-cli.exe`。
+> 图形版是 windowed 打包，**没有控制台句柄**，连 `> log.txt` 重定向都是空文件。
 
 **Linux / NAS**：
 

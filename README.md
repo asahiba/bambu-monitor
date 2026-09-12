@@ -29,7 +29,8 @@
 
 | 平台 | 下载文件 | 用法 |
 | --- | --- | --- |
-| Windows | `BambuMonitor-windows-x64.exe` | 双击运行 |
+| Windows | `BambuMonitor-windows-x64.exe` | 双击运行（图形界面） |
+| Windows（命令行/无界面） | `BambuMonitor-windows-x64-cli.exe` | 终端里跑 `--core-test` / `--headless` 等 |
 | Linux（无界面服务版） | `BambuMonitor-linux-headless-x64` | `chmod +x` 后 `./BambuMonitor-linux-headless-x64 --port 8080` |
 | Linux（带界面版） | `BambuMonitor-linux-gui-x64` | `chmod +x` 后直接运行（需图形环境） |
 | Docker | `BambuMonitor-docker-image.tar.gz` | `docker load -i ...` 见下 |
@@ -246,7 +247,12 @@ python -m app.headless --control stop   --target 192.168.31.110 --yes   # 必须
 若浏览器不支持流式读取，页面会自动退回「逐路 MJPEG + 轮询状态」的兼容模式（此模式下仍受 6 连接限制），
 顶栏的标识会显示当前处于哪种模式。
 
-命令行方式：`BambuMonitor.exe --web 8080`（启动即开启网页监控，`--web` 不带端口则用配置里的端口）。
+命令行方式：`BambuMonitor-cli.exe --web 8080`（启动即开启网页监控，`--web` 不带端口则用配置里的端口）。
+
+> ⚠️ 命令行走 **`BambuMonitor-cli.exe`**，不是 `BambuMonitor.exe`。
+> 后者是 windowed 打包（双击启动界面、无控制台窗口），**没有控制台句柄**，
+> 任何命令行输出都拿不到 —— 连 `> log.txt` 重定向都是空文件。
+> 原因与取舍见 [`docs/PACKAGING.md`](docs/PACKAGING.md) 的"一次产出两个 exe"。
 
 ### 性能与帧率
 
@@ -351,7 +357,8 @@ python -m app.headless --control stop   --target 192.168.31.110 --yes   # 必须
 
 **打包成 exe？**
 * 双击 `build_exe.bat`，产物在 `dist\BambuMonitor\BambuMonitor.exe`（首次需要联网安装 PyInstaller）。
-  打包版同样支持 `BambuMonitor.exe --sim` 演示模式与 `--ui-selftest` 界面自检。
+* 发布包里的单文件版同样支持演示与自检 —— 但**要用 `BambuMonitor-cli.exe`**：
+  `BambuMonitor-cli.exe --sim`（演示模式）、`BambuMonitor-cli.exe --core-test`（模拟器全链路自检）。
 
 **配置文件在哪？**
 * `%APPDATA%\BambuMonitor\config.json`，日志在 `%APPDATA%\BambuMonitor\logs\app.log`。
@@ -359,7 +366,7 @@ python -m app.headless --control stop   --target 192.168.31.110 --yes   # 必须
 * 配置有保护：每次保存前会把上一份备份成 `config.backup.json`；主配置损坏时会自动从备份恢复。
 * 工具栏「💾 保存配置」可随时手动保存；旁边的下拉菜单还能**导出 / 导入**配置（换机或备份用，
   导出的文件里访问代码同样是加密的，换 Windows 用户后需要重新填写）。
-* 命令行也能备份：`BambuMonitor.exe --export-config D:\backup.json`（不打开界面，导完即退出）。
+* 命令行也能备份：`BambuMonitor-cli.exe --export-config D:\backup.json`（不打开界面，导完即退出）。
 
 ## 6. 目录结构
 

@@ -44,7 +44,13 @@ $artifacts = @(
     @{
         Path = "dist-onefile\BambuMonitor.exe"
         Dest = "windows\BambuMonitor.exe"
-        Label = "Windows 单文件"
+        Label = "Windows 单文件（图形界面）"
+    },
+    @{
+        # windowed 的 exe 没有控制台句柄，命令行输出全靠这个 console 版
+        Path = "dist-onefile\BambuMonitor-cli.exe"
+        Dest = "windows\BambuMonitor-cli.exe"
+        Label = "Windows 单文件（命令行版）"
     },
     @{
         Path = "dist-onefile-headless\BambuMonitor-headless"

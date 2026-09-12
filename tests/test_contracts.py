@@ -630,5 +630,48 @@ def test_打包脚本引用的spec文件都存在():
         assert (PROJECT_ROOT / name).is_file(), f"缺少打包配置：{name}"
 
 
+def test_windowed_spec必须同时产出命令行版():
+    """契约：windowed 打包必须配套产出一个 console 版，否则命令行能力全丢。
+
+    踩过的坑：`BambuMonitor-onefile.spec` 用 `console=False`（windowed 引导器），
+    而 windowed 引导器**没有控制台句柄** —— `--version` / `--core-test`
+    既看不到输出，**重定向和管道拿到的也是空文件**（程序内部把 print 丢进
+    os.devnull）。spec 的文档里一直写着"CLI 用法请用同时产出的命令行版"，
+    但那个命令行版从来没真正产出过（它指向的 build_packaging.py 并不存在），
+    于是所有命令行用法都是静默失效的。
+
+    这条测试盯住两件事：spec 里确实有 console=True 的第二个 EXE，
+    而且它在文档里被点名。CI 的冒烟验证也会跑这个 CLI 产物。
+    """
+    spec = (PROJECT_ROOT / "BambuMonitor-onefile.spec").read_text(encoding="utf-8")
+
+    assert "console=False" in spec, "GUI 版应当保持 windowed（双击不弹控制台窗口）"
+    assert "console=True" in spec, (
+        "windowed 打包必须另有 console=True 的产物，否则 --version/--core-test "
+        "等命令行输出会静默消失（连重定向都是空文件）"
+    )
+    assert "BambuMonitor-cli" in spec, "命令行版应当命名为 BambuMonitor-cli"
+
+    # 文档必须告诉用户有两个产物，否则等于没产出
+    packaging = (PROJECT_ROOT / "docs" / "PACKAGING.md").read_text(encoding="utf-8")
+    assert "BambuMonitor-cli" in packaging, "打包文档没说清有两个 exe，用户会踩空"
+
+
+def test_发布工作流用的exe与实际产出的一致():
+    """契约：Release 工作流引用的产物名必须与 spec 产出的名字对得上。
+
+    这条是为了防止"工作流里写了一个不存在的文件名"这类错误 ——
+    它只会在真正发版时才暴露，而那时已经晚了。
+    """
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    spec = (PROJECT_ROOT / "BambuMonitor-onefile.spec").read_text(encoding="utf-8")
+
+    for name in ("BambuMonitor.exe", "BambuMonitor-cli.exe"):
+        assert name in workflow, f"发布工作流没有处理产物 {name}"
+    # spec 里 name="BambuMonitor" / name="BambuMonitor-cli" -> 产物即上面两个
+    assert 'name="BambuMonitor"' in spec
+    assert 'name="BambuMonitor-cli"' in spec
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))
