@@ -19,8 +19,7 @@ android {
 
         ndk {
             // Python 解释器是原生组件，必须指定 ABI。
-            // arm64-v8a 覆盖当前绝大多数平板/手机；armeabi-v7a 只支持 Python 3.11 及更早，
-            // 因此本项目（3.13 语法）只出 arm64。
+            // arm64-v8a 覆盖当前绝大多数平板/手机（32 位 armeabi-v7a 机型已基本淘汰）。
             abiFilters "arm64-v8a"
         }
     }
@@ -45,16 +44,36 @@ android {
 
 chaquopy {
     defaultConfig {
-        // 与项目其它部分一致的 Python 版本（代码用了 3.10+ 的语法）
-        version = "3.13"
+        // ⚠️ 这个版本号不是随手填的，被 Chaquopy 仓库里的预编译 wheel 死死限制住。
+        //
+        // Chaquopy 会把 pip 指向它自己的仓库 https://chaquo.com/pypi-13.1，
+        // 并且只接受 **平台标签精确等于** android_<minSdk>_<abi> 的 wheel
+        // （见 build-packages.zip 里的 PipInstall.platform_tag）。
+        // 本项目 minSdk=24、abi=arm64-v8a，因此平台标签固定为 android_24_arm64_v8a。
+        //
+        //     android_24_arm64_v8a 上实际存在的 wheel
+        //     ─────────────────────────────────────────────
+        //     opencv-python-headless : 只有 cp310 (4.5.1.48)
+        //     numpy                  : 只有 cp313 (1.26.2)
+        //     cryptography           : cp310 / cp311 / cp312 / cp313
+        //
+        // 也就是说：opencv 与 numpy **没有任何一个 Python 版本能同时满足**
+        // （opencv 要 3.10，numpy 要 3.13）。RTSPS 画面需要 opencv，
+        // 而 cv2 又硬依赖 numpy（"OpenCV bindings requires numpy package"），
+        // 所以这里选 3.10 走 opencv 那条路，numpy 用下面的 offline-wheels 补上
+        // （那个 wheel 是给 android_21 编的，但 ndk 向后兼容，装上去可用）。
+        //
+        // 选 3.10 的另一个好处：它正是 Chaquopy 17 的默认版本，覆盖最全。
+        // 桌面版仍用 3.13，二者互不影响（app/ 下的代码同时兼容 3.10 与 3.13）。
+        version = "3.10"
 
         // ⚠️ buildPython 必须指向**本机**的 Python 解释器：Chaquopy 用它来
         // 解析/编译 pip 依赖。不指定的话它会在 PATH 里找 python3，
-        // 而本机 PATH 上的 python 是应用商店占位符（0 字节转发器），必然失败
-        // ——报错是 "Couldn't find Python 3.13"。
-        //
-        // 这里从 local.properties（Gradle 的本地配置文件，不入库）读取，
-        // 由 android/build-apk.ps1 写入；读不到就退回项目自带的 .venv。
+        // 而本机 PATH 上的 python 是应用商店占位符（0 字节转发器），必然失败。
+        // 另外 Chaquopy 17 起要求 buildPython 的主次版本与 version 完全一致，
+        // 所以这里必须是 3.10.x，不能用项目主 .venv 的 3.13。
+        // 由 android/build-apk.ps1 写入 local.properties；读不到就依次退回
+        // .venv310 / D:\python310。
         def localProps = new Properties()
         def localFile = rootProject.file("local.properties")
         if (localFile.exists()) {
@@ -62,7 +81,7 @@ chaquopy {
         }
         def venvPython = localProps.getProperty("bambu.python")
         if (venvPython == null) {
-            venvPython = new File(rootProject.projectDir, "../.venv/Scripts/python.exe")
+            venvPython = new File(rootProject.projectDir, "../.venv310/Scripts/python.exe")
                     .getCanonicalPath()
         }
         buildPython venvPython
@@ -70,10 +89,21 @@ chaquopy {
         pip {
             // 纯 Python 包（从 PyPI 装）
             install "paho-mqtt"
-            // 原生包（Chaquopy 自带预编译版本，从它的仓库装）
-            install "cryptography"            // 内置模拟器生成自签证书用
+            // 原生包（Chaquopy 仓库里有 android_24_arm64_v8a 的 cp310 wheel）
+            install "cryptography"            // 生成自签证书 / 加解密用
             install "opencv-python-headless"  // RTSPS(322) 通道拉流用
-            install "numpy"                   // opencv 的依赖
+
+            // numpy：android_24 上没有 cp310 的 numpy wheel，只有 android_21 的。
+            // 直接给本地 wheel 路径（ch/offline-wheels 由 build-apk.ps1 下载），
+            // 绕开索引的平台标签匹配。若该文件不存在则退回按名字装，
+            // 让 Gradle 明确报错而不是静默少装一个包（缺 numpy 时 cv2 无法导入）。
+            def numpyWheel = new File(rootProject.projectDir,
+                    "offline-wheels/numpy-1.26.2-0-cp310-cp310-android_21_arm64_v8a.whl")
+            if (numpyWheel.exists()) {
+                install numpyWheel.getCanonicalPath()
+            } else {
+                install "numpy"
+            }
         }
     }
 }
@@ -81,4 +111,18 @@ chaquopy {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.webkit:webkit:1.12.1'
+}
+
+// androidx.webkit 会传递依赖 kotlin-stdlib-jdk7/jdk8 1.6.21，而 AGP 自带
+// kotlin-stdlib 1.8.22。Kotlin 1.8 起把 jdk7/jdk8 的内容并进了 kotlin-stdlib
+// 本身，于是 checkDebugDuplicateClasses 会因为两边都含同一批类而失败
+// （kotlin.collections.jdk8.CollectionsJDK8Kt 等）。把三个坐标统一到同一版本
+// 即可——版本一致时后两个是空壳，不再与 kotlin-stdlib 冲突。
+configurations.all {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.jetbrains.kotlin'
+                && details.requested.name.startsWith('kotlin-stdlib')) {
+            details.useVersion '1.8.22'
+        }
+    }
 }

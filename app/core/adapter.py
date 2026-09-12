@@ -98,7 +98,7 @@ class PollingDeviceSession:
         self._max_fps = max(0.0, float(max_fps))
         self._target_size: tuple[int, int] = (640, 360)
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._latest_frame: Optional[bytes] = None
         self._frame_seq = 0
@@ -117,7 +117,7 @@ class PollingDeviceSession:
             return
         self.running = True
         self.warnings.clear()
-        self._stop.clear()
+        self._stop_event.clear()
         self._started_at = time.time()
         self._thread = threading.Thread(
             target=self._poll_loop, name=f"poll-{self.info.ip}", daemon=True
@@ -126,7 +126,7 @@ class PollingDeviceSession:
 
     def stop(self) -> None:
         self.running = False
-        self._stop.set()
+        self._stop_event.set()
         thread, self._thread = self._thread, None
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
@@ -143,7 +143,7 @@ class PollingDeviceSession:
     def _poll_loop(self) -> None:
         next_status = 0.0
         next_frame = 0.0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             now = time.time()
             if now >= next_status:
                 self._poll_status()
@@ -157,7 +157,7 @@ class PollingDeviceSession:
                 next_frame = time.time() + (1.0 / self._max_fps)
             elif not self.capabilities.has_camera:
                 next_frame = time.time() + 60.0  # 无摄像头：不必频繁判断
-            self._stop.wait(0.05)
+            self._stop_event.wait(0.05)
 
     def _poll_status(self) -> None:
         try:

@@ -437,7 +437,7 @@ class DiscoveryService:
         self.timeout = timeout
         self._found: dict[str, PrinterInfo] = {}
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._sockets: list[socket.socket] = []
         self._threads: list[threading.Thread] = []
         self.packets_sent = 0
@@ -456,13 +456,13 @@ class DiscoveryService:
             return list(self._found.values())
 
     def start(self) -> None:
-        self._stop.clear()
+        self._stop_event.clear()
         self._threads = [threading.Thread(target=self._run, name="bambu-discovery", daemon=True)]
         for thread in self._threads:
             thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         for sock in list(self._sockets):
             try:
                 sock.close()
@@ -474,7 +474,7 @@ class DiscoveryService:
     def run_blocking(self) -> list[PrinterInfo]:
         self.start()
         deadline = time.time() + self.timeout
-        while time.time() < deadline and not self._stop.is_set():
+        while time.time() < deadline and not self._stop_event.is_set():
             time.sleep(0.1)
         self.stop()
         return self.results
@@ -619,7 +619,7 @@ class DiscoveryService:
         next_search = time.time() + SEARCH_INTERVAL
         next_legacy = time.time() + LEGACY_INTERVAL
         next_sweep = time.time() + SWEEP_INTERVAL
-        while not self._stop.is_set() and time.time() < deadline:
+        while not self._stop_event.is_set() and time.time() < deadline:
             for sock in senders:
                 self._drain(sock, "iface")
             for index, sock in enumerate(listeners):

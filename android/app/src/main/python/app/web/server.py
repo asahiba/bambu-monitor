@@ -81,7 +81,13 @@ class WebFrameCache(threading.Thread):
         self._source_seq: dict[int, int] = {}
         self._active: dict[int, float] = {}
         self._live_clients = 0
-        self._stop = threading.Event()
+        # ⚠️ 必须叫 _stop_event，不能叫 _stop：threading.Thread 自己有一个
+        # 内部方法 _stop()，Python 3.10 的 Thread.join() 会在收尾时调用它
+        # （_wait_for_tstate_lock -> self._stop()）。用 Event 覆盖掉这个名字后，
+        # join() 会抛 "TypeError: 'Event' object is not callable"，
+        # 表现为「线程明明跑完了却 join 失败」。3.13 改掉了这段实现，
+        # 所以这个坑只在 3.10/3.11 上暴露（安卓版内嵌的正是 3.10）。
+        self._stop_event = threading.Event()
         self.encoded = 0
 
     # ------------------------------------------------------------------ 对外
@@ -107,7 +113,7 @@ class WebFrameCache(threading.Thread):
             return self._frames.get(index, (0, b""))
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def set_fps(self, fps: float, max_width: Optional[int] = None) -> None:
         with self._lock:
@@ -118,7 +124,7 @@ class WebFrameCache(threading.Thread):
     # ------------------------------------------------------------------ 内部
     def run(self) -> None:
         interval = 1.0 / self._fps
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             started = time.time()
             sessions = list(self._get_sessions())
             now = time.time()
@@ -143,7 +149,7 @@ class WebFrameCache(threading.Thread):
                     self._frames[index] = (seq, payload)
                 self.encoded += 1
             elapsed = time.time() - started
-            self._stop.wait(max(0.02, interval - elapsed))
+            self._stop_event.wait(max(0.02, interval - elapsed))
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -456,6 +462,17 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     # ------------------------------------------------------------------ 控制
+    #: 网页动作名 -> 会话侧归一化命令名（用于查"该命令是否被固件签名要求挡住"）
+    _ACTION_COMMAND = {
+        "pause": "pause",
+        "resume": "resume",
+        "stop": "stop",
+        "speed": "speed",
+        "light_on": "light",
+        "light_off": "light",
+        "light_toggle": "light",
+    }
+
     def _control(self, index: int, action: str, value: str = "") -> tuple[bool, str]:
         """执行一条控制指令；返回 (是否成功, 说明)。"""
         sessions = self._sessions()
@@ -464,6 +481,15 @@ class _Handler(BaseHTTPRequestHandler):
         session = sessions[index]
         if not session.can_control:
             return False, "遥测未连接，无法下发指令"
+        # 固件要求命令签名时，**只有 print 段命令**会被忽略（灯控走 system 段，不受影响）。
+        # 这里在发送前就按命令分别判断，把原因说清楚，而不是等设备静默忽略后
+        # 回一句含糊的"发送失败"。
+        # 用 getattr 容错：第三方设备族的适配器未必实现这个方法。
+        check_blocked = getattr(session, "command_blocked", None)
+        if callable(check_blocked):
+            blocked = check_blocked(self._ACTION_COMMAND.get(action, action))
+            if blocked:
+                return False, blocked
         if action == "pause":
             ok = session.pause_print()
             return ok, "已发送暂停指令" if ok else "发送失败"
@@ -627,6 +653,9 @@ class _Handler(BaseHTTPRequestHandler):
                 ip=str(body.get("ip", "") or ""),
                 access_code=str(body.get("access_code", "") or ""),
                 model_label=str(body.get("model", "") or ""),
+                # 序列号决定遥测订阅主题 device/<序列号>/report；
+                # 「自动搜索」的结果里带着它，前端必须一起回传。
+                serial=str(body.get("serial", "") or ""),
             )
         except Exception as exc:  # noqa: BLE001 - 添加失败要让界面看到原因
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}

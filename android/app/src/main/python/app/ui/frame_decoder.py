@@ -26,8 +26,8 @@ class FrameDecoder(threading.Thread):
         super().__init__(name=f"decode-{session.info.ip}", daemon=True)
         self.session = session
         self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._target = (max(64, width), max(36, height))
+        self._stop_event = threading.Event()
+        self._target_size = (max(64, width), max(36, height))
         self._last_seq = -1
         self._seq = 0
         self._image: Optional[QImage] = None
@@ -39,15 +39,15 @@ class FrameDecoder(threading.Thread):
         width = max(64, int(width))
         height = max(36, int(height))
         with self._lock:
-            if (width, height) != self._target:
-                self._target = (width, height)
+            if (width, height) != self._target_size:
+                self._target_size = (width, height)
 
     def latest(self) -> Tuple[int, Optional[QImage]]:
         with self._lock:
             return self._seq, self._image
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     # ------------------------------------------------------------------ 内部
     def _decode(self, jpeg: bytes, width: int, height: int) -> Optional[QImage]:
@@ -74,13 +74,13 @@ class FrameDecoder(threading.Thread):
         import logging
 
         logger = logging.getLogger("bambu-monitor.decoder")
-        while not self._stop.wait(0.02):
+        while not self._stop_event.wait(0.02):
             seq, jpeg = self.session.latest_frame()
             if jpeg is None or seq == self._last_seq:
                 continue
             self._last_seq = seq
             with self._lock:
-                width, height = self._target
+                width, height = self._target_size
             try:
                 image = self._decode(jpeg, width, height)
             except Exception:  # noqa: BLE001 - 解码失败不能拖垮整路画面

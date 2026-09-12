@@ -97,6 +97,47 @@ INDEX_HTML = r"""<!doctype html>
     #clock{display:none}
     .tile[style*="span 2"],.tile[style*="span 3"]{grid-column:span 1 !important;grid-row:span 1 !important}
   }
+
+  /* ---------------------------------------------------------------- 设备管理与设置
+     桌面端有工具栏按钮与对话框，网页端原先什么都没有 ——
+     安卓版没有桌面界面，网页是唯一入口，因此这些必须补齐。 */
+  #modal{position:fixed;inset:0;background:rgba(6,10,12,.88);display:none;z-index:90;
+         align-items:center;justify-content:center;padding:16px}
+  #modal .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+               padding:18px;width:100%;max-width:560px;max-height:88vh;overflow:auto}
+  #modal h2{margin:0 0 4px;font-size:16px;color:var(--accent)}
+  #modal .hint{color:var(--dim);font-size:12px;line-height:1.7;margin-bottom:12px}
+  #modal label{display:block;color:var(--dim);font-size:12px;margin:10px 0 4px}
+  #modal input,#modal select{width:100%;box-sizing:border-box;background:#0d1114;
+        border:1px solid var(--border);border-radius:6px;color:var(--fg);
+        padding:8px 10px;font-size:14px;font-family:inherit}
+  #modal .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  #modal .row > *{flex:1 1 140px}
+  #modal button{background:#1d272e;border:1px solid var(--border);border-radius:6px;
+        color:var(--fg);padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit}
+  #modal button:hover{border-color:var(--accent);color:var(--accent)}
+  #modal button.primary{background:var(--accent);color:#06222a;border-color:var(--accent);font-weight:bold}
+  #modal button.danger:hover{border-color:var(--err);color:var(--err)}
+  #modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  #modal .list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+  #modal .item{display:flex;align-items:center;gap:8px;background:#111a1f;
+        border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px}
+  #modal .item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #modal .item .meta{color:var(--dim);font-size:11px}
+  #modal .item .tag{font-size:11px;color:var(--dim);border:1px solid var(--border);
+        border-radius:3px;padding:0 5px}
+  #modal .empty{color:var(--dim);font-size:13px;padding:12px;text-align:center}
+  #modal .status{color:var(--dim);font-size:12px;margin-top:10px;min-height:16px}
+  #menu{position:fixed;z-index:95;background:var(--panel);border:1px solid var(--border);
+        border-radius:8px;padding:4px;display:none;min-width:150px;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+  #menu button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--fg);
+        padding:8px 12px;font-size:13px;cursor:pointer;border-radius:5px;font-family:inherit}
+  #menu button:hover{background:#1d272e;color:var(--accent)}
+  #menu .sep{height:1px;background:var(--border);margin:4px 2px}
+  /* 控制被固件挡住时的提示条（触屏看不到 tooltip，必须有可见提示） */
+  .ctrl-hint{color:var(--warn,#e0a030);border:1px solid var(--warn,#e0a030);
+        border-radius:3px;padding:0 6px;cursor:pointer;font-size:11px;white-space:nowrap}
+  .ctrl-hint:hover{background:rgba(224,160,48,.12)}
 </style>
 </head>
 <body>
@@ -113,6 +154,10 @@ INDEX_HTML = r"""<!doctype html>
     <option value="4">4 列</option>
   </select>
   <button id="btn-install" style="display:none">安装到桌面</button>
+  <button id="btn-discover" title="扫描局域网里的打印机">🔍 自动搜索</button>
+  <button id="btn-add" title="手动添加打印机">＋ 添加</button>
+  <button id="btn-manage" title="管理已添加的打印机">⚙ 设备</button>
+  <button id="btn-settings" title="帧率 / 刷新 / 网页参数">⚙ 设置</button>
   <button id="btn-reload">刷新</button>
   <div id="clock"></div>
 </header>
@@ -120,6 +165,8 @@ INDEX_HTML = r"""<!doctype html>
 
 <div id="hmsbox"></div>
 <div id="toast"></div>
+<div id="modal"><div class="card" id="modal-card"></div></div>
+<div id="menu"></div>
 
 <div id="login" style="display:none">
   <div style="color:#8fa3ad;font-size:13px">请输入软件里显示的访问令牌</div>
@@ -221,6 +268,7 @@ function ensureTile(index){
       </div>
       <div class="filament"></div>
       <div class="row4">
+        <span class="ctrl-hint" style="display:none"></span>
         <span class="wifi"></span>
         <span class="finish"></span>
         <span class="hms" style="display:none"></span>
@@ -244,8 +292,14 @@ function ensureTile(index){
       setTimeout(() => { img.src = api('/stream/' + index) + '&t=' + Date.now(); }, 3000);
     }
   });
-  element.addEventListener('click', () => element.classList.toggle('full'));
+  element.addEventListener('click', () => {
+    // 长按刚弹过菜单：这次点击是长按的尾巴，不要再切换全屏
+    if (element.dataset.menuJustOpened){ delete element.dataset.menuJustOpened; return; }
+    element.classList.toggle('full');
+  });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') element.classList.remove('full'); });
+  // 右键（触屏长按）菜单：重连 / 抓拍 / 复制 IP / 编辑 / 删除
+  bindTileMenu(element, index);
   element.querySelectorAll('.row4 button').forEach(button => {
     button.addEventListener('click', event => {
       event.stopPropagation();
@@ -317,6 +371,8 @@ function applyFrame(index, payload){
 
 function applyStatus(data){
   const printers = data.printers || [];
+  // 记下来给右键菜单用（菜单要知道当前是哪台设备）
+  state.lastPrinters = printers;
   printers.forEach((info, index) => {
     const tile = ensureTile(index);
     tile.status = info;
@@ -391,13 +447,32 @@ function applyStatus(data){
     stopButton.style.display = info.printing ? '' : 'none';
     stopButton.disabled = !info.can_control;
     lightButton.textContent = info.light === 'on' ? '💡 关灯' : '💡 开灯';
+    // 灯按钮：设备**上报了灯**（light 为 'on'/'off'）或能力声明有灯时才显示。
+    // 与桌面端保持同一判据 —— 机型规格推不出灯光能力，只有设备上报才算数。
+    const hasLight = info.light === 'on' || info.light === 'off' ||
+                     (info.capabilities && info.capabilities.light);
+    lightButton.style.display = hasLight ? '' : 'none';
     lightButton.disabled = !info.can_control;
-    // 控制被固件签名要求挡住时（新机型未开 Developer Mode），把原因挂到提示上：
+    // 控制被固件签名要求挡住时（新机型未开开发者模式），把原因挂到提示上：
     // 按钮是灰的却不说明原因，用户会以为软件坏了
     const blocked = info.controls_blocked_reason || '';
     [pauseButton, stopButton, lightButton].forEach(button => {
       button.title = blocked;
     });
+    // 触屏看不到 tooltip，所以在状态条里显示一条可点击的提示条。
+    // 这条提示是"用户能自己解决问题"的关键：告诉他去打印机上开开发者模式。
+    const hint = element.querySelector('.ctrl-hint');
+    if (blocked){
+      hint.style.display = '';
+      hint.textContent = '⚠ 控制不可用（点此查看原因）';
+      hint.onclick = (event) => {
+        event.stopPropagation();
+        alert(blocked);
+      };
+    } else {
+      hint.style.display = 'none';
+      hint.onclick = null;
+    }
 
     if (!state.live && !info.camera_online){
       tile.img.style.visibility = 'hidden';
@@ -496,6 +571,452 @@ initToken();
 if (state.token === '') showLogin(true);
 startLive();
 setTimeout(() => { if (!state.live && !state.fallback) pollStatus(); }, 1200);
+
+/* ============================================================================
+   设备管理与设置
+
+   桌面端有「自动搜索 / 添加打印机 / 画面布局 / 设置」这些对话框；网页端原先
+   只能看不能管。**安卓版没有桌面界面，网页是唯一入口**，所以这些能力必须补齐，
+   否则平板用户没法把打印机加进来。
+
+   实现要点：服务端把「发现 / 添加 / 删除 / 重连 / 设置」暴露成回调注入的 API
+   （见 app/web/server.py），宿主（安卓版、桌面版、无界面版）各自提供实现。
+   后端不支持时返回 501，这里据此给出提示而不是静默失败。
+   ========================================================================= */
+
+const modal = document.getElementById('modal');
+const modalCard = document.getElementById('modal-card');
+const menu = document.getElementById('menu');
+
+function closeModal(){ modal.style.display = 'none'; modalCard.innerHTML = ''; }
+function closeMenu(){ menu.style.display = 'none'; }
+modal.addEventListener('click', event => { if (event.target === modal) closeModal(); });
+document.addEventListener('click', event => {
+  if (!menu.contains(event.target)) closeMenu();
+});
+document.addEventListener('keydown', event => { if (event.key === 'Escape'){ closeMenu(); closeModal(); } });
+
+/** 统一的 POST 助手：把服务端的 {ok, detail} 约定处理成一句话。 */
+async function postJson(path, payload){
+  try{
+    const response = await fetch(api(path), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {})
+    });
+    if (response.status === 401){ showLogin(true); return {ok:false, detail:'未授权'}; }
+    if (response.status === 501){
+      return {ok:false, detail:'该运行方式不支持此操作（需要用桌面版或无界面版）'};
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok && !data.detail){ data.detail = 'HTTP ' + response.status; }
+    return data;
+  }catch(err){
+    return {ok:false, detail:'请求失败：' + err};
+  }
+}
+
+/* ---------------------------------------------------------------- 自动搜索 */
+async function openDiscover(){
+  modalCard.innerHTML =
+    '<h2>自动搜索局域网打印机</h2>' +
+    '<div class="hint">会同时用 SSDP 组播与旧版广播扫描，约 10-20 秒。<br>' +
+    '搜索到后填上访问代码（打印机屏幕 → 设置 → 网络 → 局域网访问代码）再添加。</div>' +
+    '<div id="disc-status" class="status">正在扫描…</div>' +
+    '<div id="disc-list" class="list"></div>' +
+    '<div class="actions">' +
+      '<button id="disc-again">重新扫描</button>' +
+      '<button id="disc-close">关闭</button>' +
+    '</div>';
+  modal.style.display = 'flex';
+  document.getElementById('disc-close').addEventListener('click', closeModal);
+  document.getElementById('disc-again').addEventListener('click', runDiscover);
+  runDiscover();
+}
+
+async function runDiscover(){
+  const status = document.getElementById('disc-status');
+  const list = document.getElementById('disc-list');
+  status.textContent = '正在扫描（约 10-20 秒）…';
+  list.innerHTML = '';
+  let data;
+  try{
+    const response = await fetch(api('/api/discover'), {cache:'no-store'});
+    if (response.status === 501){
+      status.textContent = '该运行方式不支持自动搜索，请用「＋ 添加」手动填写 IP。';
+      return;
+    }
+    if (response.status === 401){ showLogin(true); return; }
+    data = await response.json();
+  }catch(err){
+    status.textContent = '扫描失败：' + err;
+    return;
+  }
+  if (data.error){ status.textContent = '扫描出错：' + data.error; return; }
+  const found = data.printers || [];
+  if (!found.length){
+    status.textContent = '没有发现设备。请确认打印机已开机、与本站同一网段；' +
+                         '跨 VLAN 时请用「＋ 添加」手动填 IP。';
+    return;
+  }
+  status.textContent = '发现 ' + found.length + ' 台（带「已添加」标记的已在监控墙上）';
+  found.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.innerHTML =
+      '<span class="name">' + escapeHtml(item.name || item.model || item.ip) +
+      '<div class="meta">' + escapeHtml(item.ip) + ' · ' + escapeHtml(item.model || '未知机型') +
+      (item.serial ? ' · ' + escapeHtml(item.serial) : '') + '</div></span>' +
+      (item.known ? '<span class="tag">已添加</span>' : '');
+    const code = document.createElement('input');
+    code.placeholder = '访问代码';
+    code.style.flex = '0 0 120px';
+    code.autocomplete = 'off';
+    const add = document.createElement('button');
+    add.textContent = item.known ? '更新' : '添加';
+    add.className = 'primary';
+    add.addEventListener('click', async () => {
+      add.disabled = true;
+      const result = await postJson('/api/add_printer', {
+        name: item.name || '', ip: item.ip,
+        access_code: code.value.trim(), model: item.model || '',
+        // 序列号必须带上：遥测靠它订阅 device/<序列号>/report，
+        // 缺了会导致「有画面但永远没有进度/温度」
+        serial: item.serial || ''
+      });
+      toast(result.ok ? (result.detail || '已添加') : ('添加失败：' + (result.detail || '')));
+      if (result.ok){ row.querySelector('.tag') || row.appendChild(makeTag('已添加')); }
+      add.disabled = false;
+    });
+    row.appendChild(code);
+    row.appendChild(add);
+    list.appendChild(row);
+  });
+}
+
+function makeTag(text){
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.textContent = text;
+  return tag;
+}
+function escapeHtml(text){
+  return String(text == null ? '' : text).replace(/[&<>"']/g,
+    ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+/* ---------------------------------------------------------------- 手动添加 */
+function openAdd(){
+  modalCard.innerHTML =
+    '<h2>添加打印机</h2>' +
+    '<div class="hint">填 IP 与访问代码即可显示画面。<b>序列号建议一并填写</b>：' +
+    '进度、温度这些遥测数据靠它订阅，缺了会出现「有画面但没有进度/温度」。' +
+    '在打印机屏幕上：设置 → 设备信息。</div>' +
+    '<label>名称（可留空）</label><input id="add-name" placeholder="例如 车间 X2D">' +
+    '<label>IP 地址</label><input id="add-ip" placeholder="192.168.1.50" inputmode="decimal">' +
+    '<label>访问代码</label><input id="add-code" placeholder="8 位访问代码" autocomplete="off">' +
+    '<label>序列号（建议填写，用于遥测）</label>' +
+    '<input id="add-serial" placeholder="例如 01P00A123456789" autocomplete="off">' +
+    '<label>机型（可留空，自动识别）</label><input id="add-model" placeholder="例如 X2D">' +
+    '<div class="status" id="add-status"></div>' +
+    '<div class="actions"><button id="add-cancel">取消</button>' +
+    '<button id="add-ok" class="primary">添加</button></div>';
+  modal.style.display = 'flex';
+  document.getElementById('add-cancel').addEventListener('click', closeModal);
+  document.getElementById('add-ok').addEventListener('click', async () => {
+    const status = document.getElementById('add-status');
+    const ip = document.getElementById('add-ip').value.trim();
+    if (!ip){ status.textContent = '请填写 IP 地址'; return; }
+    status.textContent = '正在添加…';
+    const result = await postJson('/api/add_printer', {
+      name: document.getElementById('add-name').value.trim(),
+      ip: ip,
+      access_code: document.getElementById('add-code').value.trim(),
+      serial: document.getElementById('add-serial').value.trim(),
+      model: document.getElementById('add-model').value.trim()
+    });
+    if (result.ok){
+      toast(result.detail || '已添加');
+      closeModal();
+      pollStatus();
+    } else {
+      status.textContent = '添加失败：' + (result.detail || '未知原因');
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- 设备管理 */
+async function openManage(){
+  modalCard.innerHTML =
+    '<h2>管理打印机</h2>' +
+    '<div class="hint">可修改名称与访问代码、重连、删除。删除会同时从配置里移除。</div>' +
+    '<div id="mng-list" class="list"><div class="empty">加载中…</div></div>' +
+    '<div class="actions"><button id="mng-close">关闭</button></div>';
+  modal.style.display = 'flex';
+  document.getElementById('mng-close').addEventListener('click', closeModal);
+  await refreshManageList();
+}
+
+async function refreshManageList(){
+  const list = document.getElementById('mng-list');
+  let data;
+  try{
+    const response = await fetch(api('/api/printers'), {cache:'no-store'});
+    if (response.status === 401){ showLogin(true); return; }
+    data = await response.json();
+  }catch(err){
+    list.innerHTML = '<div class="empty">读取失败：' + escapeHtml(err) + '</div>';
+    return;
+  }
+  const printers = data.printers || [];
+  if (!printers.length){
+    list.innerHTML = '<div class="empty">还没有打印机，用「🔍 自动搜索」或「＋ 添加」加一台。</div>';
+    return;
+  }
+  list.innerHTML = '';
+  printers.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.innerHTML =
+      '<span class="name">' + escapeHtml(item.name) +
+      '<div class="meta">' + escapeHtml(item.ip) + ' · ' + escapeHtml(item.model) +
+      (item.can_control ? '' : ' · 未连接') + '</div></span>';
+    const edit = document.createElement('button');
+    edit.textContent = '编辑';
+    edit.addEventListener('click', () => openEdit(item));
+    const reconnect = document.createElement('button');
+    reconnect.textContent = '重连';
+    reconnect.addEventListener('click', async () => {
+      reconnect.disabled = true;
+      const result = await postJson('/api/printers', {index: item.index, action:'reconnect'});
+      toast(result.ok ? '正在重连…' : ('重连失败：' + (result.detail || '')));
+      reconnect.disabled = false;
+    });
+    const remove = document.createElement('button');
+    remove.textContent = '删除';
+    remove.className = 'danger';
+    remove.addEventListener('click', async () => {
+      if (!confirm('确定删除 ' + item.name + '？\n（会从配置里移除）')) return;
+      const result = await postJson('/api/printers', {index: item.index, action:'remove'});
+      toast(result.ok ? '已删除' : ('删除失败：' + (result.detail || '')));
+      await refreshManageList();
+      pollStatus();
+    });
+    row.appendChild(reconnect);
+    row.appendChild(edit);
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
+}
+
+function openEdit(item){
+  modalCard.innerHTML =
+    '<h2>编辑 ' + escapeHtml(item.name) + '</h2>' +
+    '<div class="hint">IP 与机型由设备决定，不能在这里改。修改后需要重连生效。</div>' +
+    '<label>名称</label><input id="ed-name" value="' + escapeHtml(item.name) + '">' +
+    '<label>访问代码（留空表示不改）</label>' +
+    '<input id="ed-code" placeholder="' + (item.has_code ? '已保存 ' + item.code_len + ' 位' : '未填写') +
+    '" autocomplete="off">' +
+    '<div class="status" id="ed-status"></div>' +
+    '<div class="actions"><button id="ed-back">返回</button>' +
+    '<button id="ed-ok" class="primary">保存</button></div>';
+  document.getElementById('ed-back').addEventListener('click', openManage);
+  document.getElementById('ed-ok').addEventListener('click', async () => {
+    const status = document.getElementById('ed-status');
+    status.textContent = '正在保存…';
+    const result = await postJson('/api/printers', {
+      index: item.index, action: 'update',
+      name: document.getElementById('ed-name').value.trim(),
+      access_code: document.getElementById('ed-code').value.trim()
+    });
+    if (result.ok){
+      toast('已保存');
+      await openManage();
+    } else {
+      status.textContent = '保存失败：' + (result.detail || '未知原因');
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- 设置 */
+async function openSettings(){
+  modalCard.innerHTML =
+    '<h2>设置</h2><div class="hint">加载中…</div>' +
+    '<div class="actions"><button id="set-close">关闭</button></div>';
+  modal.style.display = 'flex';
+  document.getElementById('set-close').addEventListener('click', closeModal);
+
+  let data = {};
+  try{
+    const response = await fetch(api('/api/settings'), {cache:'no-store'});
+    if (response.status === 501){
+      modalCard.innerHTML = '<h2>设置</h2><div class="hint">' +
+        '该运行方式不支持在网页上修改设置（请用桌面版的「⚙ 设置」）。</div>' +
+        '<div class="actions"><button id="set-close2">关闭</button></div>';
+      document.getElementById('set-close2').addEventListener('click', closeModal);
+      return;
+    }
+    if (response.status === 401){ showLogin(true); return; }
+    data = await response.json();
+  }catch(err){
+    modalCard.innerHTML = '<h2>设置</h2><div class="hint">读取失败：' +
+      escapeHtml(err) + '</div><div class="actions"><button id="set-close3">关闭</button></div>';
+    document.getElementById('set-close3').addEventListener('click', closeModal);
+    return;
+  }
+
+  const fpsOptions = [[0,'不限制'],[4,'省电 4fps'],[8,'标准 8fps'],[10,'流畅 10fps'],[15,'很流畅 15fps']];
+  const select = (id, value, options) => {
+    let html = '<select id="' + id + '">';
+    options.forEach(([v, label]) => {
+      html += '<option value="' + v + '"' + (Number(value) === Number(v) ? ' selected' : '') +
+              '>' + label + '</option>';
+    });
+    return html + '</select>';
+  };
+
+  modalCard.innerHTML =
+    '<h2>设置</h2>' +
+    '<div class="hint">改完点保存即生效。每路帧率对 6000 端口通道影响有限' +
+    '（P1/A1 本身只有约 1fps）。</div>' +
+    '<label>每路画面最大帧率</label>' +
+    select('set-maxfps', data.max_fps, fpsOptions) +
+    '<label>界面刷新间隔（毫秒）</label>' +
+    '<input id="set-refresh" type="number" min="50" max="1000" step="50" value="' +
+      Number(data.refresh_ms || 150) + '">' +
+    '<label>网页帧率</label>' +
+    '<input id="set-webfps" type="number" min="0.5" max="15" step="0.5" value="' +
+      Number(data.web_fps || 4) + '">' +
+    '<label>网页画面最大宽度（像素）</label>' +
+    '<input id="set-webwidth" type="number" min="240" max="1920" step="60" value="' +
+      Number(data.web_max_width || 720) + '">' +
+    '<div class="status" id="set-status"></div>' +
+    '<div class="actions"><button id="set-cancel">关闭</button>' +
+    '<button id="set-ok" class="primary">保存</button></div>';
+  document.getElementById('set-cancel').addEventListener('click', closeModal);
+  document.getElementById('set-ok').addEventListener('click', async () => {
+    const status = document.getElementById('set-status');
+    status.textContent = '正在保存…';
+    const result = await postJson('/api/settings', {
+      max_fps: Number(document.getElementById('set-maxfps').value),
+      refresh_ms: Number(document.getElementById('set-refresh').value),
+      web_fps: Number(document.getElementById('set-webfps').value),
+      web_max_width: Number(document.getElementById('set-webwidth').value)
+    });
+    if (result.ok){
+      toast(result.detail || '设置已保存');
+      closeModal();
+    } else {
+      status.textContent = '保存失败：' + (result.detail || '未知原因');
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- 单画面菜单 */
+function tileMenu(index, item){
+  menu.innerHTML = '';
+  const add = (label, handler, className) => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    if (className) button.className = className;
+    button.addEventListener('click', () => { closeMenu(); handler(); });
+    menu.appendChild(button);
+  };
+  const sep = () => {
+    const line = document.createElement('div');
+    line.className = 'sep';
+    menu.appendChild(line);
+  };
+
+  add('单画面 / 还原', () => {
+    const tile = state.tiles.get(index);
+    if (tile) tile.element.classList.toggle('full');
+  });
+  add('抓拍保存图片', () => snapshotTile(index, item));
+  add('复制 IP', async () => {
+    try{
+      await navigator.clipboard.writeText(item.ip);
+      toast('已复制 ' + item.ip);
+    }catch(err){ toast('复制失败（浏览器未授权剪贴板）'); }
+  });
+  sep();
+  add('重连', async () => {
+    const result = await postJson('/api/printers', {index: index, action:'reconnect'});
+    toast(result.ok ? '正在重连…' : ('重连失败：' + (result.detail || '')));
+  });
+  add('编辑名称 / 访问代码', () => {
+    openManage().then(() => openEdit(Object.assign({index: index}, item)));
+  });
+  add('删除这台设备', async () => {
+    if (!confirm('确定删除 ' + item.name + '？')) return;
+    const result = await postJson('/api/printers', {index: index, action:'remove'});
+    toast(result.ok ? '已删除' : ('删除失败：' + (result.detail || '')));
+    pollStatus();
+  });
+}
+
+/** 抓拍：把当前帧下成图片。 */
+async function snapshotTile(index, item){
+  try{
+    const response = await fetch(api('/api/frame/' + index), {cache:'no-store'});
+    if (!response.ok){ toast('当前没有画面'); return; }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    link.href = url;
+    link.download = (item.name || ('printer-' + index)) + '-' + stamp + '.jpg';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast('已保存抓拍');
+  }catch(err){ toast('抓拍失败：' + err); }
+}
+
+/** 给画面绑定右键菜单（长按在触屏上等价）。 */
+function bindTileMenu(element, index){
+  const open = (event) => {
+    const item = (state.lastPrinters || [])[index];
+    if (!item) return;
+    event.preventDefault();
+    const rect = menu.getBoundingClientRect();
+    menu.style.display = 'block';
+    let x = event.clientX, y = event.clientY;
+    if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+    if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+    menu.style.left = Math.max(4, x) + 'px';
+    menu.style.top = Math.max(4, y) + 'px';
+    tileMenu(index, item);
+  };
+  element.addEventListener('contextmenu', open);
+  // 触屏长按（500ms）等价于右键。
+  // ⚠️ 弹完菜单要打一个标记：否则长按抬手时会紧接着触发 click，
+  // 顺带把画面切成全屏 —— 用户看到的是"长按弹出菜单，同时画面放大了"。
+  let timer = null;
+  let moved = false;
+  element.addEventListener('touchstart', (event) => {
+    const touch = event.touches[0];
+    moved = false;
+    timer = setTimeout(() => {
+      element.dataset.menuJustOpened = '1';
+      open({preventDefault(){}, clientX: touch.clientX, clientY: touch.clientY});
+    }, 500);
+  }, {passive: true});
+  element.addEventListener('touchmove', () => {
+    moved = true;
+    if (timer){ clearTimeout(timer); timer = null; }
+  }, {passive: true});
+  ['touchend','touchcancel'].forEach(type =>
+    element.addEventListener(type, () => {
+      if (timer){ clearTimeout(timer); timer = null; }
+      if (moved){ delete element.dataset.menuJustOpened; }
+    }, {passive: true}));
+}
+
+/* ---------------------------------------------------------------- 入口绑定 */
+document.getElementById('btn-discover').addEventListener('click', openDiscover);
+document.getElementById('btn-add').addEventListener('click', openAdd);
+document.getElementById('btn-manage').addEventListener('click', openManage);
+document.getElementById('btn-settings').addEventListener('click', openSettings);
 </script>
 </body>
 </html>

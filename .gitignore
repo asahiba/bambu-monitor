@@ -21,12 +21,22 @@ dist-docker/
 # Linux 构建用的独立虚拟环境
 .venv-linux/
 
+# 安卓构建专用的 Python 3.10 虚拟环境
+# （Chaquopy 仓库在 android_24_arm64_v8a 上 opencv 只有 cp310，
+#   所以安卓构建不能用主 .venv 的 3.13，见 android/app/build.gradle）
+.venv310/
+
 # 安卓构建产物
 android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
 android/.idea/
+# sync-python.ps1 每次构建时从仓库根的 app/ 复制过来的镜像，不是源文件
+android/app/src/main/python/
+# numpy 的本地 wheel（android_24 无 cp310 版本，需要 android_21 的那份）
+android/offline-wheels/
+dist-android/
 *.apk
 *.aab
 *.keystore

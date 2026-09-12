@@ -139,9 +139,11 @@ public class MainActivity extends AppCompatActivity {
                     String url = bootstrap.callAttr("url_for", "127.0.0.1").toString();
                     ui.post(() -> showWebView(url));
                 } else {
+                    // Chaquopy 的 PyObject 没有 getDict()，要按 Python 语义取键值，
+                    // 用 callAttr("get", ...) 调 dict.get。
                     PyObject status = bootstrap.callAttr("status");
-                    String error = status.getDict().get("error") == null
-                            ? "" : status.getDict().get("error").toString();
+                    PyObject errorObj = status.callAttr("get", "error");
+                    String error = (errorObj == null) ? "" : errorObj.toString();
                     String message = error.isEmpty()
                             ? "内置服务在 " + (START_TIMEOUT_MS / 1000) + " 秒内没有就绪。\n"
                             + "可能是端口被占用，或设备资源紧张。"

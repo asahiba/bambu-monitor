@@ -596,6 +596,29 @@ def test_含中文的PowerShell脚本必须带UTF8_BOM():
         )
 
 
+def test_含here_string的PowerShell脚本必须用CRLF换行():
+    """契约：用了 here-string（``@"`` … ``"@``）的 `.ps1` 必须以 CRLF 换行。
+
+    同样是踩过的坑：**PowerShell 5.1 不把「只有 LF 的换行」当作 here-string 的
+    结束符**。脚本若整篇是 LF（编辑器/工具重写文件时很常见），会因为找不到
+    ``"@`` 而报 `The string is missing the terminator: "@` —— 而这个报错同样
+    指向不到真正的原因，只会让人怀疑引号配对。
+
+    PowerShell 7 对 LF 是宽容的，所以只有用 5.1 跑才会暴露。
+    """
+    scripts = sorted(PROJECT_ROOT.glob("*.ps1")) + sorted(PROJECT_ROOT.glob("*/*.ps1"))
+    assert scripts, "没有找到任何 .ps1 脚本，测试本身可能失效了"
+    for script in scripts:
+        raw = script.read_bytes()
+        if b'@"' not in raw:
+            continue  # 没有 here-string 就不受影响
+        lone_lf = raw.replace(b"\r\n", b"")
+        assert b"\n" not in lone_lf, (
+            f"{script.relative_to(PROJECT_ROOT)} 含 here-string 但存在只有 LF 的换行，"
+            'PowerShell 5.1 会报 The string is missing the terminator: "@'
+        )
+
+
 def test_打包脚本引用的spec文件都存在():
     """契约：打包脚本里点名的 spec 必须真的在仓库里（否则构建时才炸）。"""
     for name in (

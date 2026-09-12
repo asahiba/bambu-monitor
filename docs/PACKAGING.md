@@ -9,7 +9,7 @@
 | **Windows** | `dist-onefile/BambuMonitor.exe`（单文件，约 93 MB） | `build-onefile.bat` | 什么都不用装 |
 | **Linux** | `dist-onefile-headless/BambuMonitor-headless`（单文件，约 89 MB） | `bash linux/build-headless-docker.sh` | 什么都不用装 |
 | **Docker** | `dist-docker/bambu-monitor-latest-image.tar.gz`（单文件镜像，约 132 MB） | `build-docker-image.ps1` | 只需 Docker |
-| **安卓** | `app-debug.apk` | `android/build-apk.ps1` 或 Android Studio | Android 7.0+ |
+| **安卓** | `dist-android/BambuMonitor-1.0.0-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
 
 Linux 另有一个**带 Qt 的变体**（`linux/build-onefile-docker.sh`，约 143 MB），
 能开图形界面；但服务器/NAS 场景请用上面的 headless 变体，原因见第 2 节。
@@ -22,7 +22,12 @@ Linux 另有一个**带 Qt 的变体**（`linux/build-onefile-docker.sh`，约 1
 | Windows exe | `--sim --screenshot` | 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标正常 |
 | Linux headless | 干净 `python:3.11-slim` 容器内起服务 | `/health` = 200；2 台模拟打印机**画面与遥测全部在线**；取到真实 JPEG 帧 30 KB；日志无错误 |
 | Docker 镜像 | 容器内 `/health` + `/api/printers` | 通过（镜像已导出为 tar.gz） |
-| 安卓 APK | 前置检查脚本 | 工程就绪；本机缺 Android SDK，未产出 APK |
+| 安卓 APK | `assembleDebug` 构建 + 包内容核查 | **已产出**；包内含 `libpython3.10.so`、`cv2.so`、numpy 全套原生扩展、`app/web/*`、内置 CA 与 HMS 文案表 |
+| 安卓 APK | 本机运行 | **未能实测**：构建机无 Android 设备、CPU 无核显跑不了模拟器；仅做了静态核查 |
+
+> 安卓 APK 的「未能在设备上实测」是当前唯一的验证缺口。替代验证是：
+> 同样的 `app/` 代码在 **Python 3.10** 下跑完整回归测试（与 APK 内嵌的
+> Python 版本一致），用于兜住"代码本身在 3.10 上不成立"这类问题。
 
 「单文件」的含义：Windows/Linux 是**自带 Python 运行时**的单个可执行文件；
 Docker 是**整个镜像**打成的一个 tar（`docker load` 即可用，目标机无需联网拉依赖）。
@@ -153,17 +158,61 @@ docker run -d --name bambu-monitor --network host -v $PWD/data:/data bambu-monit
 
 见 [`../android/README.md`](../android/README.md)。要点先说在这里：
 
-**这个 APK 不是"把软件搬到手机上跑"，而是一个全屏网页壳。**
-监控软件的主体是连局域网里的打印机（MQTT / 摄像头 / 发现），
-把 Python 运行时塞进手机要多几百 MB 且手机必须一直前台，实用价值为负。
-正确形态是：**电脑/服务器跑服务端，手机看画面**。
+**这个 APK 内嵌了完整的 Python 运行时**，在设备本机跑和桌面版同一个
+`app/` 服务，界面用 WebView 打开 `http://127.0.0.1:8080`。所以平板可以
+**完全脱离电脑独立使用**；又因为服务绑在 `0.0.0.0`，同一 Wi-Fi 下的其它
+设备也能连这台平板的页面。
 
-前置条件：JDK 17+ 与 Android SDK（本仓库不包含，体积太大）。
-`android/build-apk.ps1` 会先做前置检查并明确告诉你缺什么、怎么装；
-用 Android Studio 打开 `android/` 目录是最省事的路径。
+前置条件：JDK 17+、Android SDK、以及 **Python 3.10**
+（`android/build-apk.ps1` 会先做前置检查并明确告诉你缺什么、怎么装）。
+用 Android Studio 打开 `android/` 目录也可以。
 
 > 只是想在手机上看监控墙的话，**其实不需要 APK**：
 > 浏览器打开服务端地址 → 「添加到主屏幕」，这就是原有的 PWA 方案（已实测可用）。
+
+### 为什么安卓版锁定 Python 3.10（以及 numpy 为什么要离线补）
+
+这两项**不是随便选的**，而是被 Chaquopy 预编译 wheel 的覆盖范围卡死的。
+Chaquopy 把 pip 指向自己的仓库 `https://chaquo.com/pypi-13.1`，并且只接受
+**平台标签精确等于 `android_<minSdk>_<abi>`** 的 wheel（见其
+`build-packages.zip` 里 `PipInstall.platform_tag`）。本项目
+minSdk=24、abi=arm64-v8a，于是标签固定为 `android_24_arm64_v8a`：
+
+| 包 | android_24_arm64_v8a 上存在的 Python 版本 |
+|---|---|
+| `opencv-python-headless` | **只有 cp310**（4.5.1.48） |
+| `numpy` | **只有 cp313**（1.26.2） |
+| `cryptography` / `cffi` | cp310 / cp311 / cp312 / cp313 |
+
+也就是说 opencv 与 numpy **没有任何一个 Python 版本能同时满足**。而
+RTSPS 画面要 opencv，`cv2` 又硬依赖 numpy（缺了会抛
+`OpenCV bindings requires "numpy" package`）。解法是：
+
+1. 选 **3.10**（也正是 Chaquopy 17 的默认版本），走 opencv 那条路；
+2. numpy 用 `android_21_arm64_v8a` 的那份 wheel **离线补上** ——
+   `build-apk.ps1` 会把它下到 `android/offline-wheels/`，`build.gradle`
+   用**文件路径**直接安装，绕开索引的平台标签匹配。
+   （该 wheel 是给 API 21 编的，但 NDK 向后兼容，装在 API 24 上可用。）
+
+桌面版仍然用 3.13，两者互不影响：`app/` 下的代码同时兼容 3.10 与 3.13。
+
+> ⚠️ 顺带一个只有 3.10 才暴露的坑：**不要给 `threading.Thread` 子类挂
+> `self._stop` 属性**。3.10/3.11 的 `Thread.join()` 在收尾时会调用内部的
+> `_stop()` 方法，被 `Event` 覆盖后 join 会抛
+> `TypeError: 'Event' object is not callable`。3.13 改了这段实现，所以在
+> 桌面版上完全看不出来 —— 本仓库统一用 `self._stop_event`。
+
+### 与桌面版的依赖差异
+
+| | 桌面版 | 安卓版 |
+|---|---|---|
+| Python | 3.13（`.venv`） | 3.10（`.venv310`，构建用） |
+| OpenCV | `opencv-python` 4.8+ | `opencv-python-headless` 4.5.1.48（Chaquopy 预编译） |
+| GUI | PySide6 | 无（界面是 WebView） |
+
+> 另外，`android/app/src/main/python/` 是 `sync-python.ps1` 每次构建时从
+> 仓库根 `app/` 复制过去的**镜像**，不要直接改那里的文件（改动会被覆盖），
+> 它也已加入 `.gitignore`。
 
 ## 5. 构建时的环境坑（都不是代码问题，但会浪费半天）
 
@@ -183,6 +232,32 @@ $p = "android\build-apk.ps1"
 $t = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
 [IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))
 ```
+
+### 含 here-string 的脚本必须用 CRLF 换行
+
+另一个同样隐蔽的坑：**PowerShell 5.1 不把「只有 LF 的换行」当作 here-string
+（`@"` … `"@`）的结束符**。整个脚本若被工具重写成 LF 结尾，会因为找不到
+`"@` 而报：
+
+```
+The string is missing the terminator: "@.
+```
+
+这个报错同样指不到真正的原因（只会让人去查引号配对）。PowerShell 7 对 LF
+是宽容的，所以只有用 5.1 跑才暴露。
+
+处理：把文件换成 CRLF 换行（`.ps1` 在 Windows 上本来就是 CRLF 更自然）：
+
+```powershell
+$p = "make-bundle.ps1"
+$t = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
+$t = ($t -replace "`r`n", "`n") -replace "`n", "`r`n"
+[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))
+```
+
+这两条都有契约测试兜底，见 `tests/test_contracts.py` 里的
+`test_含中文的PowerShell脚本必须带UTF8_BOM` 与
+`test_含here_string的PowerShell脚本必须用CRLF换行`。
 
 ### Git Bash / MSYS 会改写容器内的路径
 

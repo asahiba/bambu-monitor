@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -13,6 +14,8 @@ from .mqtt_worker import MqttWorker
 if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避免与 app.core 形成环
     from ..core.capabilities import DeviceCapabilities
 
+LOGGER = logging.getLogger("bambu-monitor.session")
+
 
 class PrinterSession:
     """一台打印机的完整监控会话（遥测 + 视频）。
@@ -20,6 +23,15 @@ class PrinterSession:
     本类不依赖 GUI：界面通过 ``snapshot()`` 轮询状态，通过
     ``latest_frame()`` 取最新一帧，因此不会因为高频信号导致队列堆积。
     """
+
+    #: 受「固件要求 MQTT 命令签名」影响的命令（归一化名）。
+    #:
+    #: 依据：官方 MQTT 签名机制的覆盖范围是**顶层带 ``print`` 的报文**
+    #: （"Firmware rejects unsigned ``print`` commands when Developer Mode is off"）。
+    #: `system` 段的灯控不在其中 —— 实测确认：同一台 A2L 在
+    #: ``needs_mqtt_signature=True`` 时，`system/ledctrl`（灯）**生效**，
+    #: 而 `print/pause` 与 `print/print_speed` 被设备忽略。
+    SIGNATURE_SENSITIVE_COMMANDS = frozenset({"pause", "resume", "stop", "speed"})
 
     def __init__(self, info: PrinterInfo, on_event: Optional[Callable[[str], None]] = None) -> None:
         self.info = info
@@ -397,59 +409,87 @@ class PrinterSession:
     # ------------------------------------------------------------------ 能力
     @property
     def capabilities(self) -> "DeviceCapabilities":
-        """这台设备「能做什么」（机型固有能力 + 运行时观测）。
+        """这台设备「能做什么」（机型固有能力 + **运行时实际上报**）。
 
         界面与网页一律读这个，**不要**再去读 `info.model.has_chamber_sensor` 这类
         机型属性——那样会把「按能力分支」退化成「按机型分支」，接入第三方设备族时
-        每一处都要改。运行时叠加的部分：
+        每一处都要改。
 
-        * `nozzle_count`：H2D 这类双喷嘴机型只有在上报第二路温度时才真的是 2。
+        运行时观测覆盖机型推断的两处（都为修正实测与规格不符的情况）：
+
+        * ``can_control_light``：设备只要上报了 ``lights_report`` 节点，就说明它**真的有灯**。
+          实测教训：A2L 是开放式机型，按规格推断"无舱灯"，但真机上报了
+          ``chamber_light`` —— 于是界面把灯按钮藏了，用户没法开关灯。
+          **机型规格推不出灯光能力，只有设备上报才算数。**
+        * ``nozzle_count``：H2D 这类双喷嘴机型只有在上报第二路温度时才真的是 2。
         """
-        from ..core.capabilities import DeviceCapabilities  # noqa: F401  （运行时按需导入）
-
         base = self.info.model.capabilities
+        changes: dict[str, object] = {}
+        if self.status.lights:
+            # 设备上报了灯（哪怕只有一个节点）→ 允许控制
+            changes["can_control_light"] = True
         if self.status.nozzle_temper_2 is not None:
-            return base.merged(nozzle_count=max(2, base.nozzle_count))
-        return base
+            changes["nozzle_count"] = max(2, int(base.nozzle_count))
+        return base.merged(**changes) if changes else base
 
     # ------------------------------------------------------------------ 控制
     @property
     def can_control(self) -> bool:
-        """遥测在线**且固件允许**下发控制命令。
+        """遥测是否在线（**能否下发**命令的通用前提）。
 
-        注意这里保留了「MQTT 在线」的原始语义（有测试与调用方依赖），
-        但因为下面这条实测事实，它现在还要求固件不处于「命令需签名」状态：
+        注意这里**不再**把"固件要求签名"算进来：签名要求只覆盖 **`print` 段**的命令
+        （暂停/停止/速度），而 `system` 段的命令（开关灯）不受影响 —— 实测确认
+        A2L 在 `needs_mqtt_signature=True` 的情况下，灯控**确实生效**。
+        把两者混在一起会把本来能用的灯控也拦掉。
 
-        新机型（H2C / H2S / X2D / P2S / **A2L**）的报文里 ``fun`` 字段 bit
-        ``0x20000000`` 会置位，表示 **MQTT 命令需要签名校验**。此时若用户没有在
-        打印机触屏上开启 Developer Mode，我们下发的命令会被固件**静默忽略**——
-        界面看起来就是「点了暂停没反应」，而画面与遥测一切正常。
-        与其让按钮看起来能用却无效，不如置灰并说明原因（见 ``controls_blocked``）。
+        具体某条命令是否可用，请查 :meth:`command_blocked`。
         """
-        return self._mqtt is not None and self.status.mqtt_online and not self.controls_blocked
+        return self._mqtt is not None and self.status.mqtt_online
 
     @property
     def controls_blocked(self) -> bool:
-        """控制是否被「固件要求命令签名」挡住（需要用户去开 Developer Mode）。
-
-        只在**明确知道**需要签名时才返回 True：``fun`` 字段缺失或无法解析时是未知，
-        此时不能拦（否则老机型会被误伤）。
-        """
+        """是否有**任何**控制被固件签名要求挡住（用于界面提示）。"""
         return self.status.needs_mqtt_signature is True
+
+    def command_blocked(self, command: str) -> str:
+        """某条归一化命令是否被挡住；被挡住时返回原因，可用则返回空字符串。
+
+        只有 **`print` 段**的命令会因签名要求失效 —— 依据是官方 MQTT 签名文档：
+        "Firmware rejects unsigned `print` commands when Developer Mode is off"，
+        且顶层不带 `print` 的报文（`system` / `info`）不在该机制的覆盖范围内。
+        实测印证：同一台 A2L 上 `system/ledctrl` 生效、`print/pause` 与
+        `print/print_speed` 被忽略。
+        """
+        if not self.controls_blocked:
+            return ""
+        if command in self.SIGNATURE_SENSITIVE_COMMANDS:
+            return self.controls_blocked_reason
+        return ""
 
     @property
     def controls_blocked_reason(self) -> str:
-        """被挡住时给用户看的说明。"""
+        """被挡住时给用户看的说明（要能直接指导用户解决问题）。"""
         if not self.controls_blocked:
             return ""
         return (
-            "打印机固件要求 MQTT 命令签名：请在打印机屏幕上开启「开发者模式 / "
-            "Developer Mode」后重启设备，否则暂停/停止/开灯等控制指令会被静默忽略"
+            "打印机固件要求 MQTT 命令签名（开发者模式未开启）："
+            "暂停 / 停止 / 速度档位这类命令会被设备忽略，"
+            "请在打印机屏幕上开启「设置 → 通用 → 开发者模式 / Developer Mode」后重启设备。"
+            "（开关灯不受影响，因为灯控走 system 段命令。）"
+            "若设备报 HMS_0500-0500-0001-0007 即为此原因，"
+            "详见 https://wiki.bambulab.com/en/x1/troubleshooting/hmscode/0500_0500_0001_0007"
         )
 
     def _command(self, section: str, command: str, **fields: Any) -> bool:
         worker = self._mqtt
         if worker is None or not self.status.mqtt_online:
+            return False
+        # 归一化命令名用于查签名门禁（section 决定它是否受影响）
+        normalized = {"print_speed": "speed", "pause": "pause", "resume": "resume",
+                      "stop": "stop", "ledctrl": "light"}.get(command, command)
+        if self.command_blocked(normalized):
+            # 已知会被固件忽略：不要假装成功（返回 True 会让用户以为点了生效）
+            LOGGER.info("命令 %s 因固件签名要求被拦下，未下发", command)
             return False
         return worker.publish_command(section, command, **fields)
 

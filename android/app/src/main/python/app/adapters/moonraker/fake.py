@@ -386,7 +386,7 @@ class FakeMoonrakerWebSocket:
         self.port = 0
         self._server: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def start(self) -> "FakeMoonrakerWebSocket":
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -405,7 +405,7 @@ class FakeMoonrakerWebSocket:
         return f"ws://{self.fake.host}:{self.port}/websocket"
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         if self._server is not None:
             try:
                 self._server.close()
@@ -417,7 +417,7 @@ class FakeMoonrakerWebSocket:
         self._thread = None
 
     def _serve(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             server = self._server
             if server is None:
                 return
@@ -436,7 +436,7 @@ class FakeMoonrakerWebSocket:
             conn.settimeout(5.0)
             if not self._handshake(conn):
                 return
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     opcode, payload = read_frame(conn, expect_masked=True)
                 except (WebSocketError, OSError):

@@ -274,14 +274,14 @@ class MiniMqttBroker(threading.Thread):
     def __init__(self, printer: "FakePrinter") -> None:
         super().__init__(name=f"sim-mqtt-{printer.serial}", daemon=True)
         self.printer = printer
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._clients: list[ssl.SSLSocket] = []
         self._lock = threading.Lock()
         self._server: Optional[socket.socket] = None
         self.context = make_server_context()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         if self._server is not None:
             try:
                 self._server.close()
@@ -306,7 +306,7 @@ class MiniMqttBroker(threading.Thread):
             print(f"[sim] MQTT 端口绑定失败 {self.printer.ip}:{MQTT_PORT} -> {exc}")
             return
         self._server = server
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 conn, _ = server.accept()
             except (socket.timeout, TimeoutError):
@@ -328,7 +328,7 @@ class MiniMqttBroker(threading.Thread):
         with self._lock:
             self._clients.append(tls)
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     packet = _read_packet(tls)
                 except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
@@ -421,7 +421,7 @@ class FakePrinter:
         self.started = time.time()
         self.frame_factory = FrameFactory(serial, name, self.random.randint(0, 359))
         self.mqtt = MiniMqttBroker(self)
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         # 可控状态（用于验证暂停/继续/停止/灯光指令）
         self.paused = False
@@ -555,7 +555,7 @@ class FakePrinter:
         self.mqtt.broadcast()
 
     def _tick_status(self) -> None:
-        while not self._stop.wait(2.0):
+        while not self._stop_event.wait(2.0):
             if not self.paused and not self.stopped:
                 self.percent = min(100, self.percent + 1)
                 self.remaining = max(0, self.remaining - 1)
@@ -578,7 +578,7 @@ class FakePrinter:
             print(f"[sim] 摄像头端口绑定失败 {self.ip}:{CAMERA_PORT} -> {exc}")
             return
         context = make_server_context()
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 conn, _ = server.accept()
             except (socket.timeout, TimeoutError):
@@ -613,7 +613,7 @@ class FakePrinter:
             if username != "bblp" or code != self.access_code:
                 print(f"[sim] {self.serial} 拒绝连接：访问代码不匹配（收到 {code!r}）", flush=True)
                 return
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     frame = self.frame_factory.render()
                 except Exception as exc:  # noqa: BLE001 - 模拟器不能因为绘制失败而中断
@@ -644,7 +644,7 @@ class FakePrinter:
             self._threads.append(thread)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         self.mqtt.stop()
         for thread in self._threads:
             thread.join(timeout=1.5)
@@ -657,11 +657,11 @@ class DiscoveryResponder(threading.Thread):
     def __init__(self, printers: list[FakePrinter]) -> None:
         super().__init__(name="sim-discovery", daemon=True)
         self.printers = printers
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._sockets: list[socket.socket] = []
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         for sock in self._sockets:
             try:
                 sock.close()
@@ -687,7 +687,7 @@ class DiscoveryResponder(threading.Thread):
             sock.settimeout(0.5)
             self._sockets.append(sock)
 
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             for sock in (ssdp, legacy):
                 try:
                     data, addr = sock.recvfrom(2048)

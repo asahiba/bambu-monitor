@@ -81,7 +81,13 @@ class WebFrameCache(threading.Thread):
         self._source_seq: dict[int, int] = {}
         self._active: dict[int, float] = {}
         self._live_clients = 0
-        self._stop = threading.Event()
+        # ⚠️ 必须叫 _stop_event，不能叫 _stop：threading.Thread 自己有一个
+        # 内部方法 _stop()，Python 3.10 的 Thread.join() 会在收尾时调用它
+        # （_wait_for_tstate_lock -> self._stop()）。用 Event 覆盖掉这个名字后，
+        # join() 会抛 "TypeError: 'Event' object is not callable"，
+        # 表现为「线程明明跑完了却 join 失败」。3.13 改掉了这段实现，
+        # 所以这个坑只在 3.10/3.11 上暴露（安卓版内嵌的正是 3.10）。
+        self._stop_event = threading.Event()
         self.encoded = 0
 
     # ------------------------------------------------------------------ 对外
@@ -107,7 +113,7 @@ class WebFrameCache(threading.Thread):
             return self._frames.get(index, (0, b""))
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def set_fps(self, fps: float, max_width: Optional[int] = None) -> None:
         with self._lock:
@@ -118,7 +124,7 @@ class WebFrameCache(threading.Thread):
     # ------------------------------------------------------------------ 内部
     def run(self) -> None:
         interval = 1.0 / self._fps
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             started = time.time()
             sessions = list(self._get_sessions())
             now = time.time()
@@ -143,7 +149,7 @@ class WebFrameCache(threading.Thread):
                     self._frames[index] = (seq, payload)
                 self.encoded += 1
             elapsed = time.time() - started
-            self._stop.wait(max(0.02, interval - elapsed))
+            self._stop_event.wait(max(0.02, interval - elapsed))
 
 
 class _Handler(BaseHTTPRequestHandler):
