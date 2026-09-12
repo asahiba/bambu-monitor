@@ -35,12 +35,12 @@ Dockerfile* text eol=lf
 *.jpg      binary
 *.jpeg     binary
 *.ico      binary
-*.gz       binary
+*.gz       binary -text -diff
 *.whl      binary
 *.apk      binary
 *.jar      binary
 *.exe      binary
 *.so       binary
-*.pem      binary
+*.pem      binary -text -diff
 *.cer      binary
 *.icns     binary
