@@ -18,6 +18,9 @@ dist-onefile-headless/
 build-onefile-headless/
 dist-docker/
 
+# 交付归集目录（make-bundle.ps1 的产物，约 490 MB，绝不入库）
+dist-all/
+
 # Linux 构建用的独立虚拟环境
 .venv-linux/
 

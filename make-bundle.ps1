@@ -21,6 +21,17 @@ Set-Location $Root
 $OutDir = Join-Path $Root "dist-all"
 Write-Host "=== 归集成品到 $OutDir ===" -ForegroundColor Cyan
 
+# 生成 README.md 要用到 Python（原因见下面「交付说明」处的注释）。
+# 用项目自带的 .venv；没有就退回 PATH 上的 python。
+$py = Join-Path $Root ".venv\Scripts\python.exe"
+if (-not (Test-Path $py)) {
+    $found = Get-Command python -ErrorAction SilentlyContinue
+    if ($found) { $py = $found.Source }
+}
+if (-not (Test-Path $py)) {
+    Write-Host "  警告：找不到 Python，README.md 将不会生成（产物与校验清单不受影响）" -ForegroundColor Yellow
+}
+
 # 允许重复执行：先清掉旧的分类目录（保留手写的 README 之外的自动内容）
 foreach ($sub in @("windows", "linux", "docker", "android")) {
     $path = Join-Path $OutDir $sub
@@ -98,77 +109,24 @@ Write-Host ""
 Write-Host "已生成校验清单：$sumFile（$($lines.Count) 个文件）" -ForegroundColor Cyan
 
 # --- 交付说明 ---
+# ⚠️ 刻意用 Python 生成而不是 PowerShell here-string：
+# PowerShell 把反引号当转义字符，Markdown 的代码围栏（三个反引号）
+# 在 here-string 里会被吃掉，产出没有代码块的 README（已踩过）。
 $readme = Join-Path $OutDir "README.md"
 $stamp = Get-Date -Format "yyyy-MM-dd HH:mm"
-$rows = ($copied | ForEach-Object {
-    "| $($_.Label) | ``$($_.File)`` | $($_.SizeMB) MB |"
-}) -join "`r`n"
+$manifest = Join-Path $env:TEMP "bambu_bundle_manifest.json"
+$copied | ConvertTo-Json -Depth 4 | Set-Content -Path $manifest -Encoding UTF8
 
-$readmeText = @"
-# 拓竹打印机监控台 · 交付包
+if ($py -and (Test-Path $py)) {
+    # README 交给独立脚本生成。刻意不在 PowerShell 里拼 Markdown：
+    # PowerShell 把反引号当转义字符，代码围栏（三个反引号）会被吃掉，
+    # 用 here-string 传 Python 代码也容易在引号/换行上出岔子。
+    & $py (Join-Path $Root "tools\make_bundle_readme.py") $manifest $readme $stamp
+} else {
+    Write-Host "  跳过 README.md（没有可用的 Python）" -ForegroundColor Yellow
+}
+Remove-Item $manifest -Force -ErrorAction SilentlyContinue
 
-构建时间：$stamp
-
-## 包含的产物
-
-| 版本 | 文件 | 大小 |
-|---|---|---|
-$rows
-
-## 各版本怎么用
-
-### Windows（``windows/BambuMonitor.exe``）
-双击即可运行，已自带 Python 运行时，**不需要**装 Python。
-首次运行会生成配置目录（``%APPDATA%\BambuMonitor``）。
-杀毒软件可能对未签名的一次性打包 exe 报警，属正常现象。
-
-### Linux（``linux/BambuMonitor-headless``，无界面服务版）
-```
-chmod +x BambuMonitor-headless
-./BambuMonitor-headless --host 0.0.0.0 --port 8080
-```
-然后浏览器打开 ``http://<这台机器的IP>:8080``。
-带界面的版本是 ``linux/BambuMonitor-linux-gui``（需要图形环境与 Qt 依赖库）。
-
-### Docker（``docker/bambu-monitor-image.tar.gz``）
-```
-docker load -i bambu-monitor-image.tar.gz
-docker run -d --name bambu-monitor --network host \
-  -v bambu-config:/config bambu-monitor:latest
-```
-``--network host`` 是必须的：打印机的发现（SSDP 广播）与视频流都要求容器
-能直接看到局域网。
-
-### 安卓（``android/BambuMonitor-arm64.apk``）
-把 APK 传到平板/手机上安装（需要允许"未知来源"）。
-应用**内置了完整的 Python 服务**，在设备本机跑 HTTP 服务，界面用 WebView 打开，
-所以平板可以完全脱离电脑独立使用；因为服务绑在 ``0.0.0.0``，
-同一 Wi-Fi 下的其它手机/电脑也能访问这台平板的页面。
-
-* 架构：arm64-v8a（当前绝大多数平板与手机）
-* 系统：Android 7.0+（API 24）
-* 包内已含 OpenCV，支持 X1 / X2D / H2 / P2S 的 RTSPS 高清通道
-* 这是 **debug 签名**的包，用于自用安装；上架应用商店需要换正式签名
-
-## 全部版本共用的功能
-
-四个版本共用同一套 Python 内核（同一个 ``app/`` 目录），因此功能一致：
-设备管理（自动发现 / 手动添加 / 改名 / 删除）、暂停 / 继续 / 停止、
-腔体灯开关、打印速度、摄像头画面与帧率、HMS 错误码中文解释、
-多台打印机并排监控。**网页端是各平台统一的操作界面。**
-
-## 校验
-
-``SHA256SUMS.txt``（无 BOM 的 UTF-8，可直接给 Linux 用）：
-```
-# Linux / macOS
-sha256sum -c SHA256SUMS.txt
-# Windows PowerShell
-Get-FileHash .\android\BambuMonitor-arm64.apk -Algorithm SHA256
-```
-"@
-[System.IO.File]::WriteAllText($readme, $readmeText, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "已生成说明文件：$readme" -ForegroundColor Cyan
 
 # --- 汇总 ---
 $totalMb = [math]::Round(((Get-ChildItem $OutDir -Recurse -File |
