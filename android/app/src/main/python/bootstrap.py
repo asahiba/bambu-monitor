@@ -78,15 +78,18 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT) -> None:
 def _serve_blocking(host: str, port: int) -> None:
     try:
         from app import __version__
-        from app.config import AppConfig
-        from app.headless import run_headless
+        from app.headless import resolved_web_token, run_headless
 
-        # 先读一次配置，把网页访问令牌取出来给 Android 侧拼 URL 用
-        try:
-            config = AppConfig.load()
-            _state["token"] = config.web_token
-        except Exception:  # noqa: BLE001 - 令牌拿不到不影响服务启动
-            pass
+        # ⚠️ 必须先问服务端要令牌，而且**不能**自己调 AppConfig.load() 取。
+        #
+        # 踩过的坑：AppConfig.load() 在配置文件还不存在时，每次调用都会新生成
+        # 一个 web_token **且不落盘**。原来这里先 load() 一次把令牌存进 _state，
+        # 随后 run_headless() 内部又 load() 一次拿到的是**另一个**令牌并用它起服务
+        # —— WebView 拿到的是前者，于是首次打开必然 `{"error": "unauthorized"}`。
+        #
+        # resolved_web_token() 是「先落盘再返回」，两侧读到的必然是同一个值；
+        # 而且它跟 run_headless() 用的是同一个函数，不会再各算各的。
+        _state["token"] = resolved_web_token()
 
         _state["version"] = __version__
         # 与命令行走同一个入口，保证行为一致（网页服务、管理命令、日志都一样）

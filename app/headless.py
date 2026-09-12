@@ -29,6 +29,34 @@ from .config import AppConfig, config_path
 from .util import secret
 
 
+#: ``run_headless`` 最终真正用于服务的那一个令牌。
+#: 给同一个进程内的宿主用（安卓版的 bootstrap 就靠它把带令牌的网址交给 WebView），
+#: 避免宿主自己去 ``AppConfig.load()`` 猜出一个**跟服务端不一致**的令牌。
+_SERVED_TOKEN: str = ""
+
+
+def resolved_web_token() -> str:
+    """返回本进程实际用于网页服务的访问令牌。
+
+    **不要在宿主里自己调 ``AppConfig.load()`` 取令牌**：``load()`` 在配置文件
+    还不存在时是「每次调用都新生成一个令牌、且不落盘」的，两次调用会得到两个
+    不同的值。安卓版首次启动时 WebView 就这样拿到过一个服务端不认的令牌，
+    表现为一打开就是 ``{"error": "unauthorized"}``。
+
+    这里的做法是：取令牌与落盘绑在一起，谁先调用谁负责把令牌持久化，
+    之后所有调用方（包括随后启动的服务）读到的都是同一个值。
+    """
+    global _SERVED_TOKEN
+    if _SERVED_TOKEN:
+        return _SERVED_TOKEN
+    config = AppConfig.load()
+    if not config.web_token:
+        config.web_token = secret.token_hex(8)
+    config.save()  # 关键：先落盘，否则下次 load() 会另生成一个
+    _SERVED_TOKEN = config.web_token
+    return _SERVED_TOKEN
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bambu-monitor-headless",
@@ -239,11 +267,12 @@ def _print_status(sessions: list[PrinterSession]) -> None:
 def run_headless(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = AppConfig.load()
-    if args.token:
-        config.web_token = args.token
-    elif not config.web_token:
-        config.web_token = secret.token_hex(8)
-    # 令牌落盘：否则每次重启都会换一个访问地址，装到手机主屏的 PWA 就失效了
+    # 取令牌统一走 resolved_web_token()：它会**先落盘再返回**，这样同一进程里的
+    # 宿主（安卓版 bootstrap）拿到的令牌与服务端后来用的是同一个。
+    # 否则配置文件尚未存在时，load() 每次都会新生成一个且不落盘，
+    # 两边各拿一个，网页一打开就是 unauthorized。
+    # --token 显式指定时以命令行优先（Docker / 多实例场景要能覆盖已有配置）。
+    config.web_token = args.token or resolved_web_token()
     config.save()
 
     if args.list:

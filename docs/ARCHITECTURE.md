@@ -191,6 +191,27 @@ Qt 定时器按 `refresh_ms` 轮询，画面落后时旧帧直接丢弃。这样
 前端用 `fetch` 流式解析。**为什么要这么做**：浏览器对同域最多 6 条长连接，
 每路 MJPEG 各占一条，第 7 路起就会一直排队。
 
+### 令牌只有一个来源：`app.headless.resolved_web_token()`
+
+`/` 本身也要令牌（见上表），所以**打开页面的那一个请求就必须带上令牌**。
+令牌的解析集中在 `app.headless.resolved_web_token()`，它**先落盘再返回**。
+
+这里的坑值得记住：`AppConfig.load()` 在**配置文件还不存在**时，每次调用都会
+新生成一个 `web_token` 且**不落盘**，也就是说它并不幂等：
+
+```python
+AppConfig.load().web_token   # 'a1b2…'  第一次
+AppConfig.load().web_token   # 'c3d4…'  第二次，又换了一个！
+```
+
+安卓版曾经自己去 `AppConfig.load()` 取令牌交给 WebView，而随后启动服务时
+`run_headless()` 内部又 load() 了一次 —— 两边各拿一个，于是**首次安装打开
+必然是 `{"error": "unauthorized"}`**（桌面版因为这个文件早就存在，看不出来）。
+
+所以规则是：**任何宿主都不要自己 `load()` 取令牌**，一律调
+`resolved_web_token()`；它同时被 `run_headless()` 使用，从根上保证宿主与
+服务端用的是同一个值。回归测试见 `tests/test_android_bootstrap_token.py`。
+
 ## 7. 模拟器（无真机开发的基石）
 
 `app/sim/simulator.py` 在 `127.0.0.2`、`127.0.0.3`… 上伪造完整打印机：
