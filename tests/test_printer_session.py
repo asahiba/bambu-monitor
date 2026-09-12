@@ -419,35 +419,85 @@ def test_未配置访问代码时不启动视频通道(monkeypatch):
 # --------------------------------------------------------------- Developer Mode 门槛
 
 
-def test_控制被固件签名要求挡住时可以被识别():
-    """契约：新机型要求 MQTT 命令签名时，`controls_blocked` 为真且给出可读原因。
+def test_签名要求只挡住print类命令而不挡灯控():
+    """契约（实测驱动）：固件要求签名时，只有 `print` 段命令被挡，**灯控不受影响**。
 
-    实测事实：A2L（固件 01.01.05.00）的 `fun` = "100d122002fbd"，bit 0x20000000 置位，
-    表示「MQTT 命令需签名校验」。未在打印机触屏开启 Developer Mode 时，下发的
-    暂停/停止/开灯会被固件**静默忽略**——所以必须让界面知道这件事并置灰按钮，
-    而不是让用户反复点击一个看起来可用的按钮。
+    依据与实测（固件 01.01.05.00，A2L）：
+    * 官方 MQTT 签名文档明确其覆盖范围是「顶层带 ``print`` 的报文」，
+      `system` / `info` 段不在其中；
+    * 真机验证：同一台 A2L 在 `fun` bit 0x20000000 置位（= 开发者模式关闭）时，
+      `system/ledctrl`（开关灯）**生效**（回读 lights_report 确认状态真的变了），
+      而 `print/pause` 与 `print/print_speed` 被设备忽略。
+
+    这条很关键：一刀切地把所有控制都拦掉，会把**本来能用的灯控**锁死
+    （用户最初报的"A2L 在网页上开关灯会报错"就是这个原因）。
     """
     session = PrinterSession(
         PrinterInfo(ip="127.0.0.1", serial="26A00A000000000000", model=PrinterModel.A2L)
     )
-    # 还没收到 fun 时是「未知」，不能拦
+    # 还没收到 fun 时是「未知」，不能拦任何命令
     assert session.controls_blocked is False
-    assert session.controls_blocked_reason == ""
+    for command in ("pause", "resume", "stop", "speed", "light"):
+        assert session.command_blocked(command) == "", f"未收到 fun 时不该拦 {command}"
 
     session.status.apply_report({"print": {"fun": "100d122002fbd"}})
     assert session.controls_blocked is True
-    assert "开发者模式" in session.controls_blocked_reason
-    assert "Developer Mode" in session.controls_blocked_reason
-    # 被挡住时 can_control 必须为假，否则界面仍会放开按钮
-    assert session.can_control is False
+    # print 段命令被挡
+    for command in ("pause", "resume", "stop", "speed"):
+        reason = session.command_blocked(command)
+        assert reason, f"{command} 应当被拦"
+        assert "开发者模式" in reason, "原因要能指导用户解决问题"
+        assert "Developer Mode" in reason
+    # 灯控不受影响 —— 这是本条契约的核心
+    assert session.command_blocked("light") == "", "灯控走 system 段，不应被签名要求拦住"
+
+
+def test_被拦的命令不会假装成功():
+    """契约：已知会被固件忽略的命令要返回 False，不能让用户以为点了生效。
+
+    没有 MQTT 连接时 `_command` 本来就会返回 False；这里验证**签名门禁**这一路
+    也会返回 False（而不是发出去后返回 True 却毫无效果）。
+    """
+    session = PrinterSession(
+        PrinterInfo(ip="127.0.0.1", serial="26A00A000000000000", model=PrinterModel.A2L)
+    )
+    session.status.apply_report({"print": {"fun": "100d122002fbd"}})
+    assert session.pause_print() is False
+    assert session.set_speed(2) is False
 
 
 def test_已开开发者模式时不拦控制():
-    """契约：`fun` 里签名位为 0（已开 Developer Mode）时不得拦截控制。"""
+    """契约：`fun` 里签名位为 0（已开开发者模式）时不得拦截任何命令。"""
     session = PrinterSession(PrinterInfo(ip="127.0.0.1", model=PrinterModel.A2L))
     session.status.apply_report({"print": {"fun": "100d102002fbd"}})
     assert session.controls_blocked is False
     assert session.controls_blocked_reason == ""
+    for command in ("pause", "resume", "stop", "speed", "light"):
+        assert session.command_blocked(command) == ""
+
+
+def test_can_control只表示遥测在线():
+    """契约：`can_control` 只表示「遥测在线」，不再把签名要求算进来。
+
+    理由是签名要求**按命令区分**（见上）：若把它并进 can_control，
+    界面就无法表达"灯能用、暂停不能用"这种现象，只能一刀切全禁用。
+    判断某条命令能否用请用 `command_blocked()`。
+    """
+    session = PrinterSession(PrinterInfo(ip="127.0.0.1", model=PrinterModel.A2L))
+    assert session.can_control is False, "没有 MQTT 连接时为假"
+
+    class FakeMqtt:
+        def publish_command(self, section, command, **fields):  # noqa: ANN001
+            return True
+
+    session._mqtt = FakeMqtt()
+    session.status.mqtt_online = True
+    session.status.apply_report({"print": {"fun": "100d122002fbd"}})
+    # 遥测在线 + 需要签名：can_control 仍为真（连接没问题），
+    # 但具体命令由 command_blocked 决定
+    assert session.can_control is True
+    assert session.command_blocked("pause") != ""
+    assert session.command_blocked("light") == ""
 
 
 def test_老机型没有fun字段时控制不被误伤():

@@ -439,42 +439,60 @@ class CameraTile(QFrame):
             self.light_button.setText("💡")
 
     def _update_controls(self, status: PrinterStatus) -> None:
-        """控制按钮的可用状态与文案。"""
+        """控制按钮的可用状态与文案。
+
+        ⚠️ 按钮可用性要**按命令分别判断**：固件要求 MQTT 命令签名时，
+        只有 `print` 段命令（暂停/停止/速度）会被忽略，而灯控走 `system` 段、
+        不受影响 —— 实测确认 A2L 在需签名的状态下灯控仍然生效。
+        以前用一刀切的 `can_control` 会把灯按钮也置灰，等于把能用的功能锁住。
+        """
         online = self.session.can_control
         printing = status.is_printing
         paused = status.is_paused
         gcode = (status.gcode_state or "").upper()
         caps = self.session.capabilities
 
+        def blocked(command: str) -> str:
+            checker = getattr(self.session, "command_blocked", None)
+            return checker(command) if callable(checker) else ""
+
+        pause_block, stop_block, light_block = blocked("pause"), blocked("stop"), blocked("light")
+
         self.pause_button.setVisible(printing)
-        self.pause_button.setEnabled(online and printing)
+        self.pause_button.setEnabled(online and printing and not pause_block)
         self.stop_button.setVisible(printing and gcode != "FINISH")
-        self.stop_button.setEnabled(online and printing)
+        self.stop_button.setEnabled(online and printing and not stop_block)
         # 灯按钮按**设备是否真的上报了灯**决定显隐，而不是按机型猜。
         # 教训：A2L 是开放式机型，我据此推断它没有舱灯，实测却上报了
         # chamber_light —— 结果界面把按钮藏了，用户没法开关灯。
         # 遥测还没上来时（light_on 为 None）才退回机型能力作为兜底。
         has_light = status.light_on is not None or caps.can_control_light
         self.light_button.setVisible(has_light)
-        self.light_button.setEnabled(has_light and online)
-        self._apply_control_block_hint()
+        self.light_button.setEnabled(has_light and online and not light_block)
+        self._apply_control_block_hint(pause_block or stop_block, light_block)
         self._apply_button_labels(paused)
 
-    def _apply_control_block_hint(self) -> None:
-        """控制被「固件要求命令签名」挡住时，把原因写到按钮提示上。
+    def _apply_control_block_hint(self, print_reason: str, light_reason: str) -> None:
+        """控制被「固件要求命令签名」挡住时，把原因写到对应按钮的提示上。
 
         实测：新机型（H2C / H2S / X2D / P2S / A2L）的 `fun` 字段会置位命令签名要求，
-        未开 Developer Mode 时下发的控制会被固件静默忽略。按钮置灰却不说明原因
-        会让人以为软件坏了，所以把原因挂到 tooltip 上。
+        未开开发者模式时 `print` 段命令（暂停/停止/速度）会被固件静默忽略；
+        **灯控不受影响**。按钮置灰却不说明原因会让人以为软件坏了，所以把原因挂上。
         """
-        reason = self.session.controls_blocked_reason
+        reason = print_reason or light_reason
         if reason == self._control_block_reason:
             return
         self._control_block_reason = reason
-        for button in (self.pause_button, self.stop_button, self.light_button):
-            button.setToolTip(reason)
-            # 置灰时给个视觉提示，避免用户反复点击
-            button.setStyleSheet("color: #8fa3ad;" if reason else "")
+        self.pause_button.setToolTip(print_reason or "")
+        self.stop_button.setToolTip(print_reason or "")
+        self.light_button.setToolTip(light_reason or "开/关舱灯")
+        # 置灰时给个视觉提示，避免用户反复点击
+        for button, blocked_reason in (
+            (self.pause_button, print_reason),
+            (self.stop_button, print_reason),
+            (self.light_button, light_reason),
+        ):
+            button.setStyleSheet("color: #8fa3ad;" if blocked_reason else "")
 
     # ------------------------------------------------------------------ 交互
     def contextMenuEvent(self, event) -> None:  # noqa: N802

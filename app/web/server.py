@@ -456,6 +456,17 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     # ------------------------------------------------------------------ 控制
+    #: 网页动作名 -> 会话侧归一化命令名（用于查"该命令是否被固件签名要求挡住"）
+    _ACTION_COMMAND = {
+        "pause": "pause",
+        "resume": "resume",
+        "stop": "stop",
+        "speed": "speed",
+        "light_on": "light",
+        "light_off": "light",
+        "light_toggle": "light",
+    }
+
     def _control(self, index: int, action: str, value: str = "") -> tuple[bool, str]:
         """执行一条控制指令；返回 (是否成功, 说明)。"""
         sessions = self._sessions()
@@ -464,6 +475,15 @@ class _Handler(BaseHTTPRequestHandler):
         session = sessions[index]
         if not session.can_control:
             return False, "遥测未连接，无法下发指令"
+        # 固件要求命令签名时，**只有 print 段命令**会被忽略（灯控走 system 段，不受影响）。
+        # 这里在发送前就按命令分别判断，把原因说清楚，而不是等设备静默忽略后
+        # 回一句含糊的"发送失败"。
+        # 用 getattr 容错：第三方设备族的适配器未必实现这个方法。
+        check_blocked = getattr(session, "command_blocked", None)
+        if callable(check_blocked):
+            blocked = check_blocked(self._ACTION_COMMAND.get(action, action))
+            if blocked:
+                return False, blocked
         if action == "pause":
             ok = session.pause_print()
             return ok, "已发送暂停指令" if ok else "发送失败"

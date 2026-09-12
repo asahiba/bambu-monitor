@@ -134,6 +134,10 @@ INDEX_HTML = r"""<!doctype html>
         padding:8px 12px;font-size:13px;cursor:pointer;border-radius:5px;font-family:inherit}
   #menu button:hover{background:#1d272e;color:var(--accent)}
   #menu .sep{height:1px;background:var(--border);margin:4px 2px}
+  /* 控制被固件挡住时的提示条（触屏看不到 tooltip，必须有可见提示） */
+  .ctrl-hint{color:var(--warn,#e0a030);border:1px solid var(--warn,#e0a030);
+        border-radius:3px;padding:0 6px;cursor:pointer;font-size:11px;white-space:nowrap}
+  .ctrl-hint:hover{background:rgba(224,160,48,.12)}
 </style>
 </head>
 <body>
@@ -264,6 +268,7 @@ function ensureTile(index){
       </div>
       <div class="filament"></div>
       <div class="row4">
+        <span class="ctrl-hint" style="display:none"></span>
         <span class="wifi"></span>
         <span class="finish"></span>
         <span class="hms" style="display:none"></span>
@@ -448,12 +453,26 @@ function applyStatus(data){
                      (info.capabilities && info.capabilities.light);
     lightButton.style.display = hasLight ? '' : 'none';
     lightButton.disabled = !info.can_control;
-    // 控制被固件签名要求挡住时（新机型未开 Developer Mode），把原因挂到提示上：
+    // 控制被固件签名要求挡住时（新机型未开开发者模式），把原因挂到提示上：
     // 按钮是灰的却不说明原因，用户会以为软件坏了
     const blocked = info.controls_blocked_reason || '';
     [pauseButton, stopButton, lightButton].forEach(button => {
       button.title = blocked;
     });
+    // 触屏看不到 tooltip，所以在状态条里显示一条可点击的提示条。
+    // 这条提示是"用户能自己解决问题"的关键：告诉他去打印机上开开发者模式。
+    const hint = element.querySelector('.ctrl-hint');
+    if (blocked){
+      hint.style.display = '';
+      hint.textContent = '⚠ 控制不可用（点此查看原因）';
+      hint.onclick = (event) => {
+        event.stopPropagation();
+        alert(blocked);
+      };
+    } else {
+      hint.style.display = 'none';
+      hint.onclick = null;
+    }
 
     if (!state.live && !info.camera_online){
       tile.img.style.visibility = 'hidden';
