@@ -709,9 +709,35 @@ def test_控制被挡的提示不能笼统说成控制不可用():
     )
 
     # 必须明确告诉用户"哪部分仍然可用"，否则用户会以为整个控制都坏了
-    assert "开关灯不受影响" in INDEX_HTML, (
+    assert "灯不受影响" in INDEX_HTML or "开关灯不受影响" in INDEX_HTML, (
         "提示里必须写明灯控不受影响 —— 否则用户看到提示会以为灯也不能用"
     )
+
+    # 必须点出**怎么放行**：第三方客户端走局域网接口，登录拓竹账号是没用的，
+    # 只有用户自己在打印机上开局域网模式/开发者模式（或用农场管家）才能控制
+    assert "局域网模式" in INDEX_HTML, (
+        "提示必须告诉用户去开「局域网模式」—— 这是最常见的解法"
+    )
+    assert "开发者模式" in INDEX_HTML, (
+        "提示必须告诉用户去开「开发者模式」"
+    )
+
+    # 完整原因（点开提示后显示的 alert）里还要说清"登录账号没用"
+    from app.bambu.models import PrinterInfo, PrinterModel
+    from app.bambu.printer import PrinterSession
+
+    session = PrinterSession(PrinterInfo(ip="127.0.0.1", model=PrinterModel.A2L))
+    assert session.controls_blocked_reason == "", "未收到 fun 时不该有提示"
+    session.status.apply_report({"print": {"fun": "100d122002fbd"}})
+    assert session.controls_blocked is True, "前提没造出来（需要签名）"
+
+    reason = session.controls_blocked_reason
+    assert reason, "需要签名时应当给出原因"
+    assert "局域网模式" in reason and "开发者模式" in reason, "原因里要给出可行的放行方式"
+    assert "登录" in reason and "账号" in reason, (
+        "要明确说清「只登录拓竹账号不够」，否则用户会一直以为是软件坏了"
+    )
+    assert "灯" in reason, "要说清灯控不受影响"
 
     # 内嵌 JS 本身必须语法正确（HTML 里的 `<` 等字符容易把脚本写坏）
     if importlib.util.find_spec("esprima") is None:  # pragma: no cover

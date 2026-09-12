@@ -459,20 +459,22 @@ function applyStatus(data){
                      (info.capabilities && info.capabilities.light);
     lightButton.style.display = hasLight ? '' : 'none';
     lightButton.disabled = !info.can_control;
-    // 控制被固件签名要求挡住时（新机型未开开发者模式），把原因挂到提示上：
+    // 控制被固件签名要求挡住时，把原因挂到提示上：
     // 按钮是灰的却不说明原因，用户会以为软件坏了
     const blocked = info.controls_blocked_reason || '';
     [pauseButton, stopButton, lightButton].forEach(button => {
       button.title = blocked;
     });
     // 触屏看不到 tooltip，所以在状态条里显示一条可点击的提示条。
-    // 这条提示是"用户能自己解决问题"的关键：告诉他去打印机上开开发者模式。
+    // 这条提示是"用户能自己解决问题"的关键：直接告诉他去打印机上放行。
     //
-    // ⚠️ 文案必须**逐条命令**说清楚，不能笼统写"控制不可用"。
-    // 固件签名要求只覆盖 `print` 段的命令（暂停/停止/速度），
-    // 而灯控走 `system` 段、**不受影响**。曾经这里统一显示
-    // 「⚠ 控制不可用」，结果在安卓上用户看到"控制不可用"却发现灯明明能开关
-    // —— 提示与事实矛盾，比不提示更糟。
+    // ⚠️ 两条文案要求（都有回归测试盯着）：
+    //   1. 必须**逐条命令**说清楚，不能笼统写"控制不可用" ——
+    //      固件签名只覆盖 print 段（暂停/停止/速度），灯控走 system 段
+    //      **不受影响**。曾经统一显示「⚠ 控制不可用」，结果安卓用户看到
+    //      "控制不可用"却发现灯明明能开关，提示与事实矛盾，比不提示更糟。
+    //   2. 必须点出**怎么放行**（局域网模式 / 开发者模式），
+    //      否则用户只知道"不能用"却不知道去哪儿改。
     const hint = element.querySelector('.ctrl-hint');
     if (blocked){
       // 与后端 SIGNATURE_SENSITIVE_COMMANDS 一致：哪些命令真的被挡
@@ -481,13 +483,14 @@ function applyStatus(data){
           const button = element.querySelector('button[data-act="' + act + '"]');
           return button && button.style.display !== 'none';
         });
-      const hurt = blockedActs.length > 0;
-      if (hurt){
-        hint.textContent = '⚠ ' + blockedActs.length + ' 项控制被固件挡住（点此查看原因）';
+      if (blockedActs.length > 0){
+        hint.textContent = '⚠ ' + blockedActs.length + ' 项被固件挡住：' +
+          '请开局域网模式或开发者模式（点此查看）';
       } else {
         // 当前没有被挡住的可见控制（例如空闲时没有暂停/停止按钮），
         // 此时不该报"控制不可用" —— 灯控等仍然可用
-        hint.textContent = 'ℹ 部分命令（暂停/停止/速度）被固件挡住；开关灯不受影响（点此查看原因）';
+        hint.textContent = 'ℹ 暂停/停止/速度被固件挡住，灯不受影响；' +
+          '开局域网模式或开发者模式即可（点此查看）';
       }
       hint.style.display = '';
       hint.onclick = (event) => {
