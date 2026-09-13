@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -38,6 +39,53 @@ CHAQUOPY_RESERVED = {"bootstrap", "bootstrap-native", "stdlib", "requirements", 
 def gradle_text() -> str:
     assert GRADLE.is_file(), f"找不到 {GRADLE}"
     return GRADLE.read_text(encoding="utf-8-sig")
+
+
+def test_入口模块必须被git跟踪():
+    """**核心回归**：`device_server.py` 必须入库。
+
+    它是**手写的 Android 专属入口**，不是同步产物 —— `sync-python.ps1` 每次
+    都特意保留它、只清掉其余镜像文件。但镜像目录整体在 `.gitignore` 里，
+    所以它很容易被"顺手一起忽略掉"。
+
+    后果非常隐蔽：**本地有、CI 没有**。CI 的干净 checkout 里没有这个文件，
+    同步脚本于是抛"同步后缺少关键文件：device_server.py"；更糟的是
+    `build-apk.ps1` 当时没检查子脚本退出码，于是继续往下跑 Gradle，
+    产出的 APK 缺入口模块，装到真机上启动就报 `ModuleNotFoundError`。
+
+    （真实发生过：把整个镜像目录移出跟踪时把它一起丢掉了。）
+    """
+    entry = PY_SRC / "device_server.py"
+    assert entry.is_file(), f"入口模块不存在：{entry}"
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", str(entry.relative_to(PROJECT_ROOT))],
+        cwd=PROJECT_ROOT, capture_output=True, text=True,
+    )
+    assert tracked.returncode == 0, (
+        f"{entry.relative_to(PROJECT_ROOT)} 没有被 git 跟踪 —— "
+        "CI 的干净 checkout 里不会有它，APK 会缺入口模块。\n"
+        "修法：确保 .gitignore 用 `android/app/src/main/python/*` + "
+        "`!android/app/src/main/python/device_server.py`（不能忽略整个目录后再否定，"
+        "git 不会进入被忽略的目录）。"
+    )
+
+
+def test_构建脚本必须检查同步脚本的退出码():
+    """契约：`build-apk.ps1` 调完 `sync-python.ps1` 必须检查退出码。
+
+    踩过的坑：同步失败（exit 1）后父脚本**继续往下跑 Gradle**，产出的 APK
+    是上一次的旧产物 —— 表现成"包里的 Python 模块不对"这种极难定位的现象。
+    同步是后面一切的前提，失败必须立刻停。
+    """
+    script = (ANDROID_DIR / "build-apk.ps1").read_text(encoding="utf-8-sig")
+    match = re.search(r"sync-python\.ps1\"\)\s*\n(.{0,200})", script, re.S)
+    assert match is not None, "找不到调用 sync-python.ps1 的地方"
+    following = match.group(1)
+    assert "$LASTEXITCODE" in following, (
+        "调用 sync-python.ps1 之后没有检查 $LASTEXITCODE —— "
+        "同步失败会静默继续，最后产出旧产物"
+    )
 
 
 def test_入口模块名不得与Chaquopy保留名冲突():

@@ -1,4 +1,4 @@
-﻿﻿# 构建安卓 APK（平板/手机可独立运行的完整版）。
+﻿# 构建安卓 APK（平板/手机可独立运行的完整版）。
 #
 # 用法（在项目根目录或 android/ 下均可）：
 #     powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
@@ -193,7 +193,16 @@ if ($problems.Count -gt 0) {
 
 Write-Host ""
 Write-Host "=== 2/5 同步 Python 源码进安卓工程 ===" -ForegroundColor Cyan
+# ⚠️ 必须检查子脚本的退出码。
+#
+# 踩过的坑：sync-python.ps1 在 CI 上失败（它报"同步后缺少关键文件"并 throw），
+# 但这里没检查退出码，于是脚本**继续往下跑 Gradle** —— 产出的 APK 是上一次的
+# 旧产物，最后表现为"包里的 Python 模块不对"这种极难定位的现象。
+# 同步是后面一切的前提，失败必须立刻停。
 & powershell -ExecutionPolicy Bypass -File (Join-Path $Here "sync-python.ps1")
+if ($LASTEXITCODE -ne 0) {
+    throw "同步 Python 源码失败（退出码 $LASTEXITCODE）—— 见上面的报错，先修好再构建"
+}
 
 # --- 固定签名材料 ---
 # 把 .android-signing/（不入库）里的 keystore 与口令复制到 android/，

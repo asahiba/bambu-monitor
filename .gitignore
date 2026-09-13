@@ -35,8 +35,20 @@ android/build/
 android/app/build/
 android/local.properties
 android/.idea/
-# sync-python.ps1 每次构建时从仓库根的 app/ 复制过来的镜像，不是源文件
-android/app/src/main/python/
+# sync-python.ps1 每次构建时从仓库根的 app/ 复制过来的镜像，不是源文件。
+#
+# ⚠️ 但 device_server.py 是**手写的 Android 专属入口**，不是同步产物：
+# sync-python.ps1 每次都特意保留它、只清掉其余镜像文件。它必须入库 ——
+# 否则 CI 的干净 checkout 里没有它，同步脚本会报
+# "同步后缺少关键文件：device_server.py"，然后 APK 因为缺入口模块
+# 在启动时报 ModuleNotFoundError。（这个坑真实发生过：之前把整个镜像目录
+# 移出跟踪时把它一起丢掉了，本地有、CI 没有，于是"本地好、CI 坏"。）
+#
+# 注意写法：**不能**写 `android/app/src/main/python/`（忽略整个目录）再加
+# `!.../device_server.py` —— git 不会进入被忽略的目录，否定规则形同虚设。
+# 必须忽略目录**内容**（`/*`）再逐级放行。
+android/app/src/main/python/*
+!android/app/src/main/python/device_server.py
 # numpy 的本地 wheel（android_24 无 cp310 版本，需要 android_21 的那份）
 android/offline-wheels/
 dist-android/
