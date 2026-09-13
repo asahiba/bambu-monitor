@@ -356,6 +356,9 @@ def run_headless(argv: list[str] | None = None) -> int:
         manage_printer_fn=host.manage_printer,
         get_settings_fn=host.get_settings,
         update_settings_fn=host.update_settings,
+        # 网页端要能显示自己的令牌与局域网地址（安卓版没有终端，
+        # 启动时这几行它看不到，只能靠界面提供）
+        info_fn=host.info,
     )
     if not server.start():
         print(f"✗ 无法监听 {args.host}:{args.port}（端口被占用？）")

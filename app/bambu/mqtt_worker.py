@@ -97,6 +97,13 @@ class MqttWorker:
         self.tls_verified = True
         self._stop_requested = False
         self._thread: Optional[threading.Thread] = None
+        #: 统计用：连接成功过几次。宿主（PrinterSession）的看门狗靠"这个数字
+        #: 一直不涨"来判断 paho 的重连是不是已经卡死，从而强制重建连接。
+        self.connect_count = 0
+        #: 上一次进入 STATE_ONLINE 的时刻；0 表示从未连上
+        self.last_connected_at = 0.0
+        #: 第一次发起连接尝试的时刻（用于"一直没连上"的超时判断）
+        self.first_attempt_at = 0.0
 
     def update_serial(self, serial: str) -> None:
         """在未知序列号（通配订阅）场景下，从报文中补全序列号。"""
@@ -120,14 +127,51 @@ class MqttWorker:
             self._set_state(self.STATE_OFFLINE, f"缺少依赖 paho-mqtt：{_IMPORT_ERROR}")
             return
         self._stop_requested = False
+        if not self.first_attempt_at:
+            self.first_attempt_at = time.time()
         # 证书探测 + 建连放到后台线程，避免阻塞界面
         self._thread = threading.Thread(
             target=self._start_blocking, name=f"mqtt-{self.host}", daemon=True
         )
         self._thread.start()
 
+    def restart(self) -> None:
+        """丢掉现有连接并重新建一条。
+
+        宿主看门狗在"疑似卡死"时调用它。与 paho 自身的重连（``loop_start`` +
+        ``reconnect_delay_set``）是**互补**关系，不是替代：
+
+        * 打印机主动断开、网络抖动 -> paho 自己退避重连，够用；
+        * 但 paho 的重连也会卡死（初始 connect 一直失败、或 TLS 握手在某种
+          网络状态下坏了），此时它会一直停在断连状态不再成功 —— 表现为
+          「画面正常·遥测断开」**时不时出现且不再自愈**。
+          这里整条重建（新 client + 重做 TLS 探测）是唯一可靠的恢复手段。
+        """
+        LOGGER.info("重启 MQTT 连接（%s）", self.host)
+        self.stop()
+        # stop() 已经把状态置为 offline，这里再起一条新连接
+        self.start()
+
     def _start_blocking(self) -> None:
+        """后台线程入口：做一次连接尝试，并把任何异常变成可诊断的状态。
+
+        ⚠️ 这里必须兜住**所有**异常。以前 TLS 探测之后的部分没有保护，
+        一旦抛异常（TLS 探测超时、网络切换导致 socket 报错、paho 版本差异…），
+        后台线程会**静默退出且永不重试** —— 遥测就永久停在断连状态，
+        界面上一直是「画面正常·遥测断开」，只有手动重连才能恢复。
+
+        现在兜住之后，状态会如实变成 offline 并带上原因，由宿主看门狗
+        （`PrinterSession._video_watchdog`）负责再试，直到连上为止。
+        """
         self._set_state(self.STATE_CONNECTING, f"正在连接 MQTT {MQTT_PORT}")
+        try:
+            self._connect_once()
+        except Exception as exc:  # noqa: BLE001 - 兜住一切，见上面的说明
+            LOGGER.warning("MQTT 连接过程出错（%s）：%s", self.host, exc, exc_info=True)
+            self._set_state(self.STATE_OFFLINE, f"MQTT 连接出错：{exc}")
+
+    def _connect_once(self) -> None:
+        """探测 TLS 参数并建立一条连接（可能抛异常，由调用方兜住）。"""
         # 先探测该打印机可用的 TLS 参数（证书链 + 安全级别），再交给 paho
         context, verified = tlsutil.select_context(
             self.host, MQTT_PORT, self.serial or None, timeout=4.0
@@ -159,6 +203,9 @@ class MqttWorker:
             client.loop_start()
         except (OSError, ValueError) as exc:
             self._set_state(self.STATE_OFFLINE, f"MQTT 连接失败：{exc}")
+        except Exception as exc:  # noqa: BLE001 - paho 在异常网络下会抛各种异常
+            LOGGER.warning("MQTT 启动失败：%s", exc, exc_info=True)
+            self._set_state(self.STATE_OFFLINE, f"MQTT 启动失败：{exc}")
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -258,6 +305,8 @@ class MqttWorker:
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):  # noqa: ANN001
         code = getattr(reason_code, "value", reason_code)
         if code == 0:
+            self.connect_count += 1
+            self.last_connected_at = time.time()
             self._set_state(self.STATE_ONLINE, "遥测已连接")
             try:
                 client.subscribe(self.topic_report, qos=0)

@@ -519,6 +519,74 @@ def test_command_各动作分发正确(make_server):
     assert ("speed", 1) in session.calls, "档位 0 必须夹到 1"
 
 
+def test_api_info_把令牌与局域网地址给到网页():
+    """契约：`GET /api/info` 返回访问令牌与可供其它设备访问的地址。
+
+    这条守的是一个**安卓专属的可用性缺陷**：令牌只在打开页面那一刻出现在
+    URL 里，随后被前端 `history.replaceState` 抹掉（免得截图/分享时泄露），
+    而安卓版没有终端、看不到启动时打印的地址 —— 于是用户在平板上能用，
+    却拿不到令牌、没法在电脑上打开。桌面版有「网页信息」对话框，安卓版只能靠网页自己给。
+    """
+    token = "0123456789abcdef"
+    sessions = [FakeSession(status=online_status())]
+    holder = list(sessions)
+
+    # 用真实的 WebHost.info（它内部会枚举本机网卡；测试环境的网络护栏可能
+    # 拦住那一步，所以只断言"令牌一定给出来了"这个关键点）
+    from app.config import AppConfig
+    from app.web.host import WebHost
+
+    config = AppConfig()
+    config.web_token = token
+    config.persist = False
+    host = WebHost(config, lambda: holder)
+
+    server = WebServer(
+        get_sessions=lambda: holder,
+        port=0,
+        token=token,
+        host="127.0.0.1",
+        info_fn=host.info,
+    )
+    assert server.start() is True
+    try:
+        port = server._httpd.server_address[1]
+
+        # 未授权时不给（令牌本身就是凭据，不能白送）
+        status, _, _ = request(port, "/api/info")
+        assert status == 401, "没令牌不该拿到令牌"
+
+        status, headers, body = request(port, f"/api/info?token={token}")
+        assert status == 200, body[:300]
+        assert headers["content-type"].startswith("application/json")
+        payload = json.loads(body.decode("utf-8"))
+
+        assert payload["supported"] is True
+        assert payload["token"] == token, "必须把令牌给出来，否则没终端就抄不到"
+        assert payload["port"] == port, (
+            "端口必须报实际绑定的那个 —— port=0 时 WebServer.port 还是 0，"
+            "用户按它拼地址会打不开"
+        )
+        assert payload["local_urls"], "至少要给出本机回环地址"
+        assert all(str(port) in url for url in payload["urls"]), (
+            "地址里的端口必须是实际端口，否则用户在别的设备上打不开"
+        )
+        assert all(token in url for url in payload["urls"]), (
+            "给出的地址必须自带令牌 —— 用户是直接复制的，不该再手输"
+        )
+    finally:
+        server.stop()
+
+
+def test_api_info_没有实现时返回501(make_server):
+    """契约：宿主没注入 `info_fn` 时返回 501 并说明，而不是 500。"""
+    _, port = make_server()
+    status, _, body = request(port, "/api/info")
+    assert status == 501
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["supported"] is False
+
+
 def test_command_can_control为假时返回400(make_server):
     """契约：遥测未连接（can_control=False）时拒绝下发，返回 400 且不调用控制方法。"""
     session = FakeSession(status=online_status(), can_control=False)

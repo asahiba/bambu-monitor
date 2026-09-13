@@ -228,6 +228,50 @@ class WebHost:
 
         return {"ok": False, "detail": f"未知操作：{action}"}
 
+    # ------------------------------------------------------------------ 连接信息
+    def info(self, port: int = 0) -> dict:
+        """给网页端「在其它设备上打开」用的连接信息。
+
+        ## 为什么必须有这个
+
+        安卓版的令牌**只在打开页面的那一刻出现在 URL 里**，随后就被
+        前端 `history.replaceState` 抹掉了（免得用户截图/分享时带出去）。
+        而安卓没有终端，启动时那行「带令牌的地址」用户根本看不到 ——
+        结果就是**在平板本机能用，却拿不到令牌、没法在电脑上打开**。
+
+        桌面版有「网页信息」对话框（`app/ui/web_dialog.py`），安卓版没有桌面
+        界面，所以这份信息必须由网页自己提供。这里把地址算法交给
+        `build_share_urls()`（与 `WebServer.urls()` 同一份实现，不会出现
+        界面给的地址打不开、终端那条却是对的）。
+        """
+        from .server import build_share_urls
+
+        self.stats["info"] = self.stats.get("info", 0) + 1
+        token = str(getattr(self.config, "web_token", "") or "")
+        port = int(port or 0)
+        # 地址算不出来（网卡枚举失败等）**不能影响令牌**：令牌才是用户真正
+        # 拿不到的东西，地址他不给也能自己看 IP。所以这里降级为空列表，
+        # 让前端显示"没找到局域网地址"，而不是整个接口 500。
+        try:
+            urls = build_share_urls(port, token, self._sessions())
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("枚举本机地址失败，只提供令牌", exc_info=True)
+            urls = [f"http://127.0.0.1:{port}/{f'?token={token}' if token else ''}"]
+        try:
+            from .. import __version__ as version
+        except Exception:  # noqa: BLE001
+            version = ""
+        return {
+            "supported": True,
+            "token": token,
+            "port": port,
+            # 第 0 条是 127.0.0.1，其余是局域网地址；分开给前端，便于分区展示
+            "local_urls": [u for u in urls if "127.0.0.1" in u],
+            "lan_urls": [u for u in urls if "127.0.0.1" not in u],
+            "urls": urls,
+            "version": version,
+        }
+
     # ------------------------------------------------------------------ 设置
     def get_settings(self) -> dict:
         """当前设置（网页端「⚙ 设置」对话框据此渲染）。"""

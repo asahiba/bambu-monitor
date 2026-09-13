@@ -16,6 +16,12 @@ if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避�
 
 LOGGER = logging.getLogger("bambu-monitor.session")
 
+#: 遥测「卡死」判据：这么久没有成功连接过，就认为 paho 的重连已经卡住，
+#: 整条重建。取 90 秒是因为 paho 的 `reconnect_delay_set(max_delay=30)` 最多
+#: 退避 30 秒，90 秒足够它试好几轮 —— 仍在恢复中的连接不会被误判。
+#: 见 :meth:`PrinterSession._mqtt_watchdog_tick`。
+MQTT_STUCK_SECONDS = 90.0
+
 
 class PrinterSession:
     """一台打印机的完整监控会话（遥测 + 视频）。
@@ -54,6 +60,9 @@ class PrinterSession:
         self._video_threads: list[threading.Thread] = []
         self._watchdog: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
+        #: 遥测自愈用：上一次看到的 MqttWorker.connect_count。
+        #: 看门狗靠它判断"这段时间里 paho 到底连上过没有"，见 _mqtt_watchdog_tick。
+        self._mqtt_seen_connects = 0
 
     # ------------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -128,8 +137,54 @@ class PrinterSession:
                 self._rtsp.join(timeout=3.0)
                 self._rtsp = None
 
+    def _mqtt_watchdog_tick(self) -> None:
+        """遥测自愈：paho 的重连卡死时，整条重建连接。
+
+        ## 为什么需要它
+
+        paho 自己会重连（``loop_start`` + ``reconnect_delay_set``），那足以
+        应付打印机主动断开、网络抖动这类情况。但它**也会卡死**：
+
+        * 网络切换过（Wi-Fi 关了再开、Android 息屏）之后，底层 socket 状态坏掉，
+          paho 的退避重连一直失败却不再报错；
+        * 初始 connect 一直失败时它停在断开态，不会重新走一遍 TLS 探测。
+
+        症状就是「**画面正常·遥测断开**」时不时出现、而且**不再自愈** ——
+        用户只能手动点「重连」。这个 tick 就是兜住那种情况的。
+
+        ## 判据
+
+        看 `MqttWorker.connect_count` **有没有涨**，而不是看状态字符串：
+
+        * 一直在涨 -> paho 正常工作，不打扰；
+        * 超过 90 秒没涨过 -> 卡死了，重建一条。
+
+        这样不会和 paho 自身的重连打架（它每次连上都会让计数 +1），
+        也不会因为打印机偶尔断开就频繁重建。
+        """
+        worker = self._mqtt
+        if worker is None or not self.running:
+            return
+        now = time.time()
+        last_ok = max(worker.last_connected_at, worker.first_attempt_at)
+        if not last_ok or (now - last_ok) < MQTT_STUCK_SECONDS:
+            return
+        if getattr(worker, "connect_count", 0) > self._mqtt_seen_connects:
+            # 期间连上过：说明 paho 在正常重连，把基线抬上去继续观察
+            self._mqtt_seen_connects = worker.connect_count
+            return
+        self.warnings.append("遥测连接疑似卡死，正在重建（约每 90 秒检查一次）")
+        LOGGER.warning("MQTT 疑似卡死，重建连接：%s", self.info.ip)
+        try:
+            worker.restart()
+        except Exception:  # noqa: BLE001 - 自愈失败不能把看门狗线程带走
+            LOGGER.exception("重建 MQTT 连接失败：%s", self.info.ip)
+
     def _video_watchdog(self) -> None:
-        """画面长时间没有新帧时，自动在两个视频通道之间切换一次。
+        """周期性自检并自愈：
+
+        1. **视频通道**：画面长时间没有新帧时，在两个通道之间切换一次；
+        2. **MQTT 遥测**：连接卡死时整条重建（见 :meth:`_mqtt_watchdog_tick`）。
 
         真实场景里同一个型号的不同固件，可能只有其中一个通道可用
         （例如 H2/X2D 系列只提供 RTSPS，而 A1/P1 只有 6000 端口 JPEG 流）。
@@ -141,6 +196,8 @@ class PrinterSession:
         while not self._watchdog_stop.wait(15.0):
             if not self.running:
                 return
+
+            self._mqtt_watchdog_tick()
 
             # 情况一：6000 端口拒绝了正确口令（遥测已连上说明口令没错），
             # 说明该机型不支持 6000 通道，直接切回 RTSPS。
