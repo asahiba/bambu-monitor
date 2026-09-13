@@ -1,6 +1,9 @@
 package com.bambumonitor;
 
 import android.annotation.SuppressLint;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -21,13 +24,6 @@ import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.chaquo.python.PyObject;
-import com.chaquo.python.Python;
-import com.chaquo.python.android.AndroidPlatform;
-
-import java.io.File;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -52,10 +48,10 @@ import java.util.concurrent.Executors;
 public class MainActivity extends AppCompatActivity {
 
     /** 内置服务端口。与项目其它文档一致，便于对照排查。 */
-    private static final int SERVER_PORT = 8080;
+    public static final int SERVER_PORT = 8080;
 
     /** 启动超时（毫秒）。首次启动要解压 Python 运行时与依赖，给足时间。 */
-    private static final long START_TIMEOUT_MS = 60_000L;
+    public static final long START_TIMEOUT_MS = 60_000L;
 
     private FrameLayout webContainer;
     private LinearLayoutSplash splash;
@@ -112,81 +108,124 @@ public class MainActivity extends AppCompatActivity {
         startServerAndShow();
     }
 
-    /** 启动 Python 服务，成功后把界面换成 WebView。 */
+    /**
+     * 启动内置服务并把界面换成 WebView。
+     *
+     * <p><b>服务本体在前台服务里</b>（{@link MonitorService}），不在这里。
+     * 这是后台保活的关键：跑在 Activity 后台线程里时，切后台/息屏会被系统冻结
+     * CPU 甚至杀掉进程，遥测表现为「时不时断连」，平板当监控屏时最不能接受。
+     * 这里只负责「拉起服务 + 等它就绪 + 显示」。
+     */
     private void startServerAndShow() {
         if (serverStarted) {
             return;
         }
         serverStarted = true;
 
+        // 先把服务拉起来（幂等：已经在跑就只是再来一次 onStartCommand）
+        startMonitorService();
+        requestNotificationPermissionIfNeeded();
+        askBatteryWhitelistOnce();
+
+        // 服务在自己的线程里启 Python（首次要解压运行时，可能要十几秒），
+        // 这里只轮询它公开的状态。
         worker.execute(() -> {
-            try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(getApplicationContext()));
-                }
-                Python py = Python.getInstance();
-                PyObject bootstrap = py.getModule("bootstrap");
-
-                // 配置目录必须落在应用私有目录：安装目录是只读的
-                File configDir = new File(getFilesDir(), "bambu-config");
-                if (!configDir.exists() && !configDir.mkdirs()) {
-                    throw new IllegalStateException("无法创建配置目录：" + configDir);
-                }
-                bootstrap.callAttr("configure_environment", configDir.getAbsolutePath());
-                bootstrap.callAttr("serve", "0.0.0.0", SERVER_PORT);
-
-                if (waitForHealth()) {
-                    String url = bootstrap.callAttr("url_for", "127.0.0.1").toString();
+            long deadline = System.currentTimeMillis() + START_TIMEOUT_MS;
+            while (System.currentTimeMillis() < deadline) {
+                String url = MonitorService.getUrl();
+                if (!url.isEmpty()) {
                     ui.post(() -> showWebView(url));
-                } else {
-                    // Chaquopy 的 PyObject 没有 getDict()，要按 Python 语义取键值，
-                    // 用 callAttr("get", ...) 调 dict.get。
-                    PyObject status = bootstrap.callAttr("status");
-                    PyObject errorObj = status.callAttr("get", "error");
-                    String error = (errorObj == null) ? "" : errorObj.toString();
-                    String message = error.isEmpty()
-                            ? "内置服务在 " + (START_TIMEOUT_MS / 1000) + " 秒内没有就绪。\n"
-                            + "可能是端口被占用，或设备资源紧张。"
-                            : error;
-                    ui.post(() -> showError(message));
+                    return;
                 }
-            } catch (Throwable exc) {
-                String detail = exc.getClass().getSimpleName() + ": " + exc.getMessage();
-                ui.post(() -> showError(detail));
+                String error = MonitorService.getError();
+                if (!error.isEmpty()) {
+                    ui.post(() -> showError(error));
+                    return;
+                }
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException exc) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
+            ui.post(() -> showError(
+                    "内置服务在 " + (START_TIMEOUT_MS / 1000) + " 秒内没有就绪。\n"
+                    + "可能是端口被占用，或设备资源紧张。"));
         });
     }
 
-    /** 轮询 /health，直到服务真正可接受请求。 */
-    private boolean waitForHealth() {
-        long deadline = System.currentTimeMillis() + START_TIMEOUT_MS;
-        while (System.currentTimeMillis() < deadline) {
-            if (isHealthy()) {
-                return true;
+    private void startMonitorService() {
+        try {
+            Intent intent = new Intent(this, MonitorService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
             }
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException exc) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
+        } catch (Exception exc) {
+            ui.post(() -> showError("无法启动后台服务：" + exc));
         }
-        return false;
     }
 
-    private boolean isHealthy() {
-        HttpURLConnection connection = null;
+    /**
+     * 请求通知权限（Android 13+）。
+     *
+     * <p>前台服务的常驻通知在 13+ 需要 POST_NOTIFICATIONS，否则通知不显示。
+     * 服务本身仍能跑，但用户看不到「正在后台监控」的提示，也不知道怎么停。
+     */
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
+    }
+
+    /**
+     * 引导用户把应用加入电池优化白名单 —— 只问一次。
+     *
+     * <p>为什么值得单独做一步：前台服务已经是安卓给出的正规保活手段，但**厂商 ROM
+     * （小米 / 华为 / OPPO / vivo…）会更激进地限制后台**，不加白名单仍可能被杀，
+     * 表现为「遥测时不时断连」。这里不申请
+     * {@code REQUEST_IGNORE_BATTERY_OPTIMIZATIONS} 权限（那属于敏感权限，
+     * 上架会被额外审查），而是跳到系统设置页让用户自己确认。
+     */
+    private void askBatteryWhitelistOnce() {
+        if (MonitorService.isIgnoringBatteryOptimizations(this)) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences("bambu-monitor", MODE_PRIVATE);
+        if (prefs.getBoolean("battery_hint_shown", false)) {
+            return;
+        }
+        prefs.edit().putBoolean("battery_hint_shown", true).apply();
+        ui.post(() -> new AlertDialog.Builder(this)
+                .setTitle(R.string.battery_hint_title)
+                .setMessage(R.string.battery_hint_message)
+                .setPositiveButton(R.string.battery_hint_go, (dialog, which) -> openBatterySettings())
+                .setNegativeButton(R.string.battery_hint_later, null)
+                .show());
+    }
+
+    private void openBatterySettings() {
         try {
-            URL url = new URL("http://127.0.0.1:" + SERVER_PORT + "/health");
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(1500);
-            connection.setReadTimeout(1500);
-            return connection.getResponseCode() == 200;
-        } catch (Exception ignored) {
-            return false;
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
+            Intent intent = new Intent(
+                    android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+            startActivity(intent);
+        } catch (Exception exc) {
+            // 个别 ROM 没有这个页面，退到应用详情页
+            try {
+                Intent fallback = new Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse("package:" + getPackageName()));
+                startActivity(fallback);
+            } catch (Exception ignored) {
+                Toast.makeText(this, "请到系统设置 → 电池 → 应用省电策略里手动设置",
+                        Toast.LENGTH_LONG).show();
             }
         }
     }
@@ -233,12 +272,25 @@ public class MainActivity extends AppCompatActivity {
         view.loadUrl(url);
         splash.root.setVisibility(View.GONE);
 
-        // 沉浸式全屏：平板当监控屏用时不该被状态栏占地方
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        // 沉浸式全屏：平板当监控屏用时不该被状态栏占地方。
+        //
+        // ⚠️ 但**只在触摸设备上**这么做。ChromeOS / 桌面模式（DeX、接大屏的平板）
+        // 里沉浸式会把窗口标题栏与系统栏一起藏掉，窗口拖动、最小化、切换应用都变得
+        // 别扭 —— 桌面用户期待的是普通窗口。判断依据用触摸屏能力，
+        // 而不是"屏幕大小"（ChromeOS 上大屏但没触摸屏，正好落在这条）。
+        if (hasTouchscreen()) {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        }
+    }
+
+    /** 设备是否有触摸屏。ChromeOS 笔记本、桌面模式、电视盒子都没有。 */
+    private boolean hasTouchscreen() {
+        return getPackageManager().hasSystemFeature(
+                android.content.pm.PackageManager.FEATURE_TOUCHSCREEN);
     }
 
     private void showError(String detail) {
@@ -256,13 +308,17 @@ public class MainActivity extends AppCompatActivity {
         new AlertDialog.Builder(this)
                 .setTitle("内置服务已停止")
                 .setMessage("监控服务不再响应。\n\n"
-                        + "常见原因：系统为省电回收了后台服务（把本应用加入电池白名单可缓解）。")
+                        + "常见原因：系统为省电回收了后台服务。\n"
+                        + "把本应用加入「电池优化白名单」可明显缓解。")
                 .setPositiveButton("重新加载", (dialog, which) -> {
                     if (webView != null) {
                         webView.reload();
                     }
                 })
-                .setNegativeButton("退出", (dialog, which) -> finish())
+                .setNeutralButton("去设置", (dialog, which) -> openBatterySettings())
+                // 只是关掉界面；后台监控服务与常驻通知继续运行
+                //（监控台本来就是要一直在的，想停就滑掉通知或从系统里停应用）
+                .setNegativeButton("关闭界面", (dialog, which) -> finish())
                 .show();
     }
 

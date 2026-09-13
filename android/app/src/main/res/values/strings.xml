@@ -8,4 +8,18 @@
     <string name="start_failed_message">请把下面的信息反馈给开发者：</string>
     <string name="copy_error">复制错误信息</string>
     <string name="copied">已复制</string>
+
+    <!-- 前台服务常驻通知 -->
+    <string name="service_channel_name">后台监控服务</string>
+    <string name="service_channel_desc">保持内置监控服务运行，切到后台或息屏也不会断</string>
+    <string name="service_notification_starting">正在启动内置服务…</string>
+    <string name="service_notification_running">后台运行中（端口 %1$s）</string>
+    <string name="service_notification_failed">内置服务启动失败，请打开应用查看</string>
+
+    <!-- 电池优化引导 -->
+    <string name="battery_hint_title">让监控在后台更稳</string>
+    <string name="battery_hint_message">部分系统（尤其国产 ROM）会在息屏后限制后台应用，表现为遥测时不时断连。\n\n把本应用加入「电池优化白名单」可以明显改善。现在去设置吗？</string>
+    <string name="battery_hint_go">去设置</string>
+    <string name="battery_hint_later">暂不</string>
+    <string name="battery_hint_ok">已在白名单中，无需处理</string>
 </resources>

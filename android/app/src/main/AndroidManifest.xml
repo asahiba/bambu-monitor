@@ -1,14 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  拓竹打印机监控台 · 安卓版（平板可独立运行）
+  拓竹打印机监控台 · 安卓版（平板可独立运行，适配 ChromeOS）
 
   权限说明：
   * INTERNET             —— 连接局域网打印机（MQTT 8883 / 6000 / 322）与访问本机服务
   * ACCESS_NETWORK_STATE —— 判断网络是否可用，给出可读提示
-  * ACCESS_WIFI_STATE    —— 读取当前 Wi-Fi，用于提示"是否与打印机同一网段"
+  * ACCESS_WIFI_STATE    —— 读取当前 Wi-Fi，并持有 WifiLock 防止息屏断连
+  * CHANGE_WIFI_STATE    —— 配合 WifiLock（部分 ROM 要求）
+  * POST_NOTIFICATIONS   —— Android 13+ 的前台服务常驻通知
+  * FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
+                         —— 前台服务保活；Android 14 起类型必须声明且与调用一致
 
   ⚠️ 刻意**不申请**位置、存储、相机权限：
   位置权限常被用来推断 Wi-Fi 列表，本应用不需要；申请了反而会让用户警惕。
+  ⚠️ 也**不申请** REQUEST_IGNORE_BATTERY_OPTIMIZATIONS：那会被应用商店判定为
+  敏感权限。改为在界面上引导用户自己去系统设置里加白名单（见 MainActivity）。
 
   关于 usesCleartextTraffic：打印机与内置网页服务都是 http://（局域网自签/无证书），
   安卓 9+ 默认禁止明文流量，不开这个开关监控页会白屏。
@@ -19,12 +25,29 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <!-- 局域网监控：声明为可在大屏上运行，但手机同样可用 -->
+    <!-- 局域网监控：声明为可在大屏上运行，手机同样可用 -->
     <supports-screens
         android:largeScreens="true"
         android:normalScreens="true"
         android:xlargeScreens="true" />
+
+    <!--
+      显式声明**不需要**触摸屏：ChromeOS 笔记本、接鼠标键盘的平板、电视盒子
+      都没有触摸屏，若隐式要求触摸屏会被这类设备的应用商店过滤掉。
+      本应用全部交互都是标准按钮/输入框，鼠标键盘完全可用。
+    -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.wifi"
+        android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -36,14 +59,27 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|smallestScreenSize|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
+            android:resizeableActivity="true"
             android:screenOrientation="fullSensor">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          前台服务：把内置的 Python 网页服务钉在后台（见 MonitorService 的注释）。
+          * foregroundServiceType="dataSync"：Android 14 起强制声明，且调用时必须
+            带同一类型，否则抛 MissingForegroundServiceTypeException 直接崩。
+          * exported="false"：只给自己用，不对外开放。
+        -->
+        <service
+            android:name=".MonitorService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
     </application>
 </manifest>

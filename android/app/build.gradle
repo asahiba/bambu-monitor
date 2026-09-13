@@ -111,6 +111,8 @@ chaquopy {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.webkit:webkit:1.12.1'
+    // 前台服务用 ServiceCompat / NotificationCompat（后台保活的关键，见 MonitorService）
+    implementation 'androidx.core:core:1.13.1'
 }
 
 // androidx.webkit 会传递依赖 kotlin-stdlib-jdk7/jdk8 1.6.21，而 AGP 自带
