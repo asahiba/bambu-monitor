@@ -28,7 +28,6 @@ import os
 import sys
 import threading
 import traceback
-from typing import Optional
 
 #: 内置服务的默认端口。避开 8080？不用——这是设备本机端口，冲突概率低，
 #: 且与项目其它文档保持一致，用户更容易理解。
