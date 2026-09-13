@@ -5,6 +5,43 @@
 
 ## [未发布]
 
+## [1.0.3] — 2026-09-13
+
+**安卓版后台保活 + ChromeOS / 桌面模式兼容。** 其他平台的产物与 1.0.2 相同。
+
+### 新增
+
+- **安卓：前台服务保活**（`MonitorService`）。原来 Python 服务跑在界面的后台
+  线程里，切后台/息屏后会被系统冻结 CPU（Doze/App Standby）甚至杀掉进程，
+  网页服务随之消失 —— 平板当监控屏时最不能接受。现在：
+  - 常驻通知（低打扰、不可滑掉）把进程提到前台优先级；
+  - `PARTIAL_WAKE_LOCK`：屏幕关了 CPU 继续跑（带 10 分钟超时 + 后台自动续，
+    避免泄漏成永久耗电）；
+  - `WifiLock(HIGH_PERF)`：息屏后 Wi-Fi 射频不掉，MQTT 长连接不断；
+  - `START_STICKY`：被系统回收后自动重建。
+- **安卓：电池白名单引导**。厂商 ROM 比原生安卓更激进，不加白名单仍可能被杀。
+  首次启动问一次并跳到系统设置页。刻意**不申请**
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`（敏感权限，会被应用商店额外审查）。
+- **ChromeOS / 桌面模式兼容**：
+  - `touchscreen` 显式声明 `required="false"` —— ChromeOS 笔记本、DeX、
+    电视盒子都没有触摸屏，隐式要求会被应用商店直接过滤掉；
+  - `resizeableActivity=true`，窗口可自由缩放；
+  - 沉浸式全屏**只在有触摸屏时**启用 —— 桌面环境里沉浸式会把窗口标题栏与
+    系统栏一起藏掉，窗口拖不动、切换应用别扭。判据用 `FEATURE_TOUCHSCREEN`
+    而不是屏幕大小。
+
+### 变更
+
+- 安卓通知栏常驻一条「后台运行中（端口 8080）」，点它回到界面。
+- 服务失联对话框增加「去设置」入口；「退出」改为「关闭界面」并说明后台仍在运行。
+
+### 测试
+
+- 新增 `tests/test_android_manifest.py`（5 项）：前台服务类型与权限齐全、
+  不申请位置与敏感电池权限、触摸屏可选 + 可缩放、沉浸式只在触摸设备上、
+  Java 引用的 `R.string.*` 都有定义。这些**只在真机上才会出问题**，
+  所以放进契约测试在每次改清单时拦住。
+
 ## [1.0.2] — 2026-09-12
 
 修两个安卓上真实遇到的问题：遥测会断连且不再自愈、令牌看不到导致没法从局域网打开。
@@ -147,7 +184,8 @@
 - Linux / 安卓平台没有 DPAPI，打印机访问代码是**明文存储**，见 `SECURITY.md`。
 - APK 是 debug 签名，仅供自用安装；上架应用商店需换正式签名。
 
-[未发布]: https://github.com/asahiba/bambu-monitor/compare/v1.0.2...HEAD
+[未发布]: https://github.com/asahiba/bambu-monitor/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.3
 [1.0.2]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.2
 [1.0.1]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.1
 [1.0.0]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.0
