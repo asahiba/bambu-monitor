@@ -186,6 +186,10 @@ class _Handler(BaseHTTPRequestHandler):
     def update_settings_fn(self):
         return self.app.update_settings_fn
 
+    @property
+    def info_fn(self):
+        return self.app.info_fn
+
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         if self.app.verbose:
             print(f"[web] {self.address_string()} {fmt % args}")
@@ -255,6 +259,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._stream(path.rsplit("/", 1)[-1])
         elif path == "/manifest.webmanifest":
             self._manifest()
+        elif path == "/api/info":
+            self._info()
         elif path == "/sw.js":
             self._send_bytes(SERVICE_WORKER_JS.encode("utf-8"), "text/javascript; charset=utf-8")
         elif path in ("/favicon.ico", "/icon-192.png", "/icon-512.png",
@@ -262,6 +268,44 @@ class _Handler(BaseHTTPRequestHandler):
             self._icon(path.rsplit("/", 1)[-1])
         else:
             self._send_bytes(b"not found", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
+
+    def _info(self) -> None:
+        """连接信息：令牌 + 可供其它设备访问的地址。
+
+        前端「⚙ 设置 → 在其它设备上打开」用它显示地址与令牌。
+        没有这个接口时，安卓版拿不到令牌（前端拿到后会立刻把它从 URL 上抹掉，
+        免得截图/分享时泄露），于是用户在平板上能用、却没法在电脑上打开。
+        """
+        if self.info_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不提供连接信息"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        try:
+            # 端口取**实际绑定**的那个：`port=0`（系统分配临时端口）时
+            # WebServer.port 还是 0，而 server_address 才是真值。
+            bound = getattr(self.server, "server_address", None)
+            port = int(bound[1]) if bound else int(getattr(self.app, "port", 0) or 0)
+            payload = self.info_fn(port)
+        except Exception as exc:  # noqa: BLE001 - 要让前端看到原因
+            self._send_bytes(
+                json.dumps(
+                    {"supported": True, "error": f"{type(exc).__name__}: {exc}"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+        self._send_bytes(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
 
     def _manifest(self) -> None:
         """PWA 清单：把令牌写进 start_url，装到手机主屏后打开即已登录。"""
@@ -842,6 +886,44 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+def build_share_urls(port: int, token: str, sessions: list | None = None) -> list[str]:
+    """算出"其它设备可以用哪些地址访问网页服务"（带令牌）。
+
+    抽成模块级函数而不是 WebServer 的方法，是因为**有两个使用方**：
+    `WebServer.urls()`（桌面/命令行的启动提示）与 `WebHost.info()`
+    （网页里的「在其它设备上打开」）。两处算法必须一致 ——
+    否则用户按界面给的地址打不开，而终端里那条却是对的。
+
+    顺序有意义：本机回环在最前，接着是**打印机所在网段**的地址
+    （手机通常和打印机连同一个 Wi-Fi，这个最可能可用），最后才是其它网卡。
+    虚拟网卡/代理网卡的地址手机一般访问不到，除非它就是打印机所在网段。
+    """
+    query = f"?token={token}" if token else ""
+    try:
+        printer_prefixes = {
+            str(session.info.ip).rsplit(".", 1)[0]
+            for session in (sessions or [])
+            if str(session.info.ip).count(".") == 3
+        }
+    except Exception:
+        printer_prefixes = set()
+
+    local = [f"http://127.0.0.1:{port}/{query}"]
+    preferred: list[str] = []
+    others: list[str] = []
+    for iface in local_interfaces():
+        if iface.ip.startswith("127.") or not iface.scannable:
+            continue
+        if not iface.sweepable and iface.prefix not in printer_prefixes:
+            continue
+        url = f"http://{iface.ip}:{port}/{query}"
+        if iface.prefix in printer_prefixes:
+            preferred.append(url)
+        else:
+            others.append(url)
+    return local + preferred + others
+
+
 class WebServer:
     """网页服务的生命周期管理。"""
 
@@ -859,6 +941,7 @@ class WebServer:
         manage_printer_fn: Optional[Callable[..., dict]] = None,
         get_settings_fn: Optional[Callable[[], dict]] = None,
         update_settings_fn: Optional[Callable[[dict], dict]] = None,
+        info_fn: Optional[Callable[[int], dict]] = None,
     ) -> None:
         self.get_sessions = get_sessions
         self.port = port
@@ -875,6 +958,8 @@ class WebServer:
         self.manage_printer_fn = manage_printer_fn
         self.get_settings_fn = get_settings_fn
         self.update_settings_fn = update_settings_fn
+        #: 连接信息（令牌 + 局域网地址）。参数是服务端口。
+        self.info_fn = info_fn
         #: 记住画面最大宽度：start() 重建转码线程时要原样恢复（否则重启后静默退回默认值）
         self.max_width = max(240, int(max_width))
         self.cache = WebFrameCache(get_sessions, fps=fps, max_width=self.max_width)
@@ -936,36 +1021,8 @@ class WebServer:
 
     # ------------------------------------------------------------------ 信息
     def urls(self) -> list[str]:
-        """返回可供其它设备访问的地址（带令牌）。
-
-        优先给出「打印机所在网段」的地址：手机通常和打印机连同一个 Wi-Fi，
-        用内网穿透/虚拟网卡的地址反而访问不到。
-        """
-        query = f"?token={self.token}" if self.token else ""
-        try:
-            printer_prefixes = {
-                session.info.ip.rsplit(".", 1)[0]
-                for session in self.get_sessions()
-                if session.info.ip.count(".") == 3
-            }
-        except Exception:
-            printer_prefixes = set()
-
-        local = [f"http://127.0.0.1:{self.port}/{query}"]
-        others: list[str] = []
-        preferred: list[str] = []
-        for iface in local_interfaces():
-            if iface.ip.startswith("127.") or not iface.scannable:
-                continue
-            # 虚拟网卡/代理网卡的地址手机一般访问不到，除非它就是打印机所在网段
-            if not iface.sweepable and iface.prefix not in printer_prefixes:
-                continue
-            url = f"http://{iface.ip}:{self.port}/{query}"
-            if iface.prefix in printer_prefixes:
-                preferred.append(url)
-            else:
-                others.append(url)
-        return local + preferred + others
+        """返回可供其它设备访问的地址（带令牌）。"""
+        return build_share_urls(self.port, self.token, self.get_sessions())
 
     def primary_url(self) -> str:
         urls = self.urls()

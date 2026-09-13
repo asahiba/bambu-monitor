@@ -119,6 +119,14 @@ INDEX_HTML = r"""<!doctype html>
   #modal button.primary{background:var(--accent);color:#06222a;border-color:var(--accent);font-weight:bold}
   #modal button.danger:hover{border-color:var(--err);color:var(--err)}
   #modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+/* 连接信息（设置对话框底部）：地址与令牌要能一眼看清、一键复制 */
+#modal .conn-row{display:flex;align-items:center;gap:8px;margin:6px 0;
+  background:#111a1f;border:1px solid var(--border);border-radius:6px;padding:6px 8px}
+#modal .conn-url,#modal .conn-token{flex:1;min-width:0;overflow-x:auto;white-space:nowrap;
+  font-size:12px;color:var(--accent);background:none;padding:0}
+#modal .conn-token{color:#ffd479;letter-spacing:1px;user-select:all}
+#modal .conn-label{color:var(--dim);font-size:12px;flex:0 0 auto}
+#modal .conn-copy{flex:0 0 auto !important;padding:4px 10px !important;font-size:12px}
   #modal .list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
   #modal .item{display:flex;align-items:center;gap:8px;background:#111a1f;
         border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px}
@@ -924,7 +932,8 @@ async function openSettings(){
       Number(data.web_max_width || 720) + '">' +
     '<div class="status" id="set-status"></div>' +
     '<div class="actions"><button id="set-cancel">关闭</button>' +
-    '<button id="set-ok" class="primary">保存</button></div>';
+    '<button id="set-ok" class="primary">保存</button></div>' +
+    '<div id="set-conn"></div>';
   document.getElementById('set-cancel').addEventListener('click', closeModal);
   document.getElementById('set-ok').addEventListener('click', async () => {
     const status = document.getElementById('set-status');
@@ -942,6 +951,81 @@ async function openSettings(){
       status.textContent = '保存失败：' + (result.detail || '未知原因');
     }
   });
+
+  // ---- 连接信息：令牌 + 局域网地址 ----
+  // 安卓版没有终端，启动时那行「带令牌的地址」看不到；而令牌在页面加载后
+  // 就被 history.replaceState 从 URL 上抹掉了（免得截图/分享时泄露）。
+  // 所以必须显式给出来，否则用户只能在平板上用、没法在电脑上打开。
+  try{
+    const response = await fetch(api('/api/info'), {cache:'no-store'});
+    if (!response.ok){
+      document.getElementById('set-conn').innerHTML =
+        '<label>在其它设备上打开</label><div class="hint">' +
+        '该运行方式不提供连接信息（HTTP ' + response.status + '）。</div>';
+      return;
+    }
+    const info = await response.json();
+    const lan = info.lan_urls || [];
+    const token = info.token || '';
+    let html = '<label>在其它设备上打开</label>';
+    if (lan.length){
+      html += '<div class="hint">同一 Wi-Fi 下的手机或电脑，用下面任一条地址打开。' +
+              '地址里已经带了访问令牌，直接复制即可，不用另外输入。</div>';
+      lan.forEach((url, index) => {
+        html += '<div class="conn-row"><code class="conn-url">' + escapeHtml(url) + '</code>' +
+                '<button class="conn-copy" data-url="' + escapeHtml(url) + '">复制</button></div>';
+      });
+    } else {
+      html += '<div class="hint">没有找到局域网地址 —— 这台设备可能没连 Wi-Fi，' +
+              '或者只连了代理/虚拟网卡。连上和打印机同一个 Wi-Fi 后重开本页即可。</div>';
+    }
+    if (token){
+      html += '<div class="conn-row"><span class="conn-label">访问令牌</span>' +
+              '<code class="conn-token" id="conn-token">' + escapeHtml(token) + '</code>' +
+              '<button class="conn-copy" data-token="' + escapeHtml(token) + '">复制</button></div>';
+    }
+    html += '<div class="hint">访问令牌是进入本页的口令，别发给不信任的人。' +
+            '换设备打开时如果提示未授权，多半是令牌抄错了 —— 用上面的复制按钮。</div>';
+    const box = document.getElementById('set-conn');
+    box.innerHTML = html;
+    box.querySelectorAll('.conn-copy').forEach(button => {
+      button.addEventListener('click', async () => {
+        const text = button.dataset.token || button.dataset.url || '';
+        const ok = await copyText(text);
+        toast(ok ? '已复制' : '复制失败，请长按手动选择');
+      });
+    });
+  }catch(err){
+    document.getElementById('set-conn').innerHTML =
+      '<label>在其它设备上打开</label><div class="hint">读取连接信息失败：' +
+      escapeHtml(String(err)) + '</div>';
+  }
+}
+
+/** 复制文本：优先用异步剪贴板 API（需要安全上下文），失败退回 execCommand。
+ *  局域网 HTTP 访问时 navigator.clipboard 常常不可用，所以兜底是必须的。 */
+async function copyText(text){
+  try{
+    if (navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  }catch(err){ /* 落到下面的兜底 */ }
+  try{
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.left = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, area.value.length);   // iOS 需要
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  }catch(err){
+    return false;
+  }
 }
 
 /* ---------------------------------------------------------------- 单画面菜单 */
