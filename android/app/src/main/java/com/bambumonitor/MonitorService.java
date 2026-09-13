@@ -274,19 +274,19 @@ public class MonitorService extends Service {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(getApplicationContext()));
                 }
-                com.chaquo.python.PyObject bootstrap =
-                        Python.getInstance().getModule("bootstrap");
+                com.chaquo.python.PyObject deviceServer =
+                        Python.getInstance().getModule("device_server");
 
                 File configDir = new File(getFilesDir(), "bambu-config");
                 if (!configDir.exists() && !configDir.mkdirs()) {
                     throw new IllegalStateException("无法创建配置目录：" + configDir);
                 }
-                bootstrap.callAttr("configure_environment", configDir.getAbsolutePath());
+                deviceServer.callAttr("configure_environment", configDir.getAbsolutePath());
                 // 绑 0.0.0.0：同一 Wi-Fi 下的其它设备也能访问这台平板
-                bootstrap.callAttr("serve", "0.0.0.0", SERVER_PORT);
+                deviceServer.callAttr("serve", "0.0.0.0", SERVER_PORT);
 
                 if (!waitForHealth()) {
-                    com.chaquo.python.PyObject status = bootstrap.callAttr("status");
+                    com.chaquo.python.PyObject status = deviceServer.callAttr("status");
                     com.chaquo.python.PyObject errorObj = status.callAttr("get", "error");
                     String detail = (errorObj == null) ? "" : errorObj.toString();
                     lastError = detail.isEmpty()
@@ -299,7 +299,7 @@ public class MonitorService extends Service {
                 }
 
                 // 用回环地址给本机 WebView；局域网地址由网页里的「在其它设备上打开」提供
-                lastUrl = bootstrap.callAttr("url_for", "127.0.0.1").toString();
+                lastUrl = deviceServer.callAttr("url_for", "127.0.0.1").toString();
                 updateNotification(getString(R.string.service_notification_running,
                         String.valueOf(SERVER_PORT)));
                 Log.i(TAG, "内置服务已就绪：" + lastUrl);
@@ -374,9 +374,9 @@ public class MonitorService extends Service {
 
     private void stopPython() {
         try {
-            com.chaquo.python.PyObject bootstrap =
-                    Python.getInstance().getModule("bootstrap");
-            bootstrap.callAttr("stop");
+            com.chaquo.python.PyObject deviceServer =
+                    Python.getInstance().getModule("device_server");
+            deviceServer.callAttr("stop");
         } catch (Throwable exc) {
             // 进程退出会一并回收，这里失败无所谓
             Log.i(TAG, "停止内置服务时出错（可忽略）", exc);

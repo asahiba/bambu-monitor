@@ -19,11 +19,15 @@ Set-Location $Here
 
 # Chaquopy 需要一个 **3.10** 的 Python 来解释/编译 pip 依赖。
 #
-# 为什么不能直接用项目主 .venv（3.13）：Chaquopy 仓库在 android_24_arm64_v8a
-# 这个平台标签上，opencv 只有 cp310、numpy 只有 cp313，两者不可能同时满足；
-# 而 RTSPS 画面要 opencv，cv2 又硬依赖 numpy，所以只能选 3.10 并把 numpy
-# 用本地 wheel 补上（见 app/build.gradle 的 pip 段）。
-# Chaquopy 17 起还要求 buildPython 的主次版本与 chaquopy.version 完全一致。
+# 为什么不能直接用项目主 .venv（3.13）：Chaquopy 的 install 只接受与它自己
+# 平台标签匹配的 wheel，而本工程**刻意不装任何预编译原生包**
+# （opencv / numpy / cryptography 在 Chaquopy 仓库里是 4096 字节对齐的，
+# 在 16 KB 内存页设备上会拒绝加载并闪退 —— 见
+# tools/strip_16kb_incompatible_deps.py 的说明）。
+# 于是这里只剩纯 Python 的 paho-mqtt，任何 Python 版本都能装；
+# 仍固定 3.10 是因为它是 Chaquopy 17 的默认版本、覆盖最全，
+# 且与"曾经用过 cp310 的 opencv"保持一致，避免以后再踩平台标签的坑。
+# Chaquopy 17 起要求 buildPython 的主次版本与 chaquopy.version 完全一致。
 function Get-BuildPython {
     # 复用的两段小逻辑：读某解释器的主次版本 / 确保 .venv310 存在后返回它
     function Get-PyMinor($exe) {
@@ -191,30 +195,25 @@ Write-Host ""
 Write-Host "=== 2/5 同步 Python 源码进安卓工程 ===" -ForegroundColor Cyan
 & powershell -ExecutionPolicy Bypass -File (Join-Path $Here "sync-python.ps1")
 
-# --- numpy 的本地 wheel ---
-# Chaquopy 仓库里 numpy 在 android_24_arm64_v8a 上没有 cp310 版本，只有 android_21 的。
-# 索引匹配会因此失败，所以预先下到 android/offline-wheels/，由 build.gradle
-# 直接用文件路径安装。
+# --- 固定签名材料 ---
+# 把 .android-signing/（不入库）里的 keystore 与口令复制到 android/，
+# Gradle 从 android/keystore.properties 读取（见 app/build.gradle 的签名段）。
+# 缺这些文件也能构建，只是退回 debug 签名 —— 但那样装过的用户无法覆盖更新。
 Write-Host ""
-Write-Host "=== 准备 numpy 本地 wheel ===" -ForegroundColor Cyan
-$wheelDir = Join-Path $Here "offline-wheels"
-New-Item -ItemType Directory -Force -Path $wheelDir | Out-Null
-$numpyWheel = Join-Path $wheelDir "numpy-1.26.2-0-cp310-cp310-android_21_arm64_v8a.whl"
-if (Test-Path $numpyWheel) {
-    Write-Host "  已存在：$([math]::Round((Get-Item $numpyWheel).Length/1MB,1)) MB"
+Write-Host "=== 准备签名材料 ===" -ForegroundColor Cyan
+$signSrc = Join-Path $ProjectRoot ".android-signing"
+$signProps = Join-Path $Here "keystore.properties"
+if (Test-Path (Join-Path $signSrc "keystore.properties")) {
+    Copy-Item (Join-Path $signSrc "keystore.properties") $signProps -Force
+    Copy-Item (Join-Path $signSrc "*.jks") $Here -Force -ErrorAction SilentlyContinue
+    Write-Host "  已使用固定发布签名（.android-signing/）" -ForegroundColor Green
+} elseif (Test-Path $signProps) {
+    Write-Host "  已使用 android/keystore.properties" -ForegroundColor Green
 } else {
-    $url = "https://chaquo.com/pypi-13.1/numpy/numpy-1.26.2-0-cp310-cp310-android_21_arm64_v8a.whl"
-    Write-Host "  下载 $url"
-    $savedProto = [Net.ServicePointManager]::SecurityProtocol
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $numpyWheel -UseBasicParsing -TimeoutSec 600
-    } finally {
-        [Net.ServicePointManager]::SecurityProtocol = $savedProto
-    }
-    if (-not (Test-Path $numpyWheel)) { throw "numpy wheel 下载失败：$url" }
-    Write-Host "  完成：$([math]::Round((Get-Item $numpyWheel).Length/1MB,1)) MB"
+    Write-Host "  [!] 没有签名材料 -> 本次用 debug 签名，无法覆盖安装其它签名版本" -ForegroundColor Yellow
+    Write-Host "      需要正式签名见 docs/PACKAGING.md 的「安卓签名」一节" -ForegroundColor Yellow
 }
+
 
 Write-Host ""
 Write-Host "=== 3/5 Gradle 构建（首次要下载 Chaquopy/AGP 依赖，约 3-10 分钟）===" -ForegroundColor Cyan
@@ -228,7 +227,7 @@ $apk = Join-Path $Here "app\build\outputs\apk\debug\app-debug.apk"
 if (-not (Test-Path $apk)) { throw "构建结束但找不到 APK：$apk" }
 $outDir = Join-Path $ProjectRoot "dist-android"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$target = Join-Path $outDir "BambuMonitor-1.0.3-arm64.apk"
+$target = Join-Path $outDir "BambuMonitor-1.0.4-arm64.apk"
 Copy-Item $apk $target -Force
 $mb = [math]::Round((Get-Item $target).Length / 1MB, 1)
 

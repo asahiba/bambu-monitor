@@ -54,3 +54,9 @@ htmlcov/
 # 编辑器
 .vscode/
 .idea/
+
+# 安卓签名密钥：绝对不能入库（泄露等于任何人都能冒名发布更新）
+.android-signing/
+android/keystore.properties
+android/*.jks
+android/*.keystore

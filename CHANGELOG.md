@@ -5,6 +5,48 @@
 
 ## [未发布]
 
+## [1.0.4] — 2026-09-14
+
+**安卓：修 16 KB 内存页闪退、入口模块被漏打包、图标空白，并换成固定签名。**
+
+### 修复
+
+- **16 KB 内存页设备（新 ARM Chromebook / Pixel 8+）闪退**：
+  `opencv-python-headless` / `numpy` / `cryptography` 在 Chaquopy 仓库里的
+  预编译库是 **4096 字节对齐**的，16 KB 页设备**拒绝加载** —— Python 启动时
+  一导入就抛异常，表现为闪退。Chaquopy 17.0.0 发布说明已明确警告：
+  "any Android wheels built before October 2024 will still fail to load on
+  16 KB devices."
+
+  现在安卓构建**不再安装这三个包**（它们在代码里都是可选的）：
+  RTSPS 通道不可用时自动退回 6000 端口 JPEG，A1/P1/A2L 不受影响；
+  cryptography 只给内置模拟器用。**APK 从 33 MB 降到 19 MB。**
+
+- **启动报 `ModuleNotFoundError: No module named 'bootstrap'`**：
+  安卓侧入口模块原名 `bootstrap.py`，与 Chaquopy 自己的 `bootstrap.imy`
+  （装它的 `java` 桥）撞名，用户那份被**静默丢弃**。本地增量构建因缓存
+  有时还能带上，CI 干净构建则稳定缺失。已改名 `device_server.py`，
+  并加契约测试与发布校验（`app.imy` 里必须真的有 `device_server.pyc`）。
+
+- **桌面图标空白**：缺自适应图标（`mipmap-anydpi-v26`），Android 8+ 找不到
+  定义就渲染成空白/默认方块。已补上背景色 + 前景图。
+
+### 变更
+
+- **换用固定发布签名**：以前每次都不同（debug keystore 每台机器/每次 CI
+  各自生成），导致用户**无法覆盖安装**（系统报"应用未安装"）。
+  现在 debug 与 release 共用同一个固定 keystore，密钥存在 GitHub Secrets、
+  绝不入库。发布流程会校验签名，签错直接失败。
+  ⚠️ **本版签名与之前不同，需先卸载旧版再安装**（会清掉应用内配置）。
+
+### 测试
+
+- 新增 `tests/test_android_packaging.py`（6 项）：入口模块名不得与 Chaquopy
+  保留名冲突、pip 段不得安装 4096 对齐的原生包、必须配置固定签名且密钥
+  不得入库、必须有自适应图标、构建脚本不得再下载 numpy wheel。
+- 新增 `tools/check_workflow_ps.py`：校验工作流里 `pwsh` 步骤的语法
+  （工作流里的 `run:` 没有编译期检查，写错只能等 CI 炸）。
+
 ## [1.0.3] — 2026-09-13
 
 **安卓版后台保活 + ChromeOS / 桌面模式兼容。** 其他平台的产物与 1.0.2 相同。
@@ -184,7 +226,8 @@
 - Linux / 安卓平台没有 DPAPI，打印机访问代码是**明文存储**，见 `SECURITY.md`。
 - APK 是 debug 签名，仅供自用安装；上架应用商店需换正式签名。
 
-[未发布]: https://github.com/asahiba/bambu-monitor/compare/v1.0.3...HEAD
+[未发布]: https://github.com/asahiba/bambu-monitor/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.4
 [1.0.3]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.3
 [1.0.2]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.2
 [1.0.1]: https://github.com/asahiba/bambu-monitor/releases/tag/v1.0.1

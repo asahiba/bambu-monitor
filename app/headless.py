@@ -29,7 +29,7 @@ from .config import AppConfig, config_path
 from .util import secret
 
 #: ``run_headless`` 最终真正用于服务的那一个令牌。
-#: 给同一个进程内的宿主用（安卓版的 bootstrap 就靠它把带令牌的网址交给 WebView），
+#: 给同一个进程内的宿主用（安卓版的 device_server 就靠它把带令牌的网址交给 WebView），
 #: 避免宿主自己去 ``AppConfig.load()`` 猜出一个**跟服务端不一致**的令牌。
 _SERVED_TOKEN: str = ""
 
@@ -267,7 +267,7 @@ def run_headless(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = AppConfig.load()
     # 取令牌统一走 resolved_web_token()：它会**先落盘再返回**，这样同一进程里的
-    # 宿主（安卓版 bootstrap）拿到的令牌与服务端后来用的是同一个。
+    # 宿主（安卓版 device_server）拿到的令牌与服务端后来用的是同一个。
     # 否则配置文件尚未存在时，load() 每次都会新生成一个且不落盘，
     # 两边各拿一个，网页一打开就是 unauthorized。
     # --token 显式指定时以命令行优先（Docker / 多实例场景要能覆盖已有配置）。

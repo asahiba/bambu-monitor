@@ -25,8 +25,8 @@ $items = @("app", "run_app.py", "run_headless.py")
 
 if (Test-Path $Target) {
     Get-ChildItem $Target -Force | ForEach-Object {
-        # 保留 Android 侧自己写的 bootstrap.py，其余清掉后重建
-        if ($_.Name -ne "bootstrap.py") { Remove-Item $_.FullName -Recurse -Force }
+        # 保留 Android 侧自己写的 device_server.py，其余清掉后重建
+        if ($_.Name -ne "device_server.py") { Remove-Item $_.FullName -Recurse -Force }
     }
 } else {
     New-Item -ItemType Directory -Force -Path $Target | Out-Null
@@ -73,7 +73,7 @@ $must = @(
     "app\bambu\data\hms_zh_cn.json.gz",
     "app\headless.py",
     "app\web\server.py",
-    "bootstrap.py"
+    "device_server.py"
 )
 foreach ($m in $must) {
     $path = Join-Path $Target $m

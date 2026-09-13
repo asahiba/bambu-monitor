@@ -7,6 +7,36 @@ plugins {
 }
 
 android {
+
+    // ------------------------------------------------------------------ 签名
+    //
+    // ⚠️ 为什么要有这一段：**一直用 debug 签名会让用户无法覆盖安装**。
+    // debug keystore 是每台机器/每次 CI 各自生成的，同一个包名换签名安装时
+    // 系统会直接拒绝（"应用未安装"），用户只能卸载重装 —— 配置全丢。
+    //
+    // 所以这里读一个**固定的发布 keystore**，并让 debug 构建也用它签名：
+    //   * 本地：android/keystore.properties（由 build-apk.ps1 从未入库的
+    //     .android-signing/ 目录复制过来）
+    //   * CI：工作流从 GitHub Secrets 还原 keystore 与口令后写出同一个文件
+    //   * 两处都没有时**退回 debug 签名**并打印提示 —— 保证新克隆的仓库
+    //     仍能直接构建，不至于因为缺密钥而卡住
+    def signingProps = new Properties()
+    def signingFile = rootProject.file("keystore.properties")
+    if (signingFile.exists()) {
+        signingFile.withInputStream { signingProps.load(it) }
+    }
+    def hasReleaseSigning = signingProps.getProperty("storeFile") != null
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile rootProject.file(signingProps.getProperty("storeFile"))
+                storePassword signingProps.getProperty("storePassword")
+                keyAlias signingProps.getProperty("keyAlias")
+                keyPassword signingProps.getProperty("keyPassword")
+            }
+        }
+    }
     namespace 'com.bambumonitor'
     compileSdk 34
 
@@ -14,8 +44,8 @@ android {
         applicationId "com.bambumonitor"
         minSdk 24              // Chaquopy 17 要求至少 24
         targetSdk 34
-        versionCode 4
-        versionName "1.0.3"
+        versionCode 5
+        versionName "1.0.4"
 
         ndk {
             // Python 解释器是原生组件，必须指定 ABI。
@@ -28,8 +58,18 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            // debug 也用固定签名：否则用户在真机上装过一版之后就再也覆盖不上了
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
+
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -37,8 +77,8 @@ android {
     }
 
     packagingOptions {
-        // 原生库不能压缩，否则 Chaquopy 运行时加载失败
-        jniLibs { useLegacyPackaging = true }
+        // 不要开 useLegacyPackaging = true：会让原生库不压缩地进 APK、
+        jniLibs { useLegacyPackaging = false }
     }
 }
 
@@ -87,23 +127,29 @@ chaquopy {
         buildPython venvPython
 
         pip {
-            // 纯 Python 包（从 PyPI 装）
+            // ⚠️ 只装**纯 Python** 包。
+            //
+            // 这里刻意不装 opencv-python-headless / numpy / cryptography：
+            // Chaquopy 仓库里给这三个的预编译 wheel 是 **4096 字节对齐**的，
+            // 而 16KB 内存页的设备（新 ARM Chromebook、Pixel 8+ 等）**拒绝加载**
+            // 这类库。Python 启动时导入它们会抛 Java 异常 —— 用户看到的是**闪退**。
+            //
+            //   Chaquopy 17.0.0 发布说明原文：
+            //   "any Android wheels built before October 2024 will still fail to
+            //    load on 16 KB devices."
+            //
+            // 本工程里的这三项都是**可选**的，都有兜底：
+            //   * opencv 缺失 -> RTSPS 通道不可用，自动退回 6000 端口 JPEG
+            //     （app/bambu/rtsp.py 里 available() 判空并给出说明）
+            //   * numpy       -> 只被 cv2 需要
+            //   * cryptography-> 只给内置模拟器生成自签证书（安卓版不用模拟器）
+            //
+            // 代价：X1 / X2D / H2 这类**只提供 RTSPS** 的机型在安卓上看不到画面
+            // （A1 / P1 / A2L 走 6000 端口，不受影响）。换取"在所有设备上都能启动"，
+            // 这个取舍是划算的 —— 闪退等于完全不能用。
+            //
+            // 若将来 Chaquopy 提供了 16KB 对齐的 wheel，把下面几行加回来即可。
             install "paho-mqtt"
-            // 原生包（Chaquopy 仓库里有 android_24_arm64_v8a 的 cp310 wheel）
-            install "cryptography"            // 生成自签证书 / 加解密用
-            install "opencv-python-headless"  // RTSPS(322) 通道拉流用
-
-            // numpy：android_24 上没有 cp310 的 numpy wheel，只有 android_21 的。
-            // 直接给本地 wheel 路径（ch/offline-wheels 由 build-apk.ps1 下载），
-            // 绕开索引的平台标签匹配。若该文件不存在则退回按名字装，
-            // 让 Gradle 明确报错而不是静默少装一个包（缺 numpy 时 cv2 无法导入）。
-            def numpyWheel = new File(rootProject.projectDir,
-                    "offline-wheels/numpy-1.26.2-0-cp310-cp310-android_21_arm64_v8a.whl")
-            if (numpyWheel.exists()) {
-                install numpyWheel.getCanonicalPath()
-            } else {
-                install "numpy"
-            }
         }
     }
 }

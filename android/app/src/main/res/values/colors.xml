@@ -5,4 +5,6 @@
     <color name="panel">#151C21</color>
     <color name="accent">#25C2D6</color>
     <color name="text_dim">#8FA3AD</color>
+    <!-- 自适应图标背景色（深色，与网页端主题一致） -->
+    <color name="ic_launcher_background">#0D1114</color>
 </resources>

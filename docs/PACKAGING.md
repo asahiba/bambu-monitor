@@ -9,7 +9,7 @@
 | **Windows** | `dist-onefile/BambuMonitor.exe`（单文件，约 93 MB） | `build-onefile.bat` | 什么都不用装 |
 | **Linux** | `dist-onefile-headless/BambuMonitor-headless`（单文件，约 89 MB） | `bash linux/build-headless-docker.sh` | 什么都不用装 |
 | **Docker** | `dist-docker/bambu-monitor-latest-image.tar.gz`（单文件镜像，约 132 MB） | `build-docker-image.ps1` | 只需 Docker |
-| **安卓** | `dist-android/BambuMonitor-1.0.3-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
+| **安卓** | `dist-android/BambuMonitor-1.0.4-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
 
 Linux 另有一个**带 Qt 的变体**（`linux/build-onefile-docker.sh`，约 143 MB），
 能开图形界面；但服务器/NAS 场景请用上面的 headless 变体，原因见第 2 节。
@@ -66,7 +66,7 @@ build-onefile.bat
 **已验证**（在本机实测）：
 
 ```
-BambuMonitor-cli.exe --version    → Bambu Monitor 1.0.3（管道/重定向均可捕获）
+BambuMonitor-cli.exe --version    → Bambu Monitor 1.0.4（管道/重定向均可捕获）
 BambuMonitor-cli.exe --core-test  → 自检结果：全部通过 ✓（约 14 秒）
 BambuMonitor.exe --sim --screenshot shot.png --exit-after 14
                                   → 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标全部正常
@@ -185,31 +185,48 @@ docker run -d --name bambu-monitor --network host -v $PWD/data:/data bambu-monit
 > 只是想在手机上看监控墙的话，**其实不需要 APK**：
 > 浏览器打开服务端地址 → 「添加到主屏幕」，这就是原有的 PWA 方案（已实测可用）。
 
-### 为什么安卓版锁定 Python 3.10（以及 numpy 为什么要离线补）
+### 为什么安卓版**不装任何预编译原生包**
 
-这两项**不是随便选的**，而是被 Chaquopy 预编译 wheel 的覆盖范围卡死的。
-Chaquopy 把 pip 指向自己的仓库 `https://chaquo.com/pypi-13.1`，并且只接受
-**平台标签精确等于 `android_<minSdk>_<abi>`** 的 wheel（见其
-`build-packages.zip` 里 `PipInstall.platform_tag`）。本项目
-minSdk=24、abi=arm64-v8a，于是标签固定为 `android_24_arm64_v8a`：
+这是本项目在安卓上最重要的一条取舍，踩过两次坑才定下来。
 
-| 包 | android_24_arm64_v8a 上存在的 Python 版本 |
-|---|---|
-| `opencv-python-headless` | **只有 cp310**（4.5.1.48） |
-| `numpy` | **只有 cp313**（1.26.2） |
-| `cryptography` / `cffi` | cp310 / cp311 / cp312 / cp313 |
+**原因：16 KB 内存页。** 较新的 ARM 设备（新 ARM Chromebook、Pixel 8+ 等）
+把内存页从 4 KB 改成 16 KB。**按 4 KB 对齐编译的原生库会被系统拒绝加载** ——
+Python 启动时一导入就抛异常，用户看到的是**闪退**。
 
-也就是说 opencv 与 numpy **没有任何一个 Python 版本能同时满足**。而
-RTSPS 画面要 opencv，`cv2` 又硬依赖 numpy（缺了会抛
-`OpenCV bindings requires "numpy" package`）。解法是：
+Chaquopy 17.0.0 的发布说明原文：
 
-1. 选 **3.10**（也正是 Chaquopy 17 的默认版本），走 opencv 那条路；
-2. numpy 用 `android_21_arm64_v8a` 的那份 wheel **离线补上** ——
-   `build-apk.ps1` 会把它下到 `android/offline-wheels/`，`build.gradle`
-   用**文件路径**直接安装，绕开索引的平台标签匹配。
-   （该 wheel 是给 API 21 编的，但 NDK 向后兼容，装在 API 24 上可用。）
+> "Devices with 16 KB pages are now supported. However, any Android wheels built
+> before October 2024 will still fail to load on 16 KB devices."
 
-桌面版仍然用 3.13，两者互不影响：`app/` 下的代码同时兼容 3.10 与 3.13。
+而 Chaquopy 仓库里 `opencv-python-headless` / `numpy` / `cryptography` 的
+预编译库**都是 2024-10 之前构建的、4096 字节对齐**（可用本仓库的
+`tools/` 脚本或 `llvm-readelf -l` 核对 PT_LOAD 的 Align）。
+
+**所以安卓侧只装纯 Python 的 `paho-mqtt`**，一个原生包都不装。
+这三个包在代码里本来就是可选的：
+
+| 去掉的包 | 影响 | 兜底位置 |
+| --- | --- | --- |
+| `opencv` / `numpy` | RTSPS(322) 通道不可用 → 自动退回 6000 端口 JPEG | `app/bambu/rtsp.py` 的 `available()` / `except ImportError` |
+| `cryptography` | 只给内置模拟器生成自签证书（安卓不用模拟器） | `app/sim/simulator.py` 函数内导入 |
+
+**代价**：只提供 RTSPS 的机型（X1 / X2D / H2）在安卓上看不到画面；
+A1 / P1 / A2L 走 6000 端口，不受影响。换来的是"在所有设备上都能启动"。
+
+**收益**：APK 从 33 MB 降到 **19 MB**。
+
+> 如果将来 Chaquopy 提供了 16 KB 对齐的 wheel，把这几行加回
+> `android/app/build.gradle` 的 `pip` 段即可。加之前请先核对对齐，
+> 别只看版本号。
+>
+> `tests/test_android_packaging.py` 里有一条契约测试盯着这件事：
+> pip 段一旦出现这些包名就会失败。
+
+### 为什么仍然锁定 Python 3.10
+
+3.10 是 Chaquopy 17 的默认版本、覆盖最全，而且历史上 opencv 只出过 cp310
+（现在虽然不装它了，但保持 3.10 可以避免以后再踩平台标签的坑）。
+桌面版仍用 3.13，两者互不影响：`app/` 下的代码同时兼容 3.10 与 3.13。
 
 > ⚠️ 顺带一个只有 3.10 才暴露的坑：**不要给 `threading.Thread` 子类挂
 > `self._stop` 属性**。3.10/3.11 的 `Thread.join()` 在收尾时会调用内部的
@@ -217,12 +234,60 @@ RTSPS 画面要 opencv，`cv2` 又硬依赖 numpy（缺了会抛
 > `TypeError: 'Event' object is not callable`。3.13 改了这段实现，所以在
 > 桌面版上完全看不出来 —— 本仓库统一用 `self._stop_event`。
 
+### 入口模块不能叫 `bootstrap`
+
+安卓侧的 Python 入口模块（`android/app/src/main/python/device_server.py`）
+**不能**命名为 `bootstrap`。Chaquopy 自己会生成 `assets/chaquopy/bootstrap.imy`
+（装它的 `java` 桥），与用户模块撞名后**用户那份会被静默丢弃**：
+
+* 本地增量构建因缓存有时还能带上（上次的产物还在 `app.imy` 里）；
+* CI 的干净构建则稳定缺失 —— 真机启动报
+  `ModuleNotFoundError: No module named 'bootstrap'`。
+
+同理，其它 Chaquopy 保留名（`bootstrap-native` / `stdlib` / `requirements` /
+`java`）也不要用作顶层模块名。`tests/test_android_packaging.py` 会拦住。
+
+### 安卓签名
+
+**必须用固定的 keystore。** 一直用 debug 签名会让用户**无法覆盖安装**：
+debug keystore 每台机器、每次 CI 各自生成，同一个包名换签名安装时系统直接
+拒绝（"应用未安装"），用户只能卸载重装、配置全丢。
+
+工程里的做法：
+
+* `android/app/build.gradle` 读 `android/keystore.properties`（**不入库**），
+  让 **debug 与 release 都用它签名**；文件不存在时退回 debug 签名
+  （保证新克隆的仓库仍能构建，但会打印警告）；
+* 本地：keytool 生成的 keystore 放在 `.android-signing/`（**不入库**），
+  `android/build-apk.ps1` 会自动复制到 `android/`；
+* CI：从仓库 Secrets 还原（`ANDROID_KEYSTORE_BASE64` /
+  `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`），
+  发布流程还会用 `apksigner` 校验证书 DN —— 签错就直接让发布失败，
+  不会把用户装不上的包发出去。
+
+> ⚠️ **两个必须记住的坑**：
+> 1. `keystore.properties` 必须用**无 BOM 的 ASCII** 写。Java 的
+>    `Properties.load()` 会把 BOM 当成**第一个键名**的一部分，于是
+>    `storeFile` 读不到（其余键正常），静默退回 debug 签名。
+> 2. keystore 丢了就**再也无法给已装用户发更新**（只能让所有人卸载重装）。
+>    请把它备份到密码管理器；GitHub Secrets 是一份，本地 `.android-signing/`
+>    是另一份。
+
+生成一个新的（换签名时）：
+
+```powershell
+keytool -genkeypair -v -keystore bambu-monitor-release.jks `
+  -alias bambu-monitor -keyalg RSA -keysize 4096 -validity 10950 `
+  -storepass <口令> -keypass <口令> -dname "CN=Bambu Monitor, O=asahiba, C=CN"
+```
+
 ### 与桌面版的依赖差异
 
 | | 桌面版 | 安卓版 |
 |---|---|---|
 | Python | 3.13（`.venv`） | 3.10（`.venv310`，构建用） |
-| OpenCV | `opencv-python` 4.8+ | `opencv-python-headless` 4.5.1.48（Chaquopy 预编译） |
+| OpenCV | `opencv-python` 4.8+ | **不装**（16 KB 页兼容性，见上） |
+| 原生依赖 | 无限制 | **一个都不装**（只 `paho-mqtt`） |
 | GUI | PySide6 | 无（界面是 WebView） |
 
 > 另外，`android/app/src/main/python/` 是 `sync-python.ps1` 每次构建时从

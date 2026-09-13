@@ -8,7 +8,7 @@ APK 装好第一次打开，WebView 直接显示服务端返回的
 ## 根因
 
 `AppConfig.load()` 在**配置文件还不存在**时，每次调用都会新生成一个
-``web_token`` 且**不落盘**。安卓版 bootstrap 原来自己去 load() 一次取令牌
+``web_token`` 且**不落盘**。安卓版 device_server 原来自己去 load() 一次取令牌
 交给 WebView，随后启动服务时 ``run_headless()`` 内部又 load() 了一次，
 拿到的是**另一个**令牌 —— WebView 手里那个服务端根本不认。
 
@@ -51,7 +51,7 @@ def test_空配置下两次load会得到不同令牌(fresh_install):
     assert first, "令牌不应为空"
     assert first != second, (
         "AppConfig.load() 在空配置目录下变成幂等的了："
-        "请复核 app/headless.py 与 android 侧 bootstrap.py 的注释是否还成立"
+        "请复核 app/headless.py 与 android 侧 device_server.py 的注释是否还成立"
     )
 
 
@@ -70,12 +70,12 @@ def test_令牌解析可重复调用且稳定(fresh_install):
 
 
 def test_宿主与服务端拿到同一个令牌_核心回归(fresh_install):
-    """**核心回归**：复现安卓 bootstrap 的时序。
+    """**核心回归**：复现安卓 device_server 的时序。
 
     宿主先要令牌（拿去拼 WebView 地址），随后服务端才起来。
     两者必须一致，否则首次打开就是 unauthorized。
     """
-    # 1) 宿主侧：bootstrap 在起服务之前先取令牌交给 WebView
+    # 1) 宿主侧：device_server 在起服务之前先取令牌交给 WebView
     token_for_webview = headless.resolved_web_token()
 
     # 2) 服务端侧：run_headless 解析参数后会再走一次同样的解析

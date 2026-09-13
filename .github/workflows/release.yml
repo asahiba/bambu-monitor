@@ -111,6 +111,40 @@ jobs:
         with:
           python-version: "3.10"
 
+      # 还原固定签名材料。
+      #
+      # ⚠️ 为什么必须用**固定的** keystore：一直用 debug 签名会让用户无法覆盖安装
+      # —— debug keystore 每台机器/每次 CI 都不同，同一个包名换签名安装时系统
+      # 直接拒绝（"应用未安装"），用户只能卸载重装、配置全丢。
+      #
+      # 密钥存在仓库 Secrets 里、绝不入库（.gitignore 已挡住 .android-signing/
+      # 与 keystore.properties）。缺失时 Gradle 会退回 debug 签名，
+      # 下面的「校验 APK 签名」会因此失败 —— 宁可整个发布失败，
+      # 也不要发一个用户装不上的包出去。
+      - name: 还原签名材料
+        shell: pwsh
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if (-not $env:KEYSTORE_B64) { throw "缺少 ANDROID_KEYSTORE_BASE64 secret" }
+          New-Item -ItemType Directory -Force -Path .android-signing | Out-Null
+          [IO.File]::WriteAllBytes(
+            ".android-signing\bambu-monitor-release.jks",
+            [Convert]::FromBase64String($env:KEYSTORE_B64))
+          # ⚠️ 必须用**无 BOM** 的 ASCII：Java 的 Properties.load() 会把 BOM
+          # 当成第一个键名的一部分，导致 storeFile 读不到（其余键正常），
+          # 于是静默退回 debug 签名 —— 这个坑真实踩过。
+          [IO.File]::WriteAllLines(".android-signing\keystore.properties", @(
+            "storeFile=bambu-monitor-release.jks",
+            "storePassword=$env:STORE_PASSWORD",
+            "keyAlias=$env:KEY_ALIAS",
+            "keyPassword=$env:KEY_PASSWORD"
+          ), (New-Object Text.ASCIIEncoding))
+          Write-Host "  签名材料已就位（keystore $((Get-Item '.android-signing\bambu-monitor-release.jks').Length) B）"
+
       - name: 构建 APK
         shell: pwsh
         env:
@@ -119,8 +153,46 @@ jobs:
           #（Android SDK 由 setup-android 设好 ANDROID_HOME，脚本会自己认）
           BAMBU_BUILD_PYTHON: ${{ steps.py310.outputs.python-path }}
         run: |
-          # build-apk.ps1 会建 .venv310、下 numpy wheel、跑 Gradle
+          # build-apk.ps1 会同步 Python 源码、就位签名材料、跑 Gradle
           powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
+
+      - name: 校验 APK 签名与内容
+        shell: pwsh
+        run: |
+          $apk = Get-ChildItem dist-android\*.apk | Select-Object -First 1
+          if (-not $apk) { throw "没有产出 APK" }
+          Write-Host "APK: $($apk.Name)  $([math]::Round($apk.Length/1MB,1)) MB"
+
+          $signer = "$env:ANDROID_HOME\build-tools\34.0.0\apksigner.bat"
+          if (-not (Test-Path $signer)) {
+            $signer = (Get-ChildItem "$env:ANDROID_HOME\build-tools" -Recurse -Filter apksigner.bat |
+                       Select-Object -First 1).FullName
+          }
+          $certs = & $signer verify --print-certs $apk.FullName 2>&1 | Out-String
+          Write-Host $certs
+          if ($certs -match "CN=Android Debug") {
+            throw "APK 用的是 debug 签名 —— 用户将无法覆盖安装，拒绝发布"
+          }
+          if ($certs -notmatch "CN=Bambu Monitor") {
+            throw "APK 签名不是预期的发布证书（CN=Bambu Monitor），拒绝发布"
+          }
+          Write-Host "签名校验通过（固定发布证书）"
+
+          # 入口模块必须真的在包里 —— 它曾经因与 Chaquopy 保留名撞车而被静默丢弃
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
+          $imy = $zip.Entries | Where-Object { $_.FullName -eq 'assets/chaquopy/app.imy' }
+          if (-not $imy) { $zip.Dispose(); throw "APK 里没有 app.imy" }
+          $ms = New-Object IO.MemoryStream
+          $s = $imy.Open(); $s.CopyTo($ms); $s.Close(); $zip.Dispose()
+          $ms.Position = 0
+          $inner = New-Object IO.Compression.ZipArchive($ms, [IO.Compression.ZipArchiveMode]::Read)
+          $names = $inner.Entries | ForEach-Object { $_.FullName }
+          $inner.Dispose()
+          if (-not ($names -contains 'device_server.pyc')) {
+            throw "app.imy 里没有 device_server.pyc —— 应用启动会报 ModuleNotFoundError"
+          }
+          Write-Host "入口模块已打包：device_server.pyc"
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
