@@ -509,6 +509,8 @@ class _Handler(BaseHTTPRequestHandler):
                     # 新机型固件会要求 MQTT 命令签名，未开 Developer Mode 时控制会被静默忽略；
                     # 前端据此解释「为什么按钮是灰的」（只增字段，不改已有键）
                     "controls_blocked_reason": getattr(session, "controls_blocked_reason", ""),
+                    # 一句话版：窄位置（状态条）也要能说清「先局域网、再开发者」与农场管家
+                    "controls_blocked_short": getattr(session, "controls_blocked_short", ""),
                     # 能力声明：让前端按「能力」而不是「机型」决定显示什么，
                     # 这样接入第三方设备族时前端不必改动（只增字段）
                     "capabilities": {

@@ -187,6 +187,7 @@ def _cmd_control(config: AppConfig, args: argparse.Namespace) -> int:
         session.set_max_fps(0)
         session.start()
     results: list[tuple[str, bool, str]] = []
+    blocked: list[tuple[str, str]] = []
     try:
         # 等遥测连上（控制指令走 MQTT）
         deadline = time.time() + 15
@@ -199,6 +200,17 @@ def _cmd_control(config: AppConfig, args: argparse.Namespace) -> int:
             name = session.info.display_name()
             if not session.status.mqtt_online:
                 results.append((name, False, "遥测未连接，未下发指令"))
+                continue
+            # 固件要求签名时，print 段命令会被静默忽略。这里必须**先说清原因**：
+            # 直接报"发送失败"会让用户以为是软件/网络问题，而实际是要去打印机上
+            # 先开局域网模式、再开开发者模式（或用官方农场管家）。
+            blocked_reason = ""
+            checker = getattr(session, "command_blocked", None)
+            if callable(checker):
+                blocked_reason = checker(_normalized_command(args.control))
+            if blocked_reason:
+                blocked.append((name, blocked_reason))
+                results.append((name, False, "被固件挡住（见下方说明）"))
                 continue
             if args.control == "pause":
                 ok = session.pause_print()
@@ -236,7 +248,16 @@ def _cmd_control(config: AppConfig, args: argparse.Namespace) -> int:
         print(f"  {'✓' if success else '✗'} {name:14} {detail}")
         if not success:
             failed += 1
+    if blocked:
+        # 只打印一次完整说明（多台设备被挡时说明是一样的）
+        print(f"\n⚠ {len(blocked)} 台设备的这条命令被固件挡住了。\n")
+        print(blocked[0][1])
     return 1 if failed else 0
+
+
+def _normalized_command(action: str) -> str:
+    """把命令行动作名转成 `command_blocked()` 认得的归一化名。"""
+    return {"light": "light", "speed": "speed"}.get(action, action)
 
 
 def _cmd_remove(config: AppConfig, ips: list[str]) -> int:

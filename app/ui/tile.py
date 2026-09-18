@@ -104,6 +104,10 @@ class CameraTile(QFrame):
     def __init__(self, session: PrinterSession, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.session = session
+        # ⚠️ 这两个字典必须在 _build_status_panel() **之前**建好：
+        # 那里会把控制按钮的原始样式/提示记进来（见 _apply_control_block_hint）。
+        self._control_button_style: dict = {}
+        self._control_button_tip: dict = {}
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet(
             f"CameraTile {{ background: {theme.PANEL}; border: 1px solid {theme.BORDER};"
@@ -128,7 +132,7 @@ class CameraTile(QFrame):
         self._last_state_text = ""
         self._text_cache: dict = {}
         self._progress_accent = ""
-        self._control_block_reason = ""
+        self._control_block_reason: Optional[str] = None
         self._tooltip = ""
         self._filament_signature: object = None
         self._snapshot_dir = os.path.join(_pictures_dir(), "BambuMonitor")
@@ -228,14 +232,20 @@ class CameraTile(QFrame):
         self.light_button.setToolTip("开/关舱灯")
         self.light_button.clicked.connect(self._toggle_light)
         for button in (self.pause_button, self.stop_button, self.light_button):
-            button.setStyleSheet(
+            style = (
                 f"QPushButton {{ background: {theme.PANEL}; border: 1px solid {theme.BORDER};"
                 f" border-radius: 3px; padding: 1px 8px; font-size: 11px; }}"
                 f"QPushButton:hover {{ border-color: {theme.ACCENT}; }}"
                 f"QPushButton:disabled {{ color: #5a6a72; }}"
             )
+            button.setStyleSheet(style)
             button.setCursor(Qt.PointingHandCursor)
             button.setMinimumWidth(34)
+            # 记下"原始样式与提示"：被固件挡住时要在这基础上叠加，而不是整体替换。
+            # （以前直接 setStyleSheet("color: …") 会把上面这套样式冲掉，
+            #  第一次刷新后按钮就变回 Qt 默认外观了。）
+            self._control_button_style[button] = style
+            self._control_button_tip[button] = button.toolTip()
             controls.addWidget(button)
         layout.addLayout(controls)
         return panel
@@ -250,6 +260,8 @@ class CameraTile(QFrame):
         HmsDialog(status.hms_items, self.session.info.display_name(), self).exec()
 
     def _toggle_pause(self) -> None:
+        if self._show_blocked_reason("pause", "无法暂停 / 继续"):
+            return
         status = self.session.snapshot()
         name = self.session.info.display_name()
         if status.is_paused:
@@ -260,6 +272,8 @@ class CameraTile(QFrame):
             self.notify.emit(f"{name}：{'已发送暂停指令' if ok else '发送失败（遥测未连接）'}")
 
     def _stop_print(self) -> None:
+        if self._show_blocked_reason("stop", "无法停止"):
+            return
         name = self.session.info.display_name()
         answer = QMessageBox.question(
             self,
@@ -274,12 +288,37 @@ class CameraTile(QFrame):
         self.notify.emit(f"{name}：{'已发送停止指令' if ok else '发送失败（遥测未连接）'}")
 
     def _toggle_light(self) -> None:
+        if self._show_blocked_reason("light", "无法控制灯光"):
+            return
         status = self.session.snapshot()
         name = self.session.info.display_name()
         target = not bool(status.light_on)
         ok = self.session.set_light(target)
         action = "开灯" if target else "关灯"
         self.notify.emit(f"{name}：{'已发送' + action + '指令' if ok else '发送失败（遥测未连接）'}")
+
+    def _show_blocked_reason(self, command: str, title: str) -> bool:
+        """命令被固件挡住时，把完整原因弹给用户；返回 True 表示已处理（调用方应直接返回）。
+
+        ⚠️ 为什么不能只靠 tooltip + 置灰：**Qt 的禁用控件不接收鼠标事件，
+        tooltip 根本不会弹出来**。于是用户看到一个灰色的「暂停」按钮，
+        鼠标悬停没有任何提示、点也没有反应 —— 而这段文案正是"唯一的线索"。
+        所以被挡住时按钮保持可点，点下去弹说明（里面有"先局域网、再开发者"
+        的完整步骤与农场管家这条捷径）。
+        """
+        checker = getattr(self.session, "command_blocked", None)
+        reason = checker(command) if callable(checker) else ""
+        if not reason:
+            return False
+        name = self.session.info.display_name()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(f"{title} · {name}")
+        box.setText(f"「{name}」的这条命令被打印机固件拒绝了。")
+        box.setInformativeText(reason)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+        return True
 
     # ------------------------------------------------------------------ 刷新
     def refresh(self) -> None:
@@ -475,40 +514,52 @@ class CameraTile(QFrame):
         pause_block, stop_block, light_block = blocked("pause"), blocked("stop"), blocked("light")
 
         self.pause_button.setVisible(printing)
-        self.pause_button.setEnabled(online and printing and not pause_block)
+        # 被固件挡住时**保持可点**：Qt 的禁用控件不接收鼠标事件，tooltip 弹不出来，
+        # 用户就永远看不到「怎么放行」的说明（点下去会弹完整原因，见 _show_blocked_reason）。
+        # 视觉上仍然按"挡住的样式"呈现（见 _apply_control_block_hint）。
+        self.pause_button.setEnabled(online and printing)
         self.stop_button.setVisible(printing and gcode != "FINISH")
-        self.stop_button.setEnabled(online and printing and not stop_block)
+        self.stop_button.setEnabled(online and printing)
         # 灯按钮按**设备是否真的上报了灯**决定显隐，而不是按机型猜。
         # 教训：A2L 是开放式机型，我据此推断它没有舱灯，实测却上报了
         # chamber_light —— 结果界面把按钮藏了，用户没法开关灯。
         # 遥测还没上来时（light_on 为 None）才退回机型能力作为兜底。
         has_light = status.light_on is not None or caps.can_control_light
         self.light_button.setVisible(has_light)
-        self.light_button.setEnabled(has_light and online and not light_block)
+        self.light_button.setEnabled(has_light and online)
         self._apply_control_block_hint(pause_block or stop_block, light_block)
         self._apply_button_labels(paused)
 
     def _apply_control_block_hint(self, print_reason: str, light_reason: str) -> None:
-        """控制被「固件要求命令签名」挡住时，把原因写到对应按钮的提示上。
+        """控制被「固件要求命令签名」挡住时，把原因挂到对应按钮上。
 
         实测：新机型（H2C / H2S / X2D / P2S / A2L）的 `fun` 字段会置位命令签名要求，
         未开开发者模式时 `print` 段命令（暂停/停止/速度）会被固件静默忽略；
         **灯控不受影响**。按钮置灰却不说明原因会让人以为软件坏了，所以把原因挂上。
+
+        注意这里是**叠加**而不是替换样式/提示：直接 ``setStyleSheet("color: …")``
+        会把构造函数里那套按钮样式冲掉（第一次刷新后按钮就变回 Qt 默认外观）。
+        提示里只放**一句话版**（``controls_blocked_short``），点下去弹完整步骤 ——
+        完整文案有十几行，塞进 tooltip 反而看不清。
         """
         reason = print_reason or light_reason
         if reason == self._control_block_reason:
             return
         self._control_block_reason = reason
-        self.pause_button.setToolTip(print_reason or "")
-        self.stop_button.setToolTip(print_reason or "")
-        self.light_button.setToolTip(light_reason or "开/关舱灯")
-        # 置灰时给个视觉提示，避免用户反复点击
+        short = getattr(self.session, "controls_blocked_short", "") or ""
         for button, blocked_reason in (
             (self.pause_button, print_reason),
             (self.stop_button, print_reason),
             (self.light_button, light_reason),
         ):
-            button.setStyleSheet("color: #8fa3ad;" if blocked_reason else "")
+            base_style = self._control_button_style.get(button, "")
+            base_tip = self._control_button_tip.get(button, "")
+            if blocked_reason:
+                button.setToolTip(f"{base_tip}\n\n⚠ {short or blocked_reason}\n（点一下看完整做法）")
+                button.setStyleSheet(base_style + f"QPushButton {{ color: {theme.TEXT_DIM}; }}")
+            else:
+                button.setToolTip(base_tip)
+                button.setStyleSheet(base_style)
 
     # ------------------------------------------------------------------ 交互
     def contextMenuEvent(self, event) -> None:  # noqa: N802

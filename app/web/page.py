@@ -495,14 +495,19 @@ function applyStatus(data){
           const button = element.querySelector('button[data-act="' + act + '"]');
           return button && button.style.display !== 'none';
         });
+      // 窄位置放不下整段说明，但必须带上「先局域网、再开发者」与「农场管家」：
+      //   * 只开局域网模式**没用** —— 画面遥测会通，暂停/停止仍被固件忽略，
+      //     用户会以为软件坏了（实测结论，见 docs/FIELD_NOTES.md）；
+      //   * 灯控不受影响，所以文案不能说成"控制全不可用"。
+      const short = info.controls_blocked_short || '';
       if (blockedActs.length > 0){
-        hint.textContent = '⚠ ' + blockedActs.length + ' 项被固件挡住：' +
-          '请开局域网模式或开发者模式（点此查看）';
+        hint.textContent = '⚠ ' + blockedActs.length + ' 项被固件挡住（开关灯不受影响）：' +
+          short + '（点此查看做法）';
       } else {
         // 当前没有被挡住的可见控制（例如空闲时没有暂停/停止按钮），
         // 此时不该报"控制不可用" —— 灯控等仍然可用
-        hint.textContent = 'ℹ 暂停/停止/速度被固件挡住，灯不受影响；' +
-          '开局域网模式或开发者模式即可（点此查看）';
+        hint.textContent = 'ℹ ' + (short || '暂停/停止/速度被固件挡住') +
+          '；开关灯不受影响（点此查看做法）';
       }
       hint.style.display = '';
       hint.onclick = (event) => {

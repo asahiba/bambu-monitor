@@ -452,6 +452,41 @@ def test_签名要求只挡住print类命令而不挡灯控():
     assert session.command_blocked("light") == "", "灯控走 system 段，不应被签名要求拦住"
 
 
+def test_放行说明必须写清顺序与农场管家():
+    """契约：提示必须说清「只开局域网模式没用」「先局域网、再开发者」「推荐农场管家」。
+
+    这三条是**用户 12 台真机的实测结论**，早期文案写错了方向：
+
+    * 原文案是「在打印机屏幕上任选一条放行即可」，把「局域网模式」与「开发者模式」
+      并列成二选一 —— 而实际上**只开局域网模式时暂停/停止仍然被固件忽略**
+      （画面与遥测一切正常，用户会以为软件坏了，卡在这一步很久）；
+    * 官方「农场管家 / Farm Manager」拿得到签名密钥、**不需要开发者模式**，
+      对用户来说是最省事的一条路，应该明确推荐，而不是当成"第三条备选"。
+    """
+    session = PrinterSession(
+        PrinterInfo(ip="127.0.0.1", serial="26A00A000000000000", model=PrinterModel.A2L)
+    )
+    session.status.apply_report({"print": {"fun": "100d122002fbd"}})
+
+    reason = session.controls_blocked_reason
+    assert "只开「局域网模式」是不够的" in reason, "必须点明「只开局域网模式没用」"
+    assert "先开「局域网模式」" in reason and "再开「开发者模式」" in reason, (
+        "必须写清顺序：先局域网模式、再开发者模式"
+    )
+    assert reason.index("先开「局域网模式」") < reason.index("再开「开发者模式」"), (
+        "两步的顺序不能反"
+    )
+    assert "农场管家" in reason or "Farm Manager" in reason, "要推荐官方农场管家"
+    assert "推荐" in reason, "农场管家应当是**推荐**选项，而不是并列的备选"
+    assert "只有灯光还能控制" in reason, "要说清此时只能控灯"
+
+    # 一句话版同样要能指导用户（状态条、按钮提示用它）
+    short = session.controls_blocked_short
+    assert "局域网模式" in short and "开发者模式" in short
+    assert "农场管家" in short
+    assert len(short) <= 120, f"一句话版太长了，窄位置放不下：{len(short)} 字"
+
+
 def test_被拦的命令不会假装成功():
     """契约：已知会被固件忽略的命令要返回 False，不能让用户以为点了生效。
 

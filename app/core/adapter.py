@@ -254,6 +254,15 @@ class PollingDeviceSession:
         """默认没有额外门槛（轮询型设备族在自己的协议里鉴权，不走 MQTT 签名）。"""
         return ""
 
+    @property
+    def controls_blocked_short(self) -> str:
+        """一句话版的挡住原因（协议要求与 :attr:`controls_blocked_reason` 同时提供）。
+
+        它属于 ``DeviceSession`` 契约的一部分：网页端状态条与桌面按钮提示都用它，
+        缺了就会在 ``runtime_checkable`` 的协议校验里失败（`tests/test_contracts.py`）。
+        """
+        return ""
+
     def connection_summary(self) -> str:
         if self.status.online and self.status.camera_online:
             return "在线"

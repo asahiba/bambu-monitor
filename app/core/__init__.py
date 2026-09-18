@@ -155,7 +155,17 @@ class DeviceSession(Protocol):
 
     @property
     def controls_blocked_reason(self) -> str:
-        """若控制被挡住，给出可读原因；没有问题时为空字符串。"""
+        """若控制被挡住，给出可读原因；没有问题时为空字符串。
+
+        文案要求（见 `app/bambu/printer.py` 的实现）：必须说清
+        **只开局域网模式没用**、**必须先局域网再开发者**、**此时只能控灯**，
+        并推荐官方「农场管家」。
+        """
+        ...
+
+    @property
+    def controls_blocked_short(self) -> str:
+        """上面那条说明的一句话版（窄位置用，例如状态条与按钮提示）。"""
         ...
 
     def pause_print(self) -> bool: ...
