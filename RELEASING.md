@@ -77,23 +77,36 @@ powershell -ExecutionPolicy Bypass -File make-bundle.ps1
 - [ ] `python -m pytest -q -m slow` 端到端通过
 - [ ] `ruff check .` 无告警
 - [ ] `CHANGELOG.md` 已更新，包含「已知限制」
-- [ ] 版本号三处一致（`app/__init__.py`、`build.gradle`、CHANGELOG）
+- [ ] 版本号三处一致（`app/__init__.py`、`build.gradle`、CHANGELOG）；
+      用 `python tools/bump_version.py X.Y.Z` 一把改完（它会自增 `versionCode`，
+      并断言没有遗漏的地方）
+- [ ] `python tools/check_qt_imports.py` 无属性错误（打包前的静态检查）
+- [ ] 本地打一次 Windows 单文件并冒烟（`build-onefile.bat` +
+      `dist\BambuMonitor-cli.exe --core-test`），确认冻结后的产物真的能跑
 - [ ] 产物的冒烟测试都过了（构建脚本里已内置：exe `--core-test`、
       Linux 容器 `/health`、Docker 容器 `/health`）
 - [ ] Android 若有改动，确认 `.venv310` 与 Chaquopy 依赖矩阵没变
       （见 `docs/PACKAGING.md` 那节，矩阵一变就得重新选 Python 版本）
+- [ ] 新功能在**四种形态**上都验过（Windows exe / Linux headless / Docker / 安卓）——
+      尤其是配置导入导出这类「用户指望跨设备用」的功能
 
 ## 已知的发布注意点
 
-### APK 是 debug 签名
+### APK 用的是**固定发布签名**（不是 debug）
 
-CI 出的是 debug 签名包，**只能自用安装**。要上架应用商店需要：
+工作流会从仓库 Secrets 还原签名材料（`ANDROID_KEYSTORE_BASE64` /
+`ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`），
+构建 release 包，并**强制校验**签名：
 
-1. 生成正式 keystore，放进 repository secrets；
-2. 在 `android/app/build.gradle` 里加 `signingConfigs` 并让 release 构建用它；
-3. 改工作流构建 `assembleRelease` 而不是 `assembleDebug`。
+* 看到 `CN=Android Debug` 直接失败（debug 签名每台机器都不同，用户无法覆盖安装，
+  只能卸载重装、配置全丢）；
+* 签名不是预期的 `CN=Bambu Monitor` 也失败。
 
-**keystore 与密码绝不能进仓库**（`.gitignore` 已挡住 `*.keystore` / `*.jks`）。
+也就是说：**宁可整次发布失败，也不发一个用户装不上的包**。
+要换签名证书，就同时更新 Secrets 与工作流里那两处校验。
+
+> 历史（v1.0.3 及更早）：那会儿确实是 debug 签名，只能自用安装。
+> 现在这条限制已经不存在了 —— 文档如果还写着"API 是 debug 签名"，那是旧版说明。
 
 ### Windows exe 可能被杀毒软件误报
 

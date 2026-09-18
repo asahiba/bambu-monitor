@@ -21,16 +21,11 @@ echo 正在安装 PyInstaller 并打包为 exe（输出到 dist\BambuMonitor）.
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check pyinstaller
 if errorlevel 1 goto :failed
 
-".venv\Scripts\python.exe" -m PyInstaller ^
-  --noconfirm --clean --windowed ^
-  --name BambuMonitor ^
-  --add-data "app\bambu\certs;app\bambu\certs" ^
-  --add-data "app\bambu\data;app\bambu\data" ^
-  --hidden-import paho.mqtt.client ^
-  --hidden-import cv2 ^
-  --hidden-import app.core.registry ^
-  --hidden-import app.adapters.moonraker.adapter ^
-  run_app.py
+rem ⚠️ 打包参数统一写在 BambuMonitor.spec 里，这里只调用它。
+rem 以前这些参数是**写在本文件里**的（--hidden-import ...），于是同一件事有两处定义：
+rem spec 里列了 app.core/app.adapters，bat 里没有（或反过来），
+rem 结果就是"目录版接第三方设备族会 ImportError、单文件版正常"这类只在特定场景炸的问题。
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean "%~dp0BambuMonitor.spec"
 if errorlevel 1 goto :failed
 
 echo.

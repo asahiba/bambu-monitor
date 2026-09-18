@@ -263,6 +263,16 @@ class PollingDeviceSession:
         """
         return ""
 
+    @property
+    def video_unavailable_reason(self) -> str:
+        """这台设备在本机**根本出不了画面**时的说明（否则空串）。
+
+        轮询型设备族（Moonraker 等）只要设备有摄像头就能出画面，
+        所以默认返回空串；拓竹那边只有「机型仅支持 RTSPS 但本机没有 OpenCV」
+        这一种情形（典型是安卓版），见 `app/bambu/printer.py`。
+        """
+        return ""
+
     def connection_summary(self) -> str:
         if self.status.online and self.status.camera_online:
             return "在线"

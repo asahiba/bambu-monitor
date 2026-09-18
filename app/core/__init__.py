@@ -168,6 +168,15 @@ class DeviceSession(Protocol):
         """上面那条说明的一句话版（窄位置用，例如状态条与按钮提示）。"""
         ...
 
+    @property
+    def video_unavailable_reason(self) -> str:
+        """这台设备在本机根本出不了画面时的说明（否则空串）。
+
+        网页端会把它**直接显示在画面区域**：触屏没有悬浮提示，
+        用户否则只能看到一个永远空着的画面与一句「连接中」。
+        """
+        ...
+
     def pause_print(self) -> bool: ...
 
     def resume_print(self) -> bool: ...

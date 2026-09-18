@@ -129,6 +129,38 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 现统一走 `_stop_cache()`：只在 `is_alive()` 时 join。回归用例见
 `tests/test_web_server.py`（首次 start 即可用 / stop 未启动的服务不抛异常）。
 
+### 11. 打包与分发的复查结论（v1.0.5 复查所有发包形态时发现）
+
+复查范围：Windows 单文件/目录式 exe、Linux 单文件（带界面与无界面两个变体）、
+Docker 镜像、安卓 APK、以及发布流水线（`release.yml` / `ci.yml` / 各构建脚本）。
+发现并修掉的问题：
+
+| # | 问题 | 说明 |
+| --- | --- | --- |
+| 1 | **目录式打包与单文件打包的依赖列表不一致** | `BambuMonitor.spec` 只列了 `paho` / `cv2`，没有 `app.core.*` 与 `app.adapters.*`（设备族适配器是运行时按族动态导入的，PyInstaller 静态分析可能漏掉）；而 `build_exe.bat` 又把同样的参数**另写了一份在 bat 里**。现在两边列表一致，bat 直接调用 spec —— 同一件事只有一处定义 |
+| 2 | **无界面 Linux 产物可能缺解码器** | `BambuMonitor-headless.spec` 没显式列 `cv2` / `cryptography`。缺 `cv2` 的后果是「X1/X2D/H2/P2S 这类只有 RTSPS 通道的机型看不到画面」，而 Linux 服务器正是这类用户的常见部署方式。两处 spec 都已补齐 |
+| 3 | **文档与实际行为矛盾** | `RELEASING.md` 写着「APK 是 debug 签名、只能自用安装」，而 `release.yml` 早已改成固定发布签名并**强制拒绝** debug 签名（否则用户无法覆盖安装）。文档已按实际行为改写 |
+| 4 | **安卓版 RTSPS-only 机型没有画面，而且不说明原因** | 见 §5 的详细说明。现在 `PrinterSession.video_unavailable_reason` 把结论写出来，网页端直接画在画面上 |
+
+仍然存在的、**有意的**限制（不是待修项）：
+
+* 安卓版没有 OpenCV → RTSPS-only 机型（X1 / X1C / X2D / H2 / P2S）在安卓上看不到画面。
+  取舍理由：Chaquopy 仓库里的 opencv/numpy 预编译包是 4096 字节对齐，
+  在 16KB 内存页设备上会闪退；装回它们等于「在新设备上根本打不开」。
+  等 Chaquopy 提供对齐的 wheel 再考虑（`tests/test_android_packaging.py` 盯着这件事）。
+* Windows exe 没有代码签名 → 杀毒软件可能误报（要根治只能买证书）。
+* `tools/diagnose.py` 与界面诊断共用 `app/bambu/diagnostics.py`，但
+  `tools/rtsp_describe.py` 仍保留自己那份 RTSP DESCRIBE 实现：它是个**独立的小工具**
+  （可以只探 322 端口、不碰别的东西），共用后会丢掉这个特性，因此有意保留。
+
+### 12. 安卓 WebView 的隐藏坑（本轮补上）
+
+安卓版的界面是 WebView 加载本机网页，而 **WebView 默认不实现
+`<input type="file">`**：没有 `onShowFileChooser` + `onActivityResult`
+（并且必须回调 `ValueCallback`，否则下一次点击会被忽略），
+网页里「导入配置 → 从文件读取…」点下去**毫无反应且不报错**。
+`MainActivity` 已补上，`tests/test_android_manifest.py` 有契约测试盯着。
+
 ---
 
 ## 二、待修

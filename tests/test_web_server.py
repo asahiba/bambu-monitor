@@ -117,6 +117,9 @@ class FakeSession:
         # 能力声明：真实会话由「机型固有能力 + 运行时观测」得出，这里取该机型的固有能力
         self.capabilities = self.info.model.capabilities
         self.controls_blocked_reason = ""
+        self.controls_blocked_short = ""
+        #: 「本机根本出不了画面」的说明（安卓 + RTSPS-only 机型就是这个）
+        self.video_unavailable_reason = ""
         self.video_backend = "TCP6000"
         self.camera_fps = 12.5
         self.mqtt_auth_error = False
@@ -645,6 +648,31 @@ def test_签名挡住的只是print段命令_can_control仍为真(make_server):
     code, _, body = post_command(port, {"index": 0, "action": "pause"})
     assert code == 400
     assert "签名" in json.loads(body.decode("utf-8"))["detail"]
+
+
+def test_根本出不了画面时把原因带给前端(make_server):
+    """契约：`/api/printers` 要带上 `video_unavailable_reason`。
+
+    真实场景：**安卓版 + 只支持 RTSPS(322) 的机型**（X1 / X2D / H2 / P2S）。
+    APK 为兼容 16KB 内存页设备刻意不内置 OpenCV，所以这类机型在平板上
+    永远没有画面。以前界面只显示「连接中」，用户以为软件坏了。
+    """
+    session = FakeSession(
+        status=PrinterStatus(mqtt_online=True, camera_online=False),
+        info=PrinterInfo(
+            ip="192.168.1.50",
+            serial="20P",
+            name="车间 X2D",
+            model=PrinterModel.X2D,
+            access_code="12345678",
+        ),
+    )
+    session.video_unavailable_reason = "该机型只有 RTSPS(322) 画面通道……"
+    _, port = make_server(sessions=[session])
+    status, _, body = request(port, "/api/printers")
+    assert status == 200
+    item = json.loads(body.decode("utf-8"))["printers"][0]
+    assert item["video_unavailable_reason"].startswith("该机型只有 RTSPS")
 
 
 def test_command_未知动作返回400(make_server):

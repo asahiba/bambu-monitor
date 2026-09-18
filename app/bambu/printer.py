@@ -307,6 +307,35 @@ class PrinterSession:
 
         return "rtsp" if RtspStream.available() else "tcp6000"
 
+    @property
+    def video_unavailable_reason(self) -> str:
+        """该机型在本机**根本没法出画面**时给出的可执行说明（否则空串）。
+
+        目前只有一种情形：机型只提供 RTSPS(322) 通道（X1 / X1C / X2D / H2 / P2S…），
+        而本环境没有 OpenCV —— 典型就是**安卓版**：APK 刻意不打包 opencv/numpy
+        （Chaquopy 的预编译包是 4096 字节对齐，在 16KB 内存页设备上会闪退，
+        见 docs/PACKAGING.md），于是这类机型在安卓上永远没有画面。
+
+        以前这种情况只会给出一句「RTSPS 错误：未开启局域网实时画面，或访问代码不正确」，
+        把用户引到错误的方向（他明明开了、代码也是对的）。现在把真实原因与出路
+        明确说出来，网页端会把它直接显示在画面上（触屏看不到 tooltip）。
+        """
+        if not self.info.access_code:
+            return ""
+        if self.info.model.video_channel != "rtsp":
+            return ""
+        from .rtsp import RtspStream  # 延迟导入：OpenCV 为可选依赖
+
+        if RtspStream.available():
+            return ""
+        return (
+            "该机型只有 RTSPS(322) 画面通道，而当前运行环境没有 OpenCV 解码器"
+            "（安卓版为兼容 16KB 内存页设备刻意不内置），所以在这里看不到画面。\n"
+            "遥测（进度 / 温度 / 耗材 / HMS）不受影响，一切照常。\n"
+            "要看画面请用：Windows 桌面版、Linux/Docker 服务端（它们带 OpenCV），"
+            "或用浏览器打开服务端的网页。"
+        )
+
     def _start_camera(self, prefer: Optional[str] = None) -> None:
         """启动视频通道；prefer 为空时按机型能力自动选择。
 

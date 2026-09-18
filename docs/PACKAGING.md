@@ -178,6 +178,25 @@ docker run -d --name bambu-monitor --network host -v $PWD/data:/data bambu-monit
 **完全脱离电脑独立使用**；又因为服务绑在 `0.0.0.0`，同一 Wi-Fi 下的其它
 设备也能连这台平板的页面。
 
+### 安卓版与其它版本的功能对齐
+
+界面就是那一套网页（`app/web/page.py`），所以桌面/网页有的功能安卓都有，
+包括后来补齐的这几项（都走网页接口，不需要改 Java）：
+
+| 能力 | 接口 | 说明 |
+| --- | --- | --- |
+| 配置导出 / 导入（跨版本） | `/api/config/export`、`/api/config/import` | 带口令导出的文件在 Windows / Linux / Docker / 安卓之间通用；安卓端用「复制 / 粘贴」或「从文件读取」 |
+| 通道诊断 | `/api/diagnose` | 与桌面对话框、`tools/diagnose.py` 同一份实现（`app/bambu/diagnostics.py`） |
+| 重点画面（2×2） | `/api/layout` | 长按画面 → 「设为重点画面」 |
+
+> ⚠️ 安卓 WebView **默认不实现** `<input type="file">`：`MainActivity` 里必须写
+> `onShowFileChooser` + `onActivityResult` 并回调 `ValueCallback`，
+> 否则「从文件读取…」点下去毫无反应（而且不报错）。
+> `tests/test_android_manifest.py` 有契约测试盯着这段代码。
+
+**同类机型的功能差异**：RTSPS-only 机型（X1/X1C/X2D/H2/P2S）在安卓上看不到画面，
+原因与提示见上面「为什么安卓版不装任何预编译原生包」那一节。
+
 前置条件：JDK 17+、Android SDK、以及 **Python 3.10**
 （`android/build-apk.ps1` 会先做前置检查并明确告诉你缺什么、怎么装）。
 用 Android Studio 打开 `android/` 目录也可以。
@@ -210,8 +229,16 @@ Chaquopy 17.0.0 的发布说明原文：
 | `opencv` / `numpy` | RTSPS(322) 通道不可用 → 自动退回 6000 端口 JPEG | `app/bambu/rtsp.py` 的 `available()` / `except ImportError` |
 | `cryptography` | 只给内置模拟器生成自签证书（安卓不用模拟器） | `app/sim/simulator.py` 函数内导入 |
 
-**代价**：只提供 RTSPS 的机型（X1 / X2D / H2）在安卓上看不到画面；
+**代价**：只提供 RTSPS 的机型（X1 / X1C / X2D / H2 / P2S）在安卓上看不到画面；
 A1 / P1 / A2L 走 6000 端口，不受影响。换来的是"在所有设备上都能启动"。
+
+> ⚠️ 这个代价**必须让用户看得见**，否则他只会看到一个永远空着的画面，
+> 然后去开「局域网实时画面」、重填访问代码 —— 全是白费。
+> 所以 `PrinterSession.video_unavailable_reason` 会把结论说出来
+> （「该机型只有 RTSPS(322) 通道，而当前环境没有 OpenCV 解码器…遥测不受影响…
+> 要看画面请用桌面版/服务端」），网页端把它**直接画在画面上**
+> （触屏看不到悬浮提示），不是只塞进 tooltip。
+> 回归用例：`tests/test_video_availability.py`。
 
 **收益**：APK 从 33 MB 降到 **19 MB**。
 

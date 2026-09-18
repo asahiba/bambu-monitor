@@ -24,6 +24,12 @@ block_cipher = None
 HIDDEN = [
     "paho.mqtt.client",
     "paho.mqtt.publish",
+    # ⚠️ cv2 与 cryptography 都是**函数内导入**的可选依赖（RTSPS 拉流 / 模拟器自签证书）。
+    # PyInstaller 的静态分析通常能发现函数内 import，但这里显式列出更保险：
+    # 缺 cv2 的后果是「X1/X2D/H2/P2S 这些只有 RTSPS 通道的机型看不到画面」，
+    # 而 Linux 服务器正是这类用户的常见部署方式，值得多写两行。
+    "cv2",
+    "cryptography",
     # 设备无关内核与第三方设备族适配器（运行时按族动态导入）
     "app.core",
     "app.core.capabilities",

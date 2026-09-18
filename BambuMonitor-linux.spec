@@ -24,6 +24,7 @@ HIDDEN = [
     "paho.mqtt.client",
     "paho.mqtt.publish",
     "cv2",
+    "cryptography",
     "app.core",
     "app.core.capabilities",
     "app.core.adapter",

@@ -68,6 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--export-config", metavar="PATH", help="把当前配置导出到文件后退出（备份用）")
     parser.add_argument(
+        "--import-config", metavar="PATH", help="从文件导入配置后退出（会替换当前设备列表）"
+    )
+    parser.add_argument(
+        "--config-passphrase",
+        metavar="口令",
+        default="",
+        help=(
+            "导出/导入配置用的口令。设了它，配置文件在任何版本/平台都能导入"
+            "（Windows / Linux / Docker / 安卓）；不设则访问代码只在本机可解"
+        ),
+    )
+    parser.add_argument(
         "--ui-selftest",
         action="store_true",
         help="界面自检：打印每一路画面的进度/温度绑定结果（配合 --sim 使用）",
@@ -181,13 +193,32 @@ def main(argv: list[str] | None = None) -> int:
         from .config import AppConfig
 
         config = AppConfig.load()
-        if config.export_to(args.export_config):
-            print(
-                f"已导出 {len(config.printers)} 台打印机配置 → {args.export_config}"
-                "（访问代码为当前 Windows 用户加密，仅本机可用）"
-            )
+        if config.export_to(args.export_config, args.config_passphrase):
+            print(f"已导出 {len(config.printers)} 台打印机配置 → {args.export_config}")
+            if args.config_passphrase:
+                print("（已用口令保护：任何版本都能导入，导入时要用同一个口令）")
+            else:
+                print("（未设口令：访问代码按本机方式加密，只有同一台机器/同一用户能恢复）")
+                print("  想拿到别的设备上用，请加 --config-passphrase 重新导出")
             return 0
-        print(f"导出失败：无法写入 {args.export_config}")
+        print(f"导出失败：{config.last_error or f'无法写入 {args.export_config}'}")
+        return 1
+
+    if args.import_config:
+        from .config import AppConfig
+
+        config = AppConfig.load()
+        if config.import_from(args.import_config, args.config_passphrase):
+            # import_from 只改内存，不落盘 —— 命令行这里必须自己存一次
+            config.save()
+            if config.last_error:
+                print(f"导入失败（写盘出错）：{config.last_error}")
+                return 1
+            print(f"已导入 {len(config.printers)} 台打印机（来自 {args.import_config}）")
+            if config.warnings:
+                print(f"提示：{config.warnings}")
+            return 0
+        print(f"导入失败：{config.last_error or '文件无法解析，或里面没有打印机'}")
         return 1
 
     try:

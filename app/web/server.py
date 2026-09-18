@@ -529,6 +529,11 @@ class _Handler(BaseHTTPRequestHandler):
                     "controls_blocked_reason": getattr(session, "controls_blocked_reason", ""),
                     # 一句话版：窄位置（状态条）也要能说清「先局域网、再开发者」与农场管家
                     "controls_blocked_short": getattr(session, "controls_blocked_short", ""),
+                    # 「这台设备在本机根本出不了画面」的说明（安卓上 RTSPS-only 机型就是这种）。
+                    # 网页端会把它显示在画面区域：触屏没有悬浮提示，否则只有一个空画面。
+                    "video_unavailable_reason": getattr(
+                        session, "video_unavailable_reason", ""
+                    ),
                     # 能力声明：让前端按「能力」而不是「机型」决定显示什么，
                     # 这样接入第三方设备族时前端不必改动（只增字段）
                     "capabilities": {

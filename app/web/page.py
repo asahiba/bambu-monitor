@@ -50,6 +50,9 @@ INDEX_HTML = r"""<!doctype html>
   .video img{width:100%;height:100%;object-fit:contain;display:block}
   .video .nosignal{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     color:var(--dim);font-size:12px}
+  /* 「本机根本出不了画面」的说明：直接盖在画面上，触屏用户也能看到 */
+  .video .novideo{position:absolute;inset:auto 0 0 0;background:rgba(0,0,0,.78);color:var(--warn);
+    font-size:11px;line-height:1.5;padding:6px 8px;white-space:pre-line;text-align:left}
   .overlay{position:absolute;left:8px;top:6px;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:3px;
     font-size:12px;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .status{position:absolute;right:8px;top:6px;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:3px;
@@ -271,6 +274,7 @@ function ensureTile(index){
     <div class="video">
       <img alt="">
       <div class="nosignal">等待画面…</div>
+      <div class="novideo" style="display:none"></div>
       <div class="overlay"></div>
       <div class="status"><span class="dot"></span><span class="status-text">连接中</span></div>
     </div>
@@ -529,6 +533,20 @@ function applyStatus(data){
       tile.img.style.visibility = 'hidden';
     } else {
       tile.img.style.visibility = 'visible';
+    }
+
+    // 「这台设备在本机根本出不了画面」时，把原因**直接写在画面上**：
+    // 典型是安卓版 + 只支持 RTSPS(322) 的机型（X1/X2D/H2/P2S）—— APK 为兼容
+    // 16KB 内存页设备刻意不内置 OpenCV，所以这类机型在平板上永远没有画面。
+    // 只把它塞进 tooltip 是不够的：触屏根本看不到悬浮提示，用户只会看到
+    // 一个永远空着的画面和一句「连接中」，以为软件坏了。
+    const noVideo = info.video_unavailable_reason || '';
+    const note = tile.element.querySelector('.novideo');
+    if (noVideo){
+      note.textContent = '⚠ ' + noVideo;
+      note.style.display = '';
+    } else {
+      note.style.display = 'none';
     }
   });
   for (const [index, tile] of [...state.tiles]){
