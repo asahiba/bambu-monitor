@@ -104,7 +104,51 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      # ⚠️ 这里**不再**用 android-actions/setup-android。
+      #
+      # 它内部会执行 `sdkmanager "tools"` —— 而 Google 已经把这个旧包从 SDK 仓库
+      # 下掉了，于是整步变成：
+      #     Warning: Failed to find package 'tools'
+      #     Error: The process '...\cmdline-tools\16.0\bin\sdkmanager.bat' failed with exit code 1
+      # v1.0.5 的发布为此时连续失败三次（v1.0.4 时那个包还在，所以当时能过）。
+      # 这不是我们的代码问题，但**发布被它整个卡住**，所以改成自己就位：
+      # windows-latest 镜像本来就预装了 Android SDK（`C:\Android\android-sdk`，含
+      # platforms/build-tools），这里只做「定位 + 校验 + 导出环境变量」，
+      # 缺包时才用镜像自带的 sdkmanager 补。
+      - name: 就位 Android SDK（用镜像预装的那份）
+        shell: pwsh
+        env:
+          # 只作为候选路径，避免依赖任何第三方 action 的副作用
+          SDK_CANDIDATES: "C:\\Android\\android-sdk"
+        run: |
+          $candidates = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, $env:SDK_CANDIDATES,
+                          (Join-Path $env:LOCALAPPDATA "Android\Sdk")) |
+                        Where-Object { $_ -and (Test-Path $_) }
+          $sdk = $candidates | Where-Object { Test-Path (Join-Path $_ "platforms") } |
+                 Select-Object -First 1
+          if (-not $sdk) { $sdk = $candidates | Select-Object -First 1 }
+          if (-not $sdk) { throw "运行器上没有 Android SDK（windows-latest 镜像本应预装）" }
+          Write-Host "Android SDK：$sdk"
+          "ANDROID_HOME=$sdk"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ANDROID_SDK_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $need = @()
+          if (-not (Test-Path (Join-Path $sdk "platforms\android-34")))     { $need += "platforms;android-34" }
+          if (-not (Test-Path (Join-Path $sdk "build-tools\34.0.0")))       { $need += "build-tools;34.0.0" }
+          if (-not (Test-Path (Join-Path $sdk "platform-tools")))           { $need += "platform-tools" }
+          if ($need.Count -gt 0) {
+            $manager = Get-ChildItem (Join-Path $sdk "cmdline-tools") -Recurse -Filter sdkmanager.bat -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+            if (-not $manager) { throw "SDK 缺这些包：$($need -join ' / ')，且找不到 sdkmanager" }
+            Write-Host "补齐：$($need -join ' / ')"
+            # 先接受许可（已接受时是空操作），否则安装会因为交互提示卡住
+            $yes = ("y`n" * 80)
+            $yes | & $manager.FullName --licenses 2>&1 | Out-Null
+            & $manager.FullName @need 2>&1 | Select-Object -Last 5 | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "sdkmanager 安装失败：$($need -join ' / ')" }
+          }
+          Write-Host "build-tools："; Get-ChildItem (Join-Path $sdk "build-tools") -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+          Write-Host "platforms：";   Get-ChildItem (Join-Path $sdk "platforms")   -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
 
       - uses: actions/setup-python@v5
         id: py310
