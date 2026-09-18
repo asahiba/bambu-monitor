@@ -535,9 +535,16 @@ def test_fstring里不能出现只在_3_12_以上才合法的写法():
     ``f"... {'id=\\"wall\\"' in html}"`` —— 3.12 起合法，3.10/3.11 直接
     SyntaxError，CI 的 3.10 任务因此挂掉，而本地（3.13）一点问题都看不出来。
     """
-    # 自证：这条必须被查出来（反斜杠出现在替换字段内部）
+    # 自证：这条必须被查出来（反斜杠出现在替换字段内部）。
+    # ⚠️ 但**在 3.10/3.11 上它本身就是 SyntaxError**（这正是我们要防的事），
+    # 所以自证要分版本：老版本上"解析直接失败"就是最好的证明，
+    # 新版本上才走「扫出来」这条路。
     bad = "x = 1\ny = f\"{'a\\\\' in x}\"\n"
-    assert _fstring_backslash_lines(bad) == [2], "自证失败：没查出非法写法"
+    if sys.version_info < (3, 12):
+        with pytest.raises(SyntaxError):
+            _fstring_backslash_lines(bad)
+    else:
+        assert _fstring_backslash_lines(bad) == [2], "自证失败：没查出非法写法"
     assert _fstring_backslash_lines('x = 1\nprint(f"a {x} b\\\\n")\n') == [], (
         "反斜杠在替换字段**外面**是合法的，不该误报"
     )
@@ -553,7 +560,10 @@ def test_fstring里不能出现只在_3_12_以上才合法的写法():
         try:
             lines = _fstring_backslash_lines(source)
         except SyntaxError:
-            continue  # 语法问题由别的测试负责
+            # 3.10/3.11 上遇到这种写法会直接抛 SyntaxError —— 那台解释器上
+            # 这些文件根本跑不起来，属于更严重的问题，由「工具脚本能被解析」
+            # 等测试负责报出来；这里不重复报。
+            continue
         offenders.extend(f"{path.relative_to(PROJECT_ROOT)}:{line}" for line in lines)
     assert not offenders, (
         "这些 f-string 在 3.12 之前是语法错误（安卓版跑 3.10）：" + "、".join(offenders)
