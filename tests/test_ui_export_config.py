@@ -15,9 +15,20 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
+# ⚠️ 先判断再导入：CI 刻意不装 PySide6，模块级导入在没有 Qt 时是收集期错误
+# （pytest 会直接失败，而不是跳过本文件）。
+pytest.importorskip("PySide6.QtWidgets", reason="界面测试需要 PySide6（CI 不装它）")
+
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QMessageBox,
+)
 
 from app.bambu.models import PrinterInfo, PrinterModel  # noqa: E402
 from app.config import AppConfig  # noqa: E402

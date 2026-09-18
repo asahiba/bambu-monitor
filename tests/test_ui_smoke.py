@@ -21,6 +21,13 @@ import pkgutil
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
+
+# ⚠️ 必须在导入 PySide6 **之前**判断：CI 刻意不装 PySide6（体积上百 MB），
+# 而模块级的 `from PySide6... import` 在没有 Qt 时是**收集期错误** ——
+# pytest 会以 "Interrupted: N errors during collection" 直接失败（不是跳过）。
+# 所以无 Qt 环境里要在这里干净地 skip。
+pytest.importorskip("PySide6.QtWidgets", reason="界面测试需要 PySide6（CI 不装它）")
+
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QDialog,

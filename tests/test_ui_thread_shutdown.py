@@ -20,7 +20,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# 这些用例在**子进程**里构造 Qt 对话框，没有 PySide6 时子进程只会抛 ImportError、
+# 退出码非 0，看起来像"崩溃回归"。CI 刻意不装 PySide6，所以这里要干净地跳过。
+pytest.importorskip("PySide6.QtWidgets", reason="需要 PySide6（CI 不装它）")
 
 SNIPPETS = {
     "diagnose": """

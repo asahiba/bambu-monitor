@@ -1,4 +1,13 @@
 # 服务端（Linux / Docker / NAS）依赖：不含 Qt，体积小很多
+#
+# ⚠️ 本文件与 requirements.txt 里都有中文注释。**在中文 Windows（cp936）上，
+# pip 会用本地编码去读 requirements 文件**，于是 `pip install -r ...` 会报
+#     UnicodeDecodeError: 'gbk' codec can't decode byte ... in position ...
+# 解决办法（任选其一）：
+#     set PYTHONUTF8=1          （Windows cmd；PowerShell 用 $env:PYTHONUTF8="1"）
+#     export PYTHONUTF8=1       （Linux/macOS）
+# 本仓库自带的 run.bat / test.bat / build_*.bat 已内置这一行；
+# Linux 与 CI 的本地编码本来就是 UTF-8，不受影响。
 paho-mqtt>=2.0
 # X1 / X2D / H2 / P2S 的 RTSPS(322) 通道需要 OpenCV（headless 版无 GUI 依赖）
 opencv-python-headless>=4.8

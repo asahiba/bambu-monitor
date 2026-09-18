@@ -17,6 +17,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKER = PROJECT_ROOT / "tools" / "check_qt_imports.py"
 
@@ -39,7 +41,12 @@ def test_all_pyside_imports_are_valid(capsys):
 
 
 def test_checker_detects_wrong_module(tmp_path, capsys):
-    """自证：故意写错的导入必须被查出，并给出正确写法。"""
+    """自证：故意写错的导入必须被查出，并给出正确写法。
+
+    需要真的装了 PySide6 —— 属性名只能靠真实导入拿到。CI 刻意不装 PySide6，
+    那种环境下这个自证无法进行，跳过（而不是报成失败）。
+    """
+    pytest.importorskip("PySide6", reason="校验属性名需要 PySide6（CI 不装它）")
     checker = _load_checker()
     bad = tmp_path / "bad_import.py"
     bad.write_text("from PySide6.QtWidgets import QFileDialog, QStandardPaths\n", encoding="utf-8")
@@ -50,7 +57,8 @@ def test_checker_detects_wrong_module(tmp_path, capsys):
 
 
 def test_checker_accepts_correct_module(tmp_path):
-    """自证：正确的导入必须通过。"""
+    """自证：正确的导入必须通过（同样需要 PySide6）。"""
+    pytest.importorskip("PySide6", reason="校验属性名需要 PySide6（CI 不装它）")
     checker = _load_checker()
     good = tmp_path / "good_import.py"
     good.write_text(

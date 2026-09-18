@@ -13,6 +13,9 @@ rem
 rem  说明见 docs\PACKAGING.md
 rem ============================================================================
 chcp 65001 >nul
+rem pip 读 requirements 时用本地编码：中文 Windows（cp936）会因此报
+rem UnicodeDecodeError，统一开 UTF-8 模式（见 run.bat 里的同类注释）
+set "PYTHONUTF8=1"
 setlocal
 cd /d "%~dp0"
 echo [注意] 这是遗留的目录式打包；单文件请用 build-onefile.bat

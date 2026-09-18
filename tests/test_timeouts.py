@@ -120,17 +120,26 @@ def test_探测与诊断不再各写一份字面量():
 
     诊断流程现在只有一份实现（`app/bambu/diagnostics.py`），CLI 与界面共用，
     所以这里盯的是它 + 添加对话框。
+
+    ⚠️ `app.ui.*` 需要 PySide6：CI 刻意不装它，所以界面那部分断言要**跳过**
+    而不是报错（否则整条用例会因为 ModuleNotFoundError 变成失败）。
     """
     from app.bambu import diagnostics
-    from app.ui import add_dialog, diagnose_dialog
+
+    assert diagnostics.DIAG_TCP_TIMEOUT is timeouts.DIAG_TCP_TIMEOUT
+    assert diagnostics.PROBE_MQTT_TIMEOUT is timeouts.PROBE_MQTT_TIMEOUT
+
+    try:
+        from app.ui import add_dialog, diagnose_dialog
+    except ImportError as exc:  # 没有 Qt 的环境（CI）
+        print(f"（跳过界面部分：{exc}）")
+        return
 
     assert add_dialog.PROBE_MQTT_TIMEOUT is timeouts.PROBE_MQTT_TIMEOUT
     # 诊断对话框把超时全部委托给共用模块，自己不再直接引用超时常量
     assert not hasattr(diagnose_dialog, "DIAG_TCP_TIMEOUT"), (
         "对话框不该再自己定义/引用诊断超时 —— 那是 app/bambu/diagnostics.py 的事"
     )
-    assert diagnostics.DIAG_TCP_TIMEOUT is timeouts.DIAG_TCP_TIMEOUT
-    assert diagnostics.PROBE_MQTT_TIMEOUT is timeouts.PROBE_MQTT_TIMEOUT
 
 
 def test_各模块不再硬编码同一类超时(monkeypatch):

@@ -2,6 +2,11 @@
 rem 启动监控台（GUI）。用法：run.bat [传给 app 的参数]
 rem   首次运行会自动创建 .venv 并安装依赖。
 chcp 65001 >nul
+rem ⚠️ 必须让 Python 走 UTF-8 模式：requirements.txt 里有中文注释，
+rem 而中文 Windows（cp936）下 **pip 会用本地编码去读它**，直接报
+rem     UnicodeDecodeError: 'gbk' codec can't decode byte ... in position ...
+rem 装依赖的第一步就挂（已实测复现）。Linux 与 CI 本来就是 UTF-8，不受影响。
+set "PYTHONUTF8=1"
 setlocal
 cd /d "%~dp0"
 

@@ -71,6 +71,16 @@ def module_names(path: str) -> set[str]:
 
 
 def main(argv: list[str]) -> int:
+    # 没有 PySide6 时这个工具**什么也校验不了**（属性名要靠真实导入才拿得到）。
+    # 早退并明确说出来，而不是逐文件打印"跳过"后报告"全部通过" ——
+    # 后者会让人以为 CI 真的查过了。
+    try:
+        importlib.import_module("PySide6")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[skip] 未安装 PySide6（{exc.__class__.__name__}），无法校验导入的属性名。")
+        print("       CI 环境刻意不装 PySide6；开发机上请 pip install -r requirements.txt 后再跑。")
+        return 0
+
     targets = argv or list(DEFAULT_DIRS)
     files = iter_python_files(targets)
     print(f"扫描 {len(files)} 个 Python 文件…\n")

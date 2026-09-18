@@ -10,6 +10,10 @@ rem       或查看 %APPDATA%\BambuMonitor\logs\app.log。详见 docs\PACKAGING.
 setlocal
 cd /d "%~dp0"
 
+rem pip 读 requirements 时用本地编码：中文 Windows（cp936）会因此报
+rem UnicodeDecodeError（本项目 requirements 里有中文注释），统一开 UTF-8 模式
+set "PYTHONUTF8=1"
+
 set "PY=.venv\Scripts\python.exe"
 if not exist "%PY%" (
     echo [!] 没找到 %PY%，请先运行 run.bat 创建虚拟环境。
