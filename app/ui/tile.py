@@ -133,8 +133,14 @@ class CameraTile(QFrame):
         self._snapshot_dir = os.path.join(_pictures_dir(), "BambuMonitor")
 
     def shutdown(self) -> None:
-        """从监控墙移除时停止后台解码线程。"""
+        """从监控墙移除时停止后台解码线程。
+
+        必须等一下线程真正退出：解码线程会在之后继续碰 ``QImage``，
+        若它还在跑而 Qt 已经开始拆对象，进程会直接 fail-fast 消失
+        （和诊断对话框那个崩溃是同一类问题，见 `app/ui/qt_threads.py`）。
+        """
         self.decoder.stop()
+        self.decoder.join(timeout=1.0)
 
     # ------------------------------------------------------------------ 状态条
     def _build_status_panel(self) -> QWidget:

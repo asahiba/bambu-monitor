@@ -145,7 +145,7 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 | 6 | `tools/layout_check.py` 已被 `tools/layout_fit_check.py` 取代（前者无退出码、无字体度量）。**已加 `.. deprecated::` 说明**，未删除（保留作对照） | `tools/layout_check.py` |
 | 7 | `tools/diagnose.py` 与 `app/ui/diagnose_dialog.py` 是同一套诊断流程的两份实现；`tools/rtsp_describe.py` 与 `diagnose_dialog.py` 重复实现 RTSP DESCRIBE。**未合并**：合并需要引入一个共用的诊断模块并同时改动 CLI 与 GUI，属于真正的重构，建议单独排期 | `tools/diagnose.py:43-96`、`app/ui/diagnose_dialog.py:52-150` |
 | 8 | ~~`tools/README.md` 只登记 25 个脚本~~ **已修**：重新按用途分类登记全部 33 个，并标注已过时脚本与「不是可执行脚本」的 `_common.py` | `tools/README.md` |
-| 9 | ~~导出配置默认目录用 `os.path.expanduser("~")`~~ **已修**：改用 `QStandardPaths.DocumentsLocation`，与抓拍保持一致 | `app/ui/main_window.py` |
+| 9 | ~~导出配置默认目录用 `os.path.expanduser("~")`~~ **已修两轮**：先改成 `QStandardPaths.DocumentsLocation`，但当时把 `QStandardPaths` 从 `PySide6.QtWidgets` 导入了（它属于 **QtCore**）——pyflakes/ruff 都查不出来，只有用户点「导出配置」才炸，打包版报错里能看到 `MEI0000...\\PySide6\\QtWidgets.pyd`。现已修正导入，并补 `tests/test_ui_export_config.py`（直接调用按钮槽函数）与 `tests/test_qt_imports.py` + `tools/check_qt_imports.py`（全仓库校验 PySide6 导入） | `app/ui/main_window.py` |
 | 10 | `import_from()` 只恢复 printers/columns/max_fps/refresh_ms/web_port/web_token/web_fps/web_max_width，**不恢复** `last_timeout` / `show_timestamp` / `auto_connect` / `web_enabled` / `window_geometry`；另外 `PrinterInfo.discovered` 会被 `to_json()` 写出但 `_parse()` 从不读取（往返后丢成 False） | `app/config.py` |
 
 硬编码项明细（**端口与默认访问代码已收敛到 `app/bambu/ports.py`**，以下是尚未收敛的部分）：
@@ -179,7 +179,7 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 | 14 | 无退出码、进不了 CI：`tools/layout_check.py`、`tools/discovery_bench.py`、`tools/show_config.py`、`tools/dialog_smoke.py` | 同左 |
 | 15 | 五个对话框（诊断/布局/设置/HMS/网页）无冒烟覆盖（`tools/dialog_smoke.py` 只构造添加与搜索两个） | `tools/dialog_smoke.py:18-19` |
 | 16 | `app/web/page.py` 是近 500 行的单文件内嵌 HTML+CSS+JS，无前端构建、无语法检查、无测试 | `app/web/page.py` |
-| 17 | `app/ui/tile.py:134-136` 的 `shutdown()` 只 `stop()` 解码线程不 join；`add_dialog.py:199`、`diagnose_dialog.py:200` 的 `QThread.wait()` 超时后未处理 | 同左 |
+| 17 | ~~`app/ui/tile.py:134-136` 的 `shutdown()` 只 `stop()` 解码线程不 join；`add_dialog.py:199`、`diagnose_dialog.py:200` 的 `QThread.wait()` 超时后未处理~~ **已修**：三处都补齐。后两处原来会让**整个进程 fail-fast 消失**（运行中的 QThread 被析构 = 0xC0000409，用户看到的是「点开诊断/点测试连接后随手关掉 → 程序没了」）——现在探测与诊断都支持取消（`probe.py`/`camera.py` 的 `should_stop`），并新增 `app/ui/qt_threads.py` 在进程退出前兜底等待；回归测试见 `tests/test_ui_thread_shutdown.py`（用子进程断言退出码，因为崩溃会直接带走 pytest） | `app/ui/tile.py`、`app/ui/add_dialog.py`、`app/ui/diagnose_dialog.py`、`app/ui/qt_threads.py` |
 
 ---
 

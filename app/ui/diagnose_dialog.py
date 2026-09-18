@@ -9,6 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -25,6 +26,11 @@ from ..bambu.models import PrinterInfo
 from ..bambu.ports import CAMERA_PORT, MQTT_PORT, RTSP_PORT
 from ..bambu.probe import probe_printer
 from . import theme
+from .qt_threads import retire_thread
+
+
+class _DiagAborted(Exception):
+    """用户关闭了对话框：让诊断线程在步骤边界立刻收工。"""
 
 
 class _DiagThread(QThread):
@@ -33,11 +39,27 @@ class _DiagThread(QThread):
     def __init__(self, info: PrinterInfo, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.info = info
+        self._aborted = False
+
+    def stop(self) -> None:
+        """请求尽快结束（在下一个步骤边界生效）。"""
+        self._aborted = True
 
     def _emit(self, text: str) -> None:
+        # 用户点了关闭就尽快收工：诊断一轮要 20 秒以上，
+        # 让线程跑完再销毁对话框是不可能的（见 closeEvent）。
+        if self._aborted:
+            raise _DiagAborted
         self.line.emit(text)
 
     def run(self) -> None:  # noqa: D102
+        try:
+            self._run_diagnostics()
+        except _DiagAborted:
+            # 直接 emit，别走 _emit（它正是抛异常的那个）
+            self.line.emit("（已取消：对话框关闭，诊断未跑完）")
+
+    def _run_diagnostics(self) -> None:
         info = self.info
         code = info.access_code
         self._emit(f"打印机：{info.display_name()}  {info.ip}")
@@ -193,14 +215,19 @@ class DiagnoseDialog(QDialog):
         self._thread.start()
 
     def _copy(self) -> None:
-        from PySide6.QtWidgets import QApplication
-
         clipboard = QApplication.clipboard()
         if clipboard is not None:
             clipboard.setText(self.output.toPlainText())
             self.copy_button.setText("已复制")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._thread.isRunning():
-            self._thread.wait(3000)
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            thread.stop()
+            if not thread.wait(2000):
+                # 线程还卡在某次 TCP 超时里。**绝不能让它随对话框一起被销毁**：
+                # 运行中的 QThread 被析构会让 Qt 直接 fail-fast
+                # （用户看到的是「点开诊断、随手关掉 → 程序整个消失」）。
+                retire_thread(thread)
+                self._thread = None
         super().closeEvent(event)

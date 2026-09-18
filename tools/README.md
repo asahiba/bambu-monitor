@@ -92,6 +92,21 @@
 | --- | --- |
 | `adapter_debug.py` | 打印 Windows 适配器表与枚举结果，排查「网卡列表缺了局域网网卡」 |
 
+## 代码检查（进 CI 的那类）
+
+| 脚本 | 用途 |
+| --- | --- |
+| `check_qt_imports.py [目录…]` | 校验所有 PySide6 导入的属性真实存在（`from PySide6.QtWidgets import QStandardPaths` 这种错 pyflakes/ruff 查不出来），并提示正确来源模块 |
+| `check_qt_imports_probe.py` | 自证上面那个工具：故意写错的必须被查出，正确的必须通过 |
+| `check_workflow_ps.py` | 校验 GitHub 工作流里 `pwsh` 步骤的语法 |
+
+## 崩溃复现（都是「关对话框导致进程消失」那一类）
+
+| 脚本 | 用途 |
+| --- | --- |
+| `add_dialog_close_probe.py` | 复现/验证「点测试连接后立刻关闭添加对话框」是否还会带走进程（Qt fail-fast 0xC0000409） |
+| `web_toggle_probe.py` | 复现/验证网页监控开关的启停与信号重入（开机自动开启时不应弹模态框） |
+
 ## 资源生成与公共库
 
 | 脚本 | 用途 |

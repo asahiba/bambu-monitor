@@ -114,13 +114,21 @@ class CameraStream(threading.Thread):
         with self._lock:
             return self._latest_seq, self._latest
 
-    def wait_first_frame(self, timeout: float = 10.0) -> Optional[bytes]:
-        """等待首帧；确认被拒绝时提前返回，不再空等。"""
+    def wait_first_frame(
+        self, timeout: float = 10.0, should_stop: Optional[Callable[[], bool]] = None
+    ) -> Optional[bytes]:
+        """等待首帧；确认被拒绝时提前返回，不再空等。
+
+        ``should_stop`` 用于外部取消（例如用户关掉了「测试连接」对话框）：
+        一旦返回真值就立刻退出，避免线程被拖到超时 —— 界面线程在等它结束。
+        """
         deadline = time.time() + timeout
         started = time.time()
         while time.time() < deadline:
             if self._first_frame_event.wait(0.2):
                 return self.latest_frame()[1]
+            if should_stop is not None and should_stop():
+                return None
             failed = self.state in (self.STATE_AUTH_ERROR, self.STATE_STOPPED)
             if failed and (time.time() - started) > 1.0:
                 return None
@@ -292,13 +300,20 @@ class CameraStream(threading.Thread):
 
 
 def grab_single_frame(
-    host: str, access_code: str, serial: str = "", timeout: float = 12.0
+    host: str,
+    access_code: str,
+    serial: str = "",
+    timeout: float = 12.0,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[bytes]:
-    """同步抓取一帧（用于「测试连接」与自动化测试）。"""
+    """同步抓取一帧（用于「测试连接」与自动化测试）。
+
+    ``should_stop`` 可让调用方中途取消（对话框被关闭时用得上）。
+    """
     stream = CameraStream(host, access_code, serial=serial)
     stream.start()
     try:
-        frame = stream.wait_first_frame(timeout)
+        frame = stream.wait_first_frame(timeout, should_stop=should_stop)
     finally:
         stream.stop()
         stream.join(timeout=3.0)

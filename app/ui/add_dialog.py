@@ -24,12 +24,17 @@ from PySide6.QtWidgets import (
 from ..bambu.models import PrinterInfo, PrinterModel
 from ..bambu.probe import ProbeResult, probe_printer
 from . import theme
+from .qt_threads import retire_thread
 
 STREAM_MODES = [
     ("自动（推荐）", "auto"),
     ("6000 端口 JPEG 流", "tcp6000"),
     ("RTSPS 322（X1/H2/X2D）", "rtsp"),
 ]
+
+
+class _ProbeAborted(Exception):
+    """用户关掉了对话框：让探测线程在步骤边界立刻收工。"""
 
 
 class _ProbeThread(QThread):
@@ -41,15 +46,31 @@ class _ProbeThread(QThread):
         self._ip = ip
         self._code = code
         self._serial = serial
+        self._aborted = False
+
+    def stop(self) -> None:
+        """请求尽快结束（在下一个步骤边界生效）。"""
+        self._aborted = True
+
+    def _on_step(self, text: str) -> None:
+        if self._aborted:
+            raise _ProbeAborted
+        self.step.emit(text)
 
     def run(self) -> None:  # noqa: D102
-        result = probe_printer(
-            self._ip,
-            self._code,
-            serial=self._serial,
-            timeout=10.0,
-            on_step=lambda text: self.step.emit(text),
-        )
+        try:
+            result = probe_printer(
+                self._ip,
+                self._code,
+                serial=self._serial,
+                timeout=10.0,
+                on_step=self._on_step,
+                should_stop=lambda: self._aborted,
+            )
+        except _ProbeAborted:
+            return
+        if self._aborted:
+            return
         self.done.emit(result)
 
 
@@ -196,6 +217,13 @@ class PrinterEditDialog(QDialog):
         self.accept()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.wait(1500)
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            thread.stop()
+            if not thread.wait(2000):
+                # 还卡在 TCP 超时里：**不能让它随对话框被销毁**（运行中的 QThread
+                # 被析构会让 Qt fail-fast，整个程序消失）。交给退休名单，
+                # 由它保证进程退出前等线程结束。
+                retire_thread(thread)
+                self._thread = None
         super().closeEvent(event)

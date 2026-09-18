@@ -5,6 +5,39 @@
 
 ## [未发布]
 
+### 修复
+
+- **「导出配置」一点就报错**：`export_config()` 里写成了
+  `from PySide6.QtWidgets import QStandardPaths`，而 `QStandardPaths` 属于 **QtCore**。
+  这类错误 pyflakes / ruff 都查不出来（模块存在，只是名字不在里面），
+  只有真的点按钮才会抛 `ImportError`；打包版报错信息里会出现
+  `cannot import name 'QStandardPaths' from 'PySide6.QtWidgets' (...MEI0000...\PySide6\QtWidgets.pyd)`，
+  后面的解包路径正是 PyInstaller 的临时目录。
+- **关掉「通道诊断」/「添加打印机」对话框可能让程序整个消失**：
+  两个对话框的 `QThread` 只等 2~3 秒，而一轮诊断要 20 秒以上；
+  等不到就继续析构，**运行中的 QThread 被析构会让 Qt 直接 fail-fast**
+  （Windows 退出码 `0xC0000409`，没有 Python traceback、没有日志）。
+  现在探测与诊断支持取消（`probe.py` / `camera.py` 新增 `should_stop`），
+  并在 `app/ui/qt_threads.py` 里加了「进程退出前等它跑完」的兜底。
+- **网页监控开关的信号重入**：`start_web_server()` 里 `action_web.setChecked(True)`
+  会触发 `toggled` → 重新进入 `toggle_web_server()` → 再以 `show_dialog=True`
+  走一遍，于是**每次启动都弹出「网页信息」模态窗口**（无界面环境下表现为阻塞）。
+  已用 `blockSignals` 掐断这次重入。
+- **移除画面时不再漏等解码线程**（`tile.shutdown()` 补 `join`）：解码线程仍在访问
+  `QImage` 时 Qt 已开始拆对象，属于同一类 fail-fast 风险。
+
+### 测试
+
+- 新增 `tests/test_ui_export_config.py`：真实主窗口 + 打桩的文件对话框，
+  直接调用「导出 / 导入配置」按钮的槽函数（原来只测了 `config.export_to`，
+  界面那段代码从未被执行，所以 bug 漏到了用户手里）。
+- 新增 `tests/test_ui_smoke.py`：app 包全模块导入 + 所有对话框构造 +
+  工具栏/右键菜单槽函数逐个调用 + 画面按钮，保证「点一下才执行」的代码不再有死角。
+- 新增 `tests/test_ui_thread_shutdown.py`：用**子进程**断言退出码，
+  覆盖「关掉对话框导致进程消失」的两个入口（崩溃会直接带走 pytest，只能这么测）。
+- 新增 `tests/test_qt_imports.py` 与 `tools/check_qt_imports.py`：
+  全仓库校验 PySide6 导入的属性是否真实存在，并提示正确来源模块。
+
 ## [1.0.4] — 2026-09-14
 
 **安卓：修 16 KB 内存页闪退、入口模块被漏打包、图标空白，并换成固定签名。**

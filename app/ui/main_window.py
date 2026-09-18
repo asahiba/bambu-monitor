@@ -233,9 +233,7 @@ class MainWindow(QMainWindow):
                 # 更新已有条目（例如补上访问代码）
                 existing.info.access_code = info.access_code or existing.info.access_code
                 existing.info.name = info.name or existing.info.name
-                existing.info.model = (
-                    info.model if info.model.is_known else existing.info.model
-                )
+                existing.info.model = info.model if info.model.is_known else existing.info.model
                 if autostart and not existing.running:
                     existing.start()
                 self._persist()
@@ -573,10 +571,13 @@ class MainWindow(QMainWindow):
             self._notify(f"提示：{warning}")
 
     def export_config(self) -> None:
-        from PySide6.QtWidgets import QFileDialog, QStandardPaths
+        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtWidgets import QFileDialog
 
         # 与抓拍一致，默认落到「文档」而不是用户主目录，避免用户找不到导出文件
-        base = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or os.path.expanduser("~")
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.DocumentsLocation
+        ) or os.path.expanduser("~")
         path, _ = QFileDialog.getSaveFileName(
             self,
             "导出配置",
@@ -680,7 +681,14 @@ class MainWindow(QMainWindow):
             return
         self.web = server
         self.config.web_enabled = True
+        # 关键：这里会改变 QAction 的勾选状态，从而触发 toggled 信号 →
+        # 重新进入 toggle_web_server() → start_web_server(show_dialog=True) →
+        # 弹出模态「网页信息」对话框。于是「开机自动开启网页监控」的场景
+        # （启动时调用 start_web_server(show_dialog=False)）会莫名弹窗并阻塞。
+        # 用 blockSignals 掐断这次重入。
+        self.action_web.blockSignals(True)
         self.action_web.setChecked(True)
+        self.action_web.blockSignals(False)
         self._persist()
         self._notify(f"网页监控已开启：{server.primary_url()}")
         if show_dialog:
@@ -691,7 +699,10 @@ class MainWindow(QMainWindow):
             self.web.stop()
             self.web = None
         if hasattr(self, "action_web"):
+            # 同上：避免 setChecked 反过来再触发一次 toggle_web_server
+            self.action_web.blockSignals(True)
             self.action_web.setChecked(False)
+            self.action_web.blockSignals(False)
 
     def _show_web_dialog(self) -> None:
         if self.web is None:
