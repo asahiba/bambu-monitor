@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,9 @@ OFFLINE_CHECKS = [
 def _run_tool(name: str, timeout: int = 180) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = ""  # 故意不给：让工具自己处理编码（这正是要测的）
-    env["BAMBU_MONITOR_CONFIG_DIR"] = str(PROJECT_ROOT / ".pytest_tool_config")
+    # 配置目录指向临时目录：工具导入 app.config 时会 makedirs，别在仓库里留垃圾
+    # （夹具里的 isolated_config_dir 只作用于本进程，子进程要用环境变量单独隔离）
+    env["BAMBU_MONITOR_CONFIG_DIR"] = tempfile.mkdtemp(prefix="bambu-tool-check-")
     return subprocess.run(
         [sys.executable, str(TOOLS / name)],
         cwd=str(PROJECT_ROOT),
