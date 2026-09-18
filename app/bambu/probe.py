@@ -10,6 +10,11 @@ from typing import Any, Callable, Optional
 from .camera import grab_single_frame
 from .models import PrinterModel, PrinterStatus, detect_model
 from .mqtt_worker import MqttWorker
+from .timeouts import (
+    PROBE_CAMERA_TIMEOUT_CAP,
+    PROBE_CAMERA_TIMEOUT_SLACK,
+    PROBE_POLL_INTERVAL,
+)
 
 
 @dataclass
@@ -117,7 +122,7 @@ def probe_printer(
             if discovered_serial and not result.serial:
                 result.serial = discovered_serial[0]
                 worker.update_serial(result.serial)
-            time.sleep(0.2)
+            time.sleep(PROBE_POLL_INTERVAL)
         result.mqtt_ok = done.is_set()
         if result.mqtt_ok:
             result.status = status
@@ -144,7 +149,8 @@ def probe_printer(
             ip,
             access_code,
             serial=result.serial,
-            timeout=min(12.0, timeout + 4),
+            # 画面比遥测慢：给总超时加一点余量，但不超过上限
+            timeout=min(PROBE_CAMERA_TIMEOUT_CAP, timeout + PROBE_CAMERA_TIMEOUT_SLACK),
             should_stop=should_stop,
         )
         if frame:

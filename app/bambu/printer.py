@@ -10,6 +10,15 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from .camera import CameraStream
 from .models import PrinterInfo, PrinterStatus
 from .mqtt_worker import MqttWorker
+from .timeouts import (
+    MQTT_STUCK_SECONDS,
+    RTSP_ADOPT_TIMEOUT,
+    RTSP_RETRY_PAUSE,
+    RTSP_STREAM_JOIN,
+    VIDEO_RESTART_JOIN,
+    VIDEO_STOP_JOIN,
+    WATCHDOG_INTERVAL,
+)
 
 if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避免与 app.core 形成环
     from ..core.capabilities import DeviceCapabilities
@@ -17,10 +26,9 @@ if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避�
 LOGGER = logging.getLogger("bambu-monitor.session")
 
 #: 遥测「卡死」判据：这么久没有成功连接过，就认为 paho 的重连已经卡住，
-#: 整条重建。取 90 秒是因为 paho 的 `reconnect_delay_set(max_delay=30)` 最多
-#: 退避 30 秒，90 秒足够它试好几轮 —— 仍在恢复中的连接不会被误判。
-#: 见 :meth:`PrinterSession._mqtt_watchdog_tick`。
-MQTT_STUCK_SECONDS = 90.0
+#: 整条重建（真正的定义在 `app/bambu/timeouts.py`，这里导入即转出，
+#: 兼容既有调用方 —— 测试从本模块导入它）。
+
 
 
 class PrinterSession:
@@ -87,7 +95,7 @@ class PrinterSession:
         self._watchdog_stop.set()
         # 等待「建立/切换通道」线程收尾后再停流：否则它可能在我们停流之后
         # 又把流建起来，留下一个没人引用的连接。
-        self._join_video_threads(2.0)
+        self._join_video_threads(VIDEO_STOP_JOIN)
         self._stop_streams()
         if self._mqtt is not None:
             self._mqtt.stop()
@@ -193,7 +201,7 @@ class PrinterSession:
         last_stream = None
         last_count = -1
         stale = 0
-        while not self._watchdog_stop.wait(15.0):
+        while not self._watchdog_stop.wait(WATCHDOG_INTERVAL):
             if not self.running:
                 return
 
@@ -252,7 +260,7 @@ class PrinterSession:
         这里再显式等一次，确保真的是「停了再起」。
         """
         self.stop()
-        self._join_video_threads(5.0)
+        self._join_video_threads(VIDEO_RESTART_JOIN)
         self.start()
 
     # ------------------------------------------------------------------ 内部
@@ -342,21 +350,21 @@ class PrinterSession:
                     )
                     holder.append(stream)
                     stream.start()
-                    if stream.wait_first_frame(20.0) is not None and self.running:
+                    if stream.wait_first_frame(RTSP_ADOPT_TIMEOUT) is not None and self.running:
                         self._rtsp = stream
                         self.video_channel = "rtsp"
                         # 采纳该流之后同步一次状态，否则界面还停留在「未连接」
                         self._handle_stream_state(stream, stream.state, stream.detail)
                         return
                     stream.stop()
-                    stream.join(timeout=2.0)
+                    stream.join(timeout=RTSP_STREAM_JOIN)
                     if not self.running:
                         return
                     if attempt + 1 < attempts:
                         self.warnings.append(
                             f"RTSPS 未取到画面，第 {attempt + 2} 次重试…"
                         )
-                        time.sleep(4.0)
+                        time.sleep(RTSP_RETRY_PAUSE)
                 if rtsp_only:
                     # 该机型只有 RTSPS 一条路，绝不能退回 6000（那边一定失败）。
                     # 交由看门狗周期性重试。

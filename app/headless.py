@@ -71,7 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=float, default=float(os.environ.get("BAMBU_WEB_FPS", "4")), help="网页帧率")
     parser.add_argument("--width", type=int, default=720, help="网页画面最大宽度")
     parser.add_argument("--max-fps", type=float, default=float(os.environ.get("BAMBU_MAX_FPS", "10")), help="每路画面最大帧率")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("BAMBU_HOST", "0.0.0.0"),
+        help=(
+            "监听地址。默认 0.0.0.0 = **监听所有网卡**（为了让同网段的手机也能看）；"
+            "只想本机访问就写 127.0.0.1"
+        ),
+    )
     parser.add_argument("--discover", action="store_true", help="扫描局域网并写入配置后退出")
     parser.add_argument("--list", action="store_true", help="列出配置里的打印机后退出")
     parser.add_argument(

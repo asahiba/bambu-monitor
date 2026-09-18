@@ -16,6 +16,7 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from .ports import RTSP_PORT
+from .timeouts import RTSP_FIRST_FRAME_TIMEOUT, RTSP_OPEN_TIMEOUT_MS
 
 # 自签证书 + 强制 TCP 传输，必须在导入 cv2 之前设置
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|tls_verify;0")
@@ -37,7 +38,7 @@ class RtspStream(threading.Thread):
         on_state: Optional[Callable[[str, str], None]] = None,
         name: str = "",
         max_fps: float = 12.0,
-        open_timeout_ms: int = 6000,
+        open_timeout_ms: int = RTSP_OPEN_TIMEOUT_MS,
         paths: Optional[tuple[str, ...]] = None,
     ) -> None:
         super().__init__(name=f"rtsp-{name or host}", daemon=True)
@@ -94,7 +95,7 @@ class RtspStream(threading.Thread):
         with self._lock:
             return self._latest_seq, self._latest
 
-    def wait_first_frame(self, timeout: float = 10.0) -> Optional[bytes]:
+    def wait_first_frame(self, timeout: float = RTSP_FIRST_FRAME_TIMEOUT) -> Optional[bytes]:
         """等待首帧；一旦确定连不上就提前返回，避免白白等满超时。"""
         deadline = time.time() + timeout
         started = time.time()

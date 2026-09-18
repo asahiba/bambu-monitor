@@ -52,12 +52,26 @@
 - **移除画面时不再漏等解码线程**（`tile.shutdown()` 补 `join`）：解码线程仍在访问
   `QImage` 时 Qt 已开始拆对象，属于同一类 fail-fast 风险。
 
+### 变更
+
+- **超时与等待时长集中到 `app/bambu/timeouts.py`**（与端口表 `ports.py` 同一条纪律：
+  不导入任何其它 app 模块）。协议层 28 个常量分组命名（`*_TIMEOUT` / `*_JOIN` /
+  `*_INTERVAL` / `*_CAP` / `*_SLACK`），`camera.py`、`rtsp.py`、`mqtt_worker.py`、
+  `probe.py`、`printer.py`、`discovery.py` 与两个对话框全部改为引用它。
+  数值一个都没改，只是终于能一处看全、一处调优。
+- **`--host` 的警告写清楚了**：默认 `0.0.0.0` 是**监听所有网卡**（为了让同网段的手机
+  能看），现在帮助文本、`SECURITY.md`、`docs/DEPLOY.md` 都写明了，并新增 `BAMBU_HOST`
+  环境变量方便只想本机访问的部署。
+
 ### 测试
 
 - 新增 `tests/test_discovery_interfaces.py`（15 条）：网段手工指定、去重、三层来源的
   优先级，以及「没有外网也能枚举出网卡」。
 - 新增 `tests/test_web_shrink_jpeg.py`（7 条）：Qt / OpenCV / 两者都没有 三条路径。
 - 新增 `tests/test_camera_status_text.py`（9 条）：状态标签的优先级与「完整说明不截断」。
+- 新增 `tests/test_timeouts.py`（14 条）：取值关系（重连等待必须比停止等待宽、
+  读切片必须远小于帧超时）、模块纪律（不导入其它 app 模块），以及用 AST / `inspect`
+  反查「常量真的被用上、使用方不再自己写字面量」。
 - 新增 `tests/test_discover_dialog_dedup.py`（5 条）：同一台设备带 IP / 带序列号时只列一行
   （已用修复前的实现自证确实会列两行）。
 - 扩充 `tests/test_secret.py`：本机密钥加密、密钥文件 `0600`、跨进程复用（子进程验证）、

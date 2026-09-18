@@ -25,6 +25,14 @@ from ..bambu.camera import CameraStream
 from ..bambu.models import PrinterInfo
 from ..bambu.ports import CAMERA_PORT, MQTT_PORT, RTSP_PORT
 from ..bambu.probe import probe_printer
+from ..bambu.timeouts import (
+    CAMERA_FIRST_FRAME_TIMEOUT,
+    DIAG_RTSP_READ_TIMEOUT,
+    DIAG_RTSP_TLS_TIMEOUT,
+    DIAG_TCP_TIMEOUT,
+    DIAG_TLS_TIMEOUT,
+    PROBE_MQTT_TIMEOUT,
+)
 from . import theme
 from .qt_threads import retire_thread
 
@@ -85,7 +93,7 @@ class _DiagThread(QThread):
         self._emit("② TLS 参数（证书链 + 安全级别）")
         for port in (MQTT_PORT, CAMERA_PORT, RTSP_PORT):
             try:
-                sock, verified = tlsutil.connect_tls(info.ip, port, timeout=4.0)
+                sock, verified = tlsutil.connect_tls(info.ip, port, timeout=DIAG_TLS_TIMEOUT)
                 sock.close()
                 self._emit(f"   {port:>5}: 握手成功 ✓  证书链{'已校验' if verified else '未校验'}")
             except Exception as exc:  # noqa: BLE001
@@ -96,7 +104,7 @@ class _DiagThread(QThread):
         self._emit("③ 6000 端口画面（80 字节鉴权包 + JPEG 帧）")
         camera = CameraStream(info.ip, code, serial=info.serial)
         camera.start()
-        frame = camera.wait_first_frame(12.0)
+        frame = camera.wait_first_frame(CAMERA_FIRST_FRAME_TIMEOUT)
         camera.stop()
         if frame:
             self._emit(f"   成功 ✓  取得 {len(frame) // 1024} KB 画面，状态：{camera.detail}")
@@ -115,7 +123,7 @@ class _DiagThread(QThread):
             info.ip,
             code,
             serial=info.serial,
-            timeout=10.0,
+            timeout=PROBE_MQTT_TIMEOUT,
             check_camera=False,
             on_step=self._emit,
         )
@@ -128,7 +136,7 @@ class _DiagThread(QThread):
 
     def _tcp(self, port: int) -> bool:
         try:
-            with socket.create_connection((self.info.ip, port), timeout=3.0):
+            with socket.create_connection((self.info.ip, port), timeout=DIAG_TCP_TIMEOUT):
                 return True
         except OSError:
             return False
@@ -136,7 +144,7 @@ class _DiagThread(QThread):
     def _rtsp_describe(self) -> None:
         try:
             tls, verified = tlsutil.connect_tls(
-                self.info.ip, RTSP_PORT, timeout=5.0, server_hostname=self.info.ip
+                self.info.ip, RTSP_PORT, timeout=DIAG_RTSP_TLS_TIMEOUT, server_hostname=self.info.ip
             )
         except Exception as exc:  # noqa: BLE001
             self._emit(f"   TLS 连接失败 ✗  {exc}")
@@ -150,10 +158,10 @@ class _DiagThread(QThread):
                 f"Authorization: Basic {auth}\r\n\r\n"
             )
             tls.sendall(request.encode())
-            tls.settimeout(6.0)
+            tls.settimeout(DIAG_RTSP_READ_TIMEOUT)
             data = b""
             started = time.time()
-            while b"\r\n\r\n" not in data and time.time() - started < 6:
+            while b"\r\n\r\n" not in data and time.time() - started < DIAG_RTSP_READ_TIMEOUT:
                 chunk = tls.recv(4096)
                 if not chunk:
                     break

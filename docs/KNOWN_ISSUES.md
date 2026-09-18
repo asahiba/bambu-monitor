@@ -148,20 +148,24 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 | 9 | ~~导出配置默认目录用 `os.path.expanduser("~")`~~ **已修两轮**：先改成 `QStandardPaths.DocumentsLocation`，但当时把 `QStandardPaths` 从 `PySide6.QtWidgets` 导入了（它属于 **QtCore**）——pyflakes/ruff 都查不出来，只有用户点「导出配置」才炸，打包版报错里能看到 `MEI0000...\\PySide6\\QtWidgets.pyd`。现已修正导入，并补 `tests/test_ui_export_config.py`（直接调用按钮槽函数）与 `tests/test_qt_imports.py` + `tools/check_qt_imports.py`（全仓库校验 PySide6 导入） | `app/ui/main_window.py` |
 | 10 | ~~`import_from()` 只恢复 printers/columns/max_fps/refresh_ms/web_port/web_token/web_fps/web_max_width，**不恢复** `last_timeout` / `show_timestamp` / `auto_connect` / `web_enabled` / `window_geometry`；另外 `PrinterInfo.discovered` 会被 `to_json()` 写出但 `_parse()` 从不读取（往返后丢成 False）~~ **已修**：补回 `last_timeout`/`show_timestamp`/`auto_connect`/`web_enabled`，`discovered` 在 `_parse()` 里读回。**`window_geometry` 仍然有意不导入**——那是屏幕坐标，从 4K 机器导到小屏笔记本会把窗口恢复到屏幕外（用户看到的是「导入配置后程序打不开了」），已写进 docstring 并由测试锁定。回归用例：`tests/test_config.py::test_export_import_roundtrip_keeps_界面偏好与discovered`、`::test_import_from_不导入窗口坐标` | `app/config.py` |
 
-硬编码项明细（**端口与默认访问代码已收敛到 `app/bambu/ports.py`**，以下是尚未收敛的部分）：
+硬编码项明细：
 
-* **各超时/间隔没有统一常量表**（只有 `tlsutil.py:83 HANDSHAKE_TIMEOUT=15.0` 与
-  `web/server.py:28-38` 是集中的）：`camera.py:169`(30.0)`:202`(6.0)`:223`(25.0)`:240`(30.0)`；
-  `mqtt_worker.py:127`(4.0)；`rtsp.py:38 open_timeout_ms=6000`；`probe.py:131` `min(12.0, timeout+4)`；
-  `diagnose_dialog.py:61`(4.0)`:91`(10.0)`:104`(3.0)`:112`(5.0)`；`add_dialog.py:50`(10.0)`；
-  `printer.py:94`(15.0)`:239`(4.0)`；`discovery.py:457`(1.5)`:463`(0.1)`:624,632`(0.05)`；
-  `web/server.py:36 PASSTHROUGH_BYTES=90_000`、`:38 CLIENT_TTL=6.0`、`:440`(0.02)`:546`(0.05)`。
-  对比：`config.py:69 last_timeout` 可配（15–60s），同类 MQTT/摄像头超时却不可配。
-  建议参照 `ports.py` 再建一个 `app/bambu/timeouts.py`。
-* **`time.sleep` 硬编码**：`headless.py:157`(0.3)`:182`(2.0)`、`printer.py:148`(0.2)`:239`(4.0)`、
-  `probe.py:108`(0.2)、`selftest.py:31`(1.0)、`simulator.py` 若干。
-* **监听地址**：`headless.py:41` 与 `web/server.py` 的 `--host` 默认 `0.0.0.0`（有意为之，
-  但值得在文档里写明「会监听所有网卡」）。
+* ~~**各超时/间隔没有统一常量表**~~ **已修**：新增 `app/bambu/timeouts.py`（28 个常量，
+  分组：遥测 / 6000 画面 / RTSPS / 会话看门狗 / 自动搜索 / 探测与诊断），
+  `camera.py`、`rtsp.py`、`mqtt_worker.py`、`probe.py`、`printer.py`、`discovery.py`、
+  `add_dialog.py`、`diagnose_dialog.py` 全部改为引用常量；`printer.MQTT_STUCK_SECONDS`
+  也移过去了（在原处保留导入，兼容既有调用方与测试）。
+  与 `ports.py` 同一条纪律：本模块不导入任何其它 app 模块，所以协议层、界面、
+  命令行都能安全引用。回归用例 `tests/test_timeouts.py`(14 条) 除了查取值，
+  还用 AST/`inspect` 反查「常量真的被用上」并禁止使用方再写字面量。
+  **仍未收敛**：`web/server.py` 自己的那组（`PASSTHROUGH_BYTES` / `CLIENT_TTL` /
+  两个 sleep）与 `headless.py` / `selftest.py` / `simulator.py` 的等待时间 ——
+  它们是服务进程与演示模式的节奏，不属于协议层参数，留在原处并已在注释里写明。
+* **`time.sleep` 硬编码**（剩余）：`headless.py`(0.3/2.0)、`selftest.py`(1.0)、
+  `simulator.py` 若干、`web/server.py`(0.02/0.05)。协议层里的都已收敛。
+* **监听地址**：`headless.py` 与 `web/server.py` 的 `--host` 默认 `0.0.0.0`（有意为之：
+  为了让同网段的手机也能看）。已在 `SECURITY.md` 的威胁模型与 `docs/DEPLOY.md`
+  里写明「会监听所有网卡，别暴露到公网」，`--host` 帮助文本也标了「默认监听所有网卡」。
 
 ### P1：平台与安全
 

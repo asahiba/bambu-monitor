@@ -989,7 +989,12 @@ def build_share_urls(port: int, token: str, sessions: list | None = None) -> lis
 
 
 class WebServer:
-    """网页服务的生命周期管理。"""
+    """网页服务的生命周期管理。
+
+    ``host`` 默认 ``0.0.0.0``：**监听所有网卡**（有意为之 —— 同网段的手机要能打开）。
+    只想本机访问就传 ``127.0.0.1``。这条「会监听所有网卡」的说明同时写在
+    `SECURITY.md`（威胁模型）与 `docs/DEPLOY.md`（部署）里，别只改一处。
+    """
 
     def __init__(
         self,

@@ -29,6 +29,11 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 from .models import PrinterInfo, detect_model
+from .timeouts import (
+    DISCOVERY_POLL_INTERVAL,
+    DISCOVERY_SEND_INTERVAL,
+    DISCOVERY_THREAD_JOIN,
+)
 
 LOGGER = logging.getLogger("bambu-monitor.discovery")
 
@@ -634,13 +639,13 @@ class DiscoveryService:
             except OSError:
                 pass
         for thread in self._threads:
-            thread.join(timeout=1.5)
+            thread.join(timeout=DISCOVERY_THREAD_JOIN)
 
     def run_blocking(self) -> list[PrinterInfo]:
         self.start()
         deadline = time.time() + self.timeout
         while time.time() < deadline and not self._stop_event.is_set():
-            time.sleep(0.1)
+            time.sleep(DISCOVERY_POLL_INTERVAL)
         self.stop()
         return self.results
 
@@ -827,7 +832,7 @@ class DiscoveryService:
                 self._sweep_subnet(senders, send_interfaces, focus=self._sweep_requested)
                 self._sweep_requested = False
                 next_sweep = now + SWEEP_INTERVAL
-            time.sleep(0.05)
+            time.sleep(DISCOVERY_SEND_INTERVAL)
 
         # 收尾：再排空一次，把最后一批回包收进来
         for _ in range(10):
@@ -835,7 +840,7 @@ class DiscoveryService:
                 self._drain(sock, "iface")
             for index, sock in enumerate(listeners):
                 self._drain(sock, "listener-ssdp" if index == 0 else "listener-legacy")
-            time.sleep(0.05)
+            time.sleep(DISCOVERY_SEND_INTERVAL)
 
         for sock in senders + listeners:
             try:

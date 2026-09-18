@@ -41,6 +41,14 @@ from typing import Callable, Optional
 
 from . import tlsutil
 from .ports import CAMERA_PORT
+from .timeouts import (
+    CAMERA_FIRST_FRAME_TIMEOUT,
+    CAMERA_FRAME_BODY_TIMEOUT,
+    CAMERA_FRAME_HEADER_TIMEOUT,
+    CAMERA_READ_SLICE,
+    CAMERA_STREAM_JOIN,
+    CAMERA_TLS_TIMEOUT,
+)
 
 AUTH_USERNAME = "bblp"
 AUTH_TYPE = 0x3000
@@ -182,7 +190,7 @@ class CameraStream(threading.Thread):
             except OSError:
                 pass
 
-    def _read_exact(self, count: int, timeout: float = 30.0) -> Optional[bytes]:
+    def _read_exact(self, count: int, timeout: float = CAMERA_FRAME_BODY_TIMEOUT) -> Optional[bytes]:
         """读取固定长度数据，超时返回 None（不关闭连接，由调用方决定）。"""
         buf = bytearray()
         deadline = time.time() + timeout
@@ -195,7 +203,7 @@ class CameraStream(threading.Thread):
             remaining = deadline - time.time()
             if remaining <= 0:
                 return None
-            sock.settimeout(min(remaining, 5.0))
+            sock.settimeout(min(remaining, CAMERA_READ_SLICE))
             try:
                 chunk = sock.recv(count - len(buf))
             except (socket.timeout, TimeoutError):
@@ -215,7 +223,7 @@ class CameraStream(threading.Thread):
             sock, verified = tlsutil.connect_tls(
                 self.host,
                 self.port,
-                timeout=6.0,
+                timeout=CAMERA_TLS_TIMEOUT,
                 server_hostname=self.serial or self.host,
                 verify_chain=True,
             )
@@ -236,7 +244,7 @@ class CameraStream(threading.Thread):
         """读取帧，直到出错或停止。"""
         idle_timeouts = 0
         while not self._stop_event.is_set():
-            header = self._read_exact(FRAME_HEADER_SIZE, timeout=25.0)
+            header = self._read_exact(FRAME_HEADER_SIZE, timeout=CAMERA_FRAME_HEADER_TIMEOUT)
             if header is None:
                 if self._stop_event.is_set():
                     return
@@ -253,7 +261,7 @@ class CameraStream(threading.Thread):
                     "打印机拒绝连接：请检查访问代码（局域网访问码）是否正确",
                 )
                 return
-            payload = self._read_exact(payload_size, timeout=30.0)
+            payload = self._read_exact(payload_size, timeout=CAMERA_FRAME_BODY_TIMEOUT)
             if payload is None:
                 if self._stop_event.is_set():
                     return
@@ -310,7 +318,7 @@ def grab_single_frame(
     host: str,
     access_code: str,
     serial: str = "",
-    timeout: float = 12.0,
+    timeout: float = CAMERA_FIRST_FRAME_TIMEOUT,
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[bytes]:
     """同步抓取一帧（用于「测试连接」与自动化测试）。
@@ -323,5 +331,5 @@ def grab_single_frame(
         frame = stream.wait_first_frame(timeout, should_stop=should_stop)
     finally:
         stream.stop()
-        stream.join(timeout=3.0)
+        stream.join(timeout=CAMERA_STREAM_JOIN)
     return frame

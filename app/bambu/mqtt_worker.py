@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 
 from . import tlsutil
 from .ports import MQTT_PORT
+from .timeouts import MQTT_CONNECT_TIMEOUT, MQTT_THREAD_JOIN
 
 LOGGER = logging.getLogger("bambu-monitor.mqtt")
 
@@ -174,7 +175,7 @@ class MqttWorker:
         """探测 TLS 参数并建立一条连接（可能抛异常，由调用方兜住）。"""
         # 先探测该打印机可用的 TLS 参数（证书链 + 安全级别），再交给 paho
         context, verified = tlsutil.select_context(
-            self.host, MQTT_PORT, self.serial or None, timeout=4.0
+            self.host, MQTT_PORT, self.serial or None, timeout=MQTT_CONNECT_TIMEOUT
         )
         if self._stop_requested:
             return
@@ -222,7 +223,7 @@ class MqttWorker:
                 pass
         thread, self._thread = self._thread, None
         if thread is not None and thread.is_alive():
-            thread.join(timeout=5.0)
+            thread.join(timeout=MQTT_THREAD_JOIN)
         self._set_state(self.STATE_OFFLINE, "已断开")
 
     def request_pushall(self, force: bool = False) -> None:

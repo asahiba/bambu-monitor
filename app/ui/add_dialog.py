@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..bambu.models import PrinterInfo, PrinterModel
 from ..bambu.probe import ProbeResult, probe_printer
+from ..bambu.timeouts import PROBE_MQTT_TIMEOUT
 from . import theme
 from .qt_threads import retire_thread
 
@@ -63,7 +64,7 @@ class _ProbeThread(QThread):
                 self._ip,
                 self._code,
                 serial=self._serial,
-                timeout=10.0,
+                timeout=PROBE_MQTT_TIMEOUT,
                 on_step=self._on_step,
                 should_stop=lambda: self._aborted,
             )
