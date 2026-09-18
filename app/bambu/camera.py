@@ -45,6 +45,8 @@ from .ports import CAMERA_PORT
 AUTH_USERNAME = "bblp"
 AUTH_TYPE = 0x3000
 AUTH_INLINE_SIZE = 0x40
+#: 鉴权包固定长度（协议规定）
+AUTH_PACKET_SIZE = 80
 FRAME_HEADER_SIZE = 16
 MAX_FRAME_SIZE = 8 * 1024 * 1024
 MIN_FRAME_SIZE = 512
@@ -57,7 +59,12 @@ def build_auth_packet(access_code: str, username: str = AUTH_USERNAME) -> bytes:
     packet += struct.pack("<IIII", AUTH_INLINE_SIZE, AUTH_TYPE, 0, 0)
     packet += username.encode("ascii", errors="ignore")[:32].ljust(32, b"\x00")
     packet += access_code.encode("ascii", errors="ignore")[:32].ljust(32, b"\x00")
-    assert len(packet) == 80
+    # 这里**不能用 assert**：``python -O`` 会把它整条去掉，长度错了就会静默发出
+    # 一个畸形的鉴权包（打印机只会断开连接，排查起来毫无线索）。
+    if len(packet) != AUTH_PACKET_SIZE:
+        raise ValueError(
+            f"鉴权包长度必须为 {AUTH_PACKET_SIZE} 字节，实际 {len(packet)} 字节"
+        )
     return bytes(packet)
 
 

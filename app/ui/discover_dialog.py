@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..bambu.discovery import DiscoveryService
+from ..bambu.discovery import DiscoveryService, merge_devices
 from ..bambu.models import PrinterInfo
 from . import theme
 
@@ -43,7 +43,15 @@ class DiscoverDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("自动搜索打印机")
         self.resize(900, 560)
-        self._known = {info.serial or info.ip: info for info in (known or [])}
+        self._known_list: list[PrinterInfo] = list(known or [])
+        # 已保存的打印机同时按「序列号」和「IP」登记：配置文件里可能只留了其中
+        # 一个，用单键查会漏判「已添加」（同一台设备就被重复加进监控墙了）。
+        self._known: dict[str, PrinterInfo] = {}
+        for info in self._known_list:
+            if info.serial:
+                self._known[info.serial] = info
+            if info.ip:
+                self._known[info.ip] = info
         self._service: Optional[DiscoveryService] = None
         self._bridge = _DiscoveryBridge()
         self._bridge.found.connect(self._add_row)
@@ -51,7 +59,12 @@ class DiscoverDialog(QDialog):
         self._remaining = int(timeout)
         self._round = 0
         self._closing = False
-        self._rows: dict[str, int] = {}
+        # 累积的设备记录（去重交给 discovery.merge_devices）与「记录 -> 行号」映射。
+        # PrinterInfo 是普通 dataclass（没有 __hash__），所以用 id() 当键；对象本身
+        # 由 self._records 强引用，id 不会被回收后复用。
+        self._records: list[PrinterInfo] = []
+        self._row_of: dict[int, int] = {}
+        self._saved_rows: set[int] = set()
         self.selected: list[PrinterInfo] = []
 
         layout = QVBoxLayout(self)
@@ -120,7 +133,7 @@ class DiscoverDialog(QDialog):
         self._tick.timeout.connect(self._on_tick)
 
         # 先把本机已保存的打印机列出来（默认不勾选），避免「只搜到一部分」时看不到全貌
-        for info in known or []:
+        for info in self._known_list:
             self._add_row(info, saved=True)
 
         self._start_service(clear=False)
@@ -129,8 +142,10 @@ class DiscoverDialog(QDialog):
     def _start_service(self, clear: bool = True) -> None:
         if clear:
             self.table.setRowCount(0)
-            self._rows.clear()
-            for info in self._known.values():
+            self._records.clear()
+            self._row_of.clear()
+            self._saved_rows.clear()
+            for info in self._known_list:
                 self._add_row(info, saved=True)
         self._round += 1
         self._remaining = int(self._service.timeout if self._service is not None else self._remaining)
@@ -151,10 +166,10 @@ class DiscoverDialog(QDialog):
     def _on_tick(self) -> None:
         self.progress.setValue(self.progress.value() + 1)
         left = max(0, self._remaining - self.progress.value())
-        total = self.table.rowCount()
+        total = len(self._records)
         self.status_label.setText(
             f"第 {self._round} 轮 · 剩余 {left} 秒 · 列表共 {total} 台（本次已新发现 "
-            f"{max(0, total - len(self._known))} 台）"
+            f"{total - len(self._saved_rows)} 台）"
         )
         if self.progress.value() >= self._remaining:
             self._tick.stop()
@@ -181,21 +196,38 @@ class DiscoverDialog(QDialog):
 
     # ------------------------------------------------------------------ 列表
     def _add_row(self, info: PrinterInfo, saved: bool = False) -> None:
-        key = info.serial or info.ip
-        if not key:
+        """登记一台设备（已保存的或本轮搜到的），必要时新建表格行。
+
+        去重交给 :func:`discovery.merge_devices`：它同时按序列号与 IP 查，
+        能识别出「一条记录带序列号、另一条只认得出 IP」的同一台设备。以前这里
+        只用 ``serial or ip`` 单键查，同一台设备会占两行 —— 用户看到的就是
+        「搜索列表里同一台打印机出现了两次，只有一行能填访问代码」。
+        """
+        if not (info.serial or info.ip):
             return
-        known = self._known.get(key)
-        existing = self._rows.get(key)
-        if existing is not None:
-            # 本轮又扫到了：补全缺失信息（机型、序列号、名称）
-            self._fill_row(existing, info, known)
+        before = len(self._records)
+        merged = merge_devices(self._records, [info])
+        self._records = merged
+        record = merged[-1] if len(merged) > before else _matched_record(merged, info)
+        if record is None:
+            return
+        known = self._known_for(record)
+        row = self._row_of.get(id(record))
+        if row is not None:
+            # 本轮又扫到了同一台：补全缺失信息（机型、序列号、名称），不新建行
+            self._fill_row(row, record, known)
+            if saved or known is not None:
+                self._saved_rows.add(row)
             return
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self._rows[key] = row
+        self._row_of[id(record)] = row
+        is_saved = saved or known is not None
+        if is_saved:
+            self._saved_rows.add(row)
 
         check = QCheckBox()
-        check.setChecked(not saved)  # 已保存的默认不勾选，避免重复添加
+        check.setChecked(not is_saved)  # 已保存的默认不勾选，避免重复添加
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
         holder_layout.setContentsMargins(0, 0, 0, 0)
@@ -203,7 +235,25 @@ class DiscoverDialog(QDialog):
         holder_layout.addWidget(check)
         self.table.setCellWidget(row, 0, holder)
 
-        self._fill_row(row, info, known)
+        self._fill_row(row, record, known)
+
+    def _known_for(self, record: PrinterInfo) -> Optional[PrinterInfo]:
+        """查这台设备是否已在配置里（序列号、IP 双键）。"""
+        return self._known_by(record.serial, record.ip)
+
+    def _known_by(self, serial: str, ip: str) -> Optional[PrinterInfo]:
+        if serial and serial in self._known:
+            return self._known[serial]
+        if ip and ip in self._known:
+            return self._known[ip]
+        return None
+
+    def _row_box(self, row: int) -> Optional[QCheckBox]:
+        holder = self.table.cellWidget(row, 0)
+        return holder.findChild(QCheckBox) if holder is not None else None
+
+    def _row_of_record(self, record: PrinterInfo) -> Optional[int]:
+        return self._row_of.get(id(record))
 
     def _fill_row(self, row: int, info: PrinterInfo, known: Optional[PrinterInfo]) -> None:
         name = info.name or (known.name if known else "")
@@ -228,30 +278,40 @@ class DiscoverDialog(QDialog):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
     def _set_all(self, checked: bool, only_new: bool = False) -> None:
-        for key, row in self._rows.items():
-            if only_new and key in self._known:
+        for record in self._records:
+            row = self._row_of_record(record)
+            if row is None:
                 continue
-            holder = self.table.cellWidget(row, 0)
-            box = holder.findChild(QCheckBox) if holder is not None else None
+            if only_new and row in self._saved_rows:
+                continue
+            box = self._row_box(row)
             if box is not None:
                 box.setChecked(checked)
 
     def _accept(self) -> None:
         selected: list[PrinterInfo] = []
-        for key, row in self._rows.items():
-            holder = self.table.cellWidget(row, 0)
-            box = holder.findChild(QCheckBox) if holder is not None else None
+        for record in self._records:
+            row = self._row_of_record(record)
+            if row is None:
+                continue
+            box = self._row_box(row)
             if box is None or not box.isChecked():
                 continue
             model_item = self.table.item(row, 2)
+            model = _model_from_label(model_item.text() if model_item else "")
+            known = self._known_by(
+                (self.table.item(row, 4).text() if self.table.item(row, 4) else ""),
+                (self.table.item(row, 3).text() if self.table.item(row, 3) else ""),
+            )
+            if known is not None and known.model.is_known:
+                model = known.model
             info = PrinterInfo(
                 ip=(self.table.item(row, 3).text() if self.table.item(row, 3) else ""),
                 serial=(self.table.item(row, 4).text() if self.table.item(row, 4) else ""),
                 name=(self.table.item(row, 1).text() if self.table.item(row, 1) else "").replace(
                     "（已添加）", ""
                 ),
-                model=(self._known.get(key).model if key in self._known else None)
-                or _model_from_label(model_item.text() if model_item else ""),
+                model=model,
                 access_code=(self.table.item(row, 5).text() if self.table.item(row, 5) else ""),
                 discovered=True,
             )
@@ -265,6 +325,20 @@ class DiscoverDialog(QDialog):
         if self._service is not None:
             self._service.stop()
         super().closeEvent(event)
+
+
+def _matched_record(records: list[PrinterInfo], info: PrinterInfo) -> Optional[PrinterInfo]:
+    """在 ``merge_devices`` 的结果里找出「吸收」了 ``info`` 的那条记录。
+
+    只有当 ``info`` 与已有记录合并（而不是被当作新设备追加到末尾）时才会用到：
+    `merge_devices` 就地补全已有记录（不会新建对象），所以按序列号/IP 反查即可。
+    """
+    for record in records:
+        if record is info:
+            continue
+        if (info.serial and record.serial == info.serial) or (info.ip and record.ip == info.ip):
+            return record
+    return None
 
 
 def _model_from_label(label: str):

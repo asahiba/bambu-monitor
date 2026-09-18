@@ -243,8 +243,16 @@ class PrinterSession:
         self._spawn_video_thread(self._start_camera, "video-switch", target)
 
     def restart(self) -> None:
+        """重连：先彻底停干净，再启动。
+
+        原来这里是 ``stop()`` + ``sleep(0.2)`` + ``start()``。但视频建立线程
+        可能正卡在 RTSPS 取首帧上（单次最长 20 秒），0.2 秒根本等不到 ——
+        于是新会话起来后，上一轮的线程还在后台接着干活（又去连一次打印机），
+        表现为「重连后画面偶尔又断一次」。``stop()`` 内部已经会 join 线程，
+        这里再显式等一次，确保真的是「停了再起」。
+        """
         self.stop()
-        time.sleep(0.2)
+        self._join_video_threads(5.0)
         self.start()
 
     # ------------------------------------------------------------------ 内部

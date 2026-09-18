@@ -470,7 +470,10 @@ def test_api_printers_字段与钳制(make_server):
     assert second["span"] == 1, "tile_span=0 必须被夹到 1"
     assert second["ams"] == [] and second["hms"] == []
     assert second["can_control"] is False
-    assert second["status_text"] == "连接超时，请检查局域网模式"[:14]
+    # 状态行只放稳定的短标签（宽度可控），完整原因走 status_detail 给前端做悬浮提示。
+    # 以前是 `detail[:14]`，中文提示会被截成「连接超时，请检查局」这种半句话。
+    assert second["status_text"] == "画面重连中"
+    assert second["status_detail"] == "连接超时，请检查局域网模式"
     assert second["state_text"] == "离线"
 
 

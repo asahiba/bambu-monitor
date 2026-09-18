@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..bambu.discovery import local_interfaces
 from ..bambu.printer import PrinterSession
+from ..core.device import camera_status_text
 from .icons import icon_bytes
 from .page import INDEX_HTML
 from .service_worker import SERVICE_WORKER_JS
@@ -403,16 +404,17 @@ class _Handler(BaseHTTPRequestHandler):
                 problems.append(f"E{status.print_error}")
             mqtt = status.mqtt_online
             camera = status.camera_online
-            if camera and mqtt:
-                status_text = "在线"
-            elif camera:
-                status_text = "画面正常·遥测断开"
-            elif session.mqtt_auth_error or session.last_camera_state == "auth_error":
-                status_text = "访问代码错误"
-            elif info.access_code:
-                status_text = (session.last_camera_detail or "连接中")[:14]
-            else:
-                status_text = "未配置访问代码"
+            # 判据与桌面版共用一处（app.core.camera_status_text）：返回短标签 +
+            # 完整说明。以前这里把完整说明截到 14 个字符直接当标签用，中文提示
+            # 会被截得看不懂；现在完整说明走 status_detail，前端做悬浮提示。
+            status_text, status_detail = camera_status_text(
+                camera_online=camera,
+                mqtt_online=mqtt,
+                camera_state=session.last_camera_state,
+                camera_detail=session.last_camera_detail,
+                mqtt_auth_error=session.mqtt_auth_error,
+                has_access_code=bool(info.access_code),
+            )
 
             def tray_payload(tray) -> dict:
                 return {
@@ -439,6 +441,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "backend": session.video_backend,
                     "fps": round(session.camera_fps, 1),
                     "status_text": status_text,
+                    "status_detail": status_detail,
                     "mqtt_online": mqtt,
                     "camera_online": camera,
                     "can_control": session.can_control,

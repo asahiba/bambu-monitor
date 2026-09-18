@@ -91,6 +91,45 @@ JOB_STATE_TEXT = {
 #: 正在进行（未结束）的作业状态
 JOB_ACTIVE_STATES = frozenset({JOB_PREPARING, JOB_PRINTING, JOB_PAUSED})
 
+#: 视频通道状态 -> 短标签。取值与 ``DeviceSession.last_camera_state`` 一致，
+#: 未知取值回落到「连接中」。
+CAMERA_STATE_TEXT = {
+    "connecting": "连接中",
+    "streaming": "已连接",
+    "retrying": "画面重连中",
+    "stopped": "画面未启动",
+}
+
+
+def camera_status_text(
+    *,
+    camera_online: bool,
+    mqtt_online: bool,
+    camera_state: str = "",
+    camera_detail: str = "",
+    mqtt_auth_error: bool = False,
+    has_access_code: bool = False,
+) -> tuple[str, str]:
+    """把通道状态翻译成「短标签 + 完整说明」。
+
+    桌面版每路画面的角标与网页版状态行要回答同一个问题——「这一路现在是什么
+    情况」，以前两处各写了一份判据，而且都把完整说明截断后显示（12 / 14 个
+    字符），像「RTSPS(322) 未取到画面…」被截得看不懂。
+
+    现在统一：返回的第一项是**稳定的短标签**（宽度可控，窄处也能完整显示），
+    第二项是完整说明，由调用方放到悬浮提示里。
+    """
+    detail = camera_detail or ""
+    if camera_online and mqtt_online:
+        return "在线", detail
+    if camera_state == "auth_error" or mqtt_auth_error:
+        return "访问代码错误", detail
+    if camera_online:
+        return "画面正常·遥测断开", detail
+    if not has_access_code:
+        return "未配置访问代码", detail
+    return CAMERA_STATE_TEXT.get(camera_state, "连接中"), detail
+
 
 @dataclass
 class DeviceStatus:

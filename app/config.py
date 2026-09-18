@@ -97,6 +97,9 @@ def _parse(data: dict[str, Any]) -> "AppConfig":
                 access_code=secret.decrypt_text(str(item.get("access_code", ""))),
                 stream_mode=str(item.get("stream_mode", "auto")),
                 tile_span=_coerce_int(item, "tile_span", 1, 1, 3),
+                # 以前只有 to_json() 写出 discovered、_parse() 从不读回，
+                # 「导出再导入」会把它悄悄变成 False（往返不保真）。
+                discovered=bool(item.get("discovered", False)),
             )
         )
     web_token = str(data.get("web_token", "") or "") or secret.token_hex(8)
@@ -272,7 +275,16 @@ class AppConfig:
         return True
 
     def import_from(self, path: str) -> bool:
-        """从导出的配置里恢复打印机列表（访问代码需为同一 Windows 用户加密的）。"""
+        """从导出的配置里恢复设置（访问代码需为同一 Windows 用户加密的）。
+
+        这里以前只恢复 printers/columns/max_fps/refresh_ms/web_*，
+        而 ``to_json()`` 写出的 ``last_timeout`` / ``show_timestamp`` /
+        ``auto_connect`` / ``web_enabled`` 在导入后被**静默丢弃** ——
+        用户「导出再导入」后界面偏好并没有跟着回来，看起来像导入了一半。
+
+        ``window_geometry`` 仍然**不导入**：那是屏幕坐标，从 4K 机器导到小屏
+        笔记本上会把窗口恢复到屏幕外（用户看到的是「导入配置后程序打不开了」）。
+        """
         self.last_error = ""
         self.warnings = ""
         try:
@@ -294,8 +306,14 @@ class AppConfig:
         self.warnings = loaded.warnings
         self.printers = loaded.printers
         self.columns = loaded.columns
+        self.show_timestamp = loaded.show_timestamp
+        self.auto_connect = loaded.auto_connect
+        self.last_timeout = loaded.last_timeout
         self.max_fps = loaded.max_fps
         self.refresh_ms = loaded.refresh_ms
+        # web_token 同理不强制覆盖：本机已有的令牌是手机书签里记着的地址，
+        # 导入别处的配置不应该把它换掉（为空时才采用导入值）。
+        self.web_enabled = loaded.web_enabled
         self.web_port = loaded.web_port
         self.web_token = loaded.web_token or self.web_token
         self.web_fps = loaded.web_fps

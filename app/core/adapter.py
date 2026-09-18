@@ -100,6 +100,8 @@ class PollingDeviceSession:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        #: 最近一次 stop() 停掉的线程；restart() 用它确认旧线程真的退出了
+        self._retired_thread: Optional[threading.Thread] = None
         self._latest_frame: Optional[bytes] = None
         self._frame_seq = 0
         self._frame_count = 0
@@ -128,6 +130,7 @@ class PollingDeviceSession:
         self.running = False
         self._stop_event.set()
         thread, self._thread = self._thread, None
+        self._retired_thread = thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
         self.status.online = False
@@ -135,8 +138,19 @@ class PollingDeviceSession:
         self.status.mqtt_online = False
 
     def restart(self) -> None:
+        """整条重建：等上一轮轮询线程真的退出，再启动新一轮。
+
+        原来是 ``stop()`` + ``time.sleep(0.2)`` + ``start()``。轮询线程单次请求
+        最长可以阻塞到超时（HTTP 读超时通常是秒级），0.2 秒等不到它退出，
+        于是新旧两轮轮询会并行一段时间——两边的 ``_failures``/帧序号互相覆盖，
+        表现为「点了重连之后状态反而更乱」。
+        """
         self.stop()
-        time.sleep(0.2)
+        retired = self._retired_thread
+        if retired is not None and retired.is_alive():
+            retired.join(timeout=2.0)
+            if retired.is_alive():
+                LOGGER.warning("上一轮轮询线程未在 2 秒内退出，仍启动新一轮：%s", self.info.ip)
         self.start()
 
     # ------------------------------------------------------------------ 轮询循环

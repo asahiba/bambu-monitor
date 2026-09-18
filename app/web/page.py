@@ -397,7 +397,11 @@ function applyStatus(data){
     const color = info.camera_online && info.mqtt_online ? 'var(--ok)'
                 : (info.camera_online || info.mqtt_online) ? 'var(--warn)' : 'var(--err)';
     element.querySelector('.dot').style.background = color;
-    element.querySelector('.status-text').textContent = info.status_text;
+    const statusNode = element.querySelector('.status-text');
+    statusNode.textContent = info.status_text;
+    // 完整原因（例如「RTSPS(322) 未取到画面…」）放到悬浮提示里：
+    // 状态行位置很窄，直接显示会被截断成看不懂的半句话
+    statusNode.title = info.status_detail || info.status_text;
 
     const badge = element.querySelector('.badge');
     badge.textContent = info.state_text;

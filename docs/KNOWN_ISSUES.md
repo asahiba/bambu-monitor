@@ -139,14 +139,14 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 | --- | --- | --- |
 | 1 | ~~`app/bambu/__init__.py` 的包级 re-export 无人使用~~ **已修**：移除 re-export 并写明理由，`from app.bambu import tlsutil` 不再连带拉起 paho | `app/bambu/__init__.py` |
 | 2 | ~~`app/web/__init__.py` 的 `from .server import WebServer` 零调用方~~ **已修**：同样移除 | `app/web/__init__.py` |
-| 3 | 死代码：`secret.is_encrypted()`（仅被测试引用）、`discovery.local_ipv4_addresses()`、`discovery._broadcast_addresses()` 全文无调用。**后两个已删除**；`is_encrypted()` 保留（它是 `dpapi:` 前缀判断的反向工具，且有测试）。`discovery.merge_devices()` 有完整测试覆盖且语义有用，已从「死代码」改为「待接入」——理想是让搜索对话框的累积逻辑改用它，避免两套去重实现 | `app/util/secret.py` |
-| 4 | 生产代码里唯一的 `assert`（`python -O` 下会静默失效） | `app/bambu/camera.py:59` |
+| 3 | ~~死代码：`secret.is_encrypted()`（仅被测试引用）、`discovery.local_ipv4_addresses()`、`discovery._broadcast_addresses()` 全文无调用。**后两个已删除**；`is_encrypted()` 保留（它是 `dpapi:` 前缀判断的反向工具，且有测试）。`discovery.merge_devices()` 有完整测试覆盖且语义有用，已从「死代码」改为「待接入」——理想是让搜索对话框的累积逻辑改用它，避免两套去重实现~~ **已修**：`DiscoverDialog._add_row()` 改走 `merge_devices()`。原来对话框用 `serial or ip` 单键去重，而 SSDP 回包带序列号、2021 端口广播只认得出 IP —— 同一台打印机在列表里出现**两行**，访问代码只可能填在其中一行上。顺带把 `_known` 改成序列号/IP 双键（配置里只留了一个字段时也能认出「已添加」），新增 `tests/test_discover_dialog_dedup.py`（5 条，含用 HEAD 版实现自证旧行为确实列两行） | `app/ui/discover_dialog.py` |
+| 4 | ~~生产代码里唯一的 `assert`（`python -O` 下会静默失效）~~ **已修**：`camera.build_auth_packet()` 的长度检查改成显式 `raise ValueError`，并抽出 `AUTH_PACKET_SIZE = 80` 常量。原来的 `assert` 在 `python -O` 下会被整条去掉，长度错了就静默发出一个畸形鉴权包（打印机只会断开连接，排查毫无线索） | `app/bambu/camera.py` |
 | 5 | ~~端口硬编码散落~~ **已修**：新增 `app/bambu/ports.py` 集中 `MQTT_PORT`/`CAMERA_PORT`/`RTSP_PORT`/`DEFAULT_ACCESS_CODE`，`camera.py`、`mqtt_worker.py`、`rtsp.py`、`simulator.py`、`diagnose_dialog.py`、`main.py`、`headless.py`、`selftest.py` 全部改为引用常量。**超时常量尚未收敛**（见下方「仍待处理」） | `app/bambu/ports.py` |
 | 6 | `tools/layout_check.py` 已被 `tools/layout_fit_check.py` 取代（前者无退出码、无字体度量）。**已加 `.. deprecated::` 说明**，未删除（保留作对照） | `tools/layout_check.py` |
 | 7 | `tools/diagnose.py` 与 `app/ui/diagnose_dialog.py` 是同一套诊断流程的两份实现；`tools/rtsp_describe.py` 与 `diagnose_dialog.py` 重复实现 RTSP DESCRIBE。**未合并**：合并需要引入一个共用的诊断模块并同时改动 CLI 与 GUI，属于真正的重构，建议单独排期 | `tools/diagnose.py:43-96`、`app/ui/diagnose_dialog.py:52-150` |
 | 8 | ~~`tools/README.md` 只登记 25 个脚本~~ **已修**：重新按用途分类登记全部 33 个，并标注已过时脚本与「不是可执行脚本」的 `_common.py` | `tools/README.md` |
 | 9 | ~~导出配置默认目录用 `os.path.expanduser("~")`~~ **已修两轮**：先改成 `QStandardPaths.DocumentsLocation`，但当时把 `QStandardPaths` 从 `PySide6.QtWidgets` 导入了（它属于 **QtCore**）——pyflakes/ruff 都查不出来，只有用户点「导出配置」才炸，打包版报错里能看到 `MEI0000...\\PySide6\\QtWidgets.pyd`。现已修正导入，并补 `tests/test_ui_export_config.py`（直接调用按钮槽函数）与 `tests/test_qt_imports.py` + `tools/check_qt_imports.py`（全仓库校验 PySide6 导入） | `app/ui/main_window.py` |
-| 10 | `import_from()` 只恢复 printers/columns/max_fps/refresh_ms/web_port/web_token/web_fps/web_max_width，**不恢复** `last_timeout` / `show_timestamp` / `auto_connect` / `web_enabled` / `window_geometry`；另外 `PrinterInfo.discovered` 会被 `to_json()` 写出但 `_parse()` 从不读取（往返后丢成 False） | `app/config.py` |
+| 10 | ~~`import_from()` 只恢复 printers/columns/max_fps/refresh_ms/web_port/web_token/web_fps/web_max_width，**不恢复** `last_timeout` / `show_timestamp` / `auto_connect` / `web_enabled` / `window_geometry`；另外 `PrinterInfo.discovered` 会被 `to_json()` 写出但 `_parse()` 从不读取（往返后丢成 False）~~ **已修**：补回 `last_timeout`/`show_timestamp`/`auto_connect`/`web_enabled`，`discovered` 在 `_parse()` 里读回。**`window_geometry` 仍然有意不导入**——那是屏幕坐标，从 4K 机器导到小屏笔记本会把窗口恢复到屏幕外（用户看到的是「导入配置后程序打不开了」），已写进 docstring 并由测试锁定。回归用例：`tests/test_config.py::test_export_import_roundtrip_keeps_界面偏好与discovered`、`::test_import_from_不导入窗口坐标` | `app/config.py` |
 
 硬编码项明细（**端口与默认访问代码已收敛到 `app/bambu/ports.py`**，以下是尚未收敛的部分）：
 
@@ -185,14 +185,20 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 
 ## 三、存疑（静态推断，需复现确认）
 
-1. **`PrinterSession.restart()` 竞态**：`printer.py:restart()` 只 `sleep(0.2)` 就重新 `start()`，
+1. ~~**`PrinterSession.restart()` 竞态**：`printer.py:restart()` 只 `sleep(0.2)` 就重新 `start()`，
    而上一轮的视频线程最长要 20 秒才退出。现在 `stop()` 会 join 线程，风险大减，
-   但 `restart()` 的 0.2 秒等待仍不足以覆盖 RTSPS 场景，建议改成「等待 join 完成」而非定时。
+   但 `restart()` 的 0.2 秒等待仍不足以覆盖 RTSPS 场景，建议改成「等待 join 完成」而非定时。~~
+   **已修**：`restart()` 改成 `stop()` + `_join_video_threads(5.0)` + `start()`，不再用定时等待；
+   `app/core/adapter.py` 的轮询型适配器同样问题（`time.sleep(0.2)`）也一并修掉——`stop()` 记下
+   被停掉的线程（`_retired_thread`），`restart()` 等它真的退出，超时才记日志继续。
 2. **访问代码错误时的重试节奏**：`rtsp.py` 与 `camera.py` 在鉴权失败后都会退避重试，
    若用户在打印中改了访问代码，界面可能延迟较久才恢复。
-3. **`_status_payload()` 的 `status_text` 取值**：`server.py` 里
+3. ~~**`_status_payload()` 的 `status_text` 取值**：`server.py` 里
    `(session.last_camera_detail or "连接中")[:14]` 会截断中文提示（14 个字符），
-   有些文案（如「RTSPS(322) 未取到画面…」）被截得难以理解，建议改成固定短标签 + 悬浮详情。
+   有些文案（如「RTSPS(322) 未取到画面…」）被截得难以理解，建议改成固定短标签 + 悬浮详情。~~
+   **已修**：新增 `app.core.camera_status_text()`（短标签 + 完整说明），桌面角标与网页状态行
+   **共用同一份判据**（原来两处各写一遍，顺序还不一样），完整说明改走 `status_detail` +
+   悬浮提示，不再截断。回归用例 `tests/test_camera_status_text.py`。
 
 ---
 

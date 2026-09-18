@@ -450,6 +450,60 @@ def test_export_import_roundtrip_restores_printers():
     assert cfg.web_port == 9090
 
 
+def test_export_import_roundtrip_keeps_界面偏好与discovered():
+    """回归：``to_json()`` 写出的字段，``import_from()`` 必须原样读回。
+
+    以前 ``import_from()`` 只恢复 printers/columns/max_fps/refresh_ms/web_*，
+    把 ``last_timeout`` / ``show_timestamp`` / ``auto_connect`` / ``web_enabled``
+    静默丢掉 —— 用户「导出再导入」后界面偏好并没有回来，看起来像导入了一半。
+    ``PrinterInfo.discovered`` 则是 ``to_json()`` 写出、``_parse()`` 不读，
+    往返后悄悄变成 False。
+    """
+    cfg = config.AppConfig(
+        columns=2,
+        show_timestamp=False,
+        auto_connect=False,
+        last_timeout=35.0,
+        web_enabled=True,
+        web_fps=6.0,
+    )
+    cfg.printers = [
+        PrinterInfo(ip="10.0.0.7", serial="03900A1111111", model=PrinterModel.X1C, discovered=True),
+    ]
+    target = _config_dir() / "roundtrip.json"
+    assert cfg.export_to(str(target)) is True
+
+    # 目标配置全是与导出时不同的值，确保断言真的落在「导入覆盖」上
+    fresh = config.AppConfig()
+    assert fresh.show_timestamp is True
+    assert fresh.auto_connect is True
+    assert fresh.last_timeout == 20.0
+    assert fresh.web_enabled is False
+
+    assert fresh.import_from(str(target)) is True
+    assert fresh.show_timestamp is False
+    assert fresh.auto_connect is False
+    assert fresh.last_timeout == 35.0
+    assert fresh.web_enabled is True
+    assert fresh.web_fps == 6.0
+    assert fresh.printers[0].discovered is True, "discovered 必须往返保真"
+
+
+def test_import_from_不导入窗口坐标():
+    """契约：``window_geometry`` 是屏幕坐标，导到别的机器上可能把窗口丢到屏幕外。
+
+    导出文件里带着它，但导入时要忽略（这是有意为之，不是漏字段）。
+    """
+    cfg = config.AppConfig()
+    cfg.printers = [PrinterInfo(ip="10.0.0.8")]
+    target = _config_dir() / "geometry.json"
+    assert cfg.export_to(str(target)) is True
+
+    fresh = config.AppConfig(window_geometry="本机原有坐标")
+    assert fresh.import_from(str(target)) is True
+    assert fresh.window_geometry == "本机原有坐标"
+
+
 def test_export_to_returns_false_for_unwritable_path():
     """契约：导出失败（目录不存在）返回 False，不抛异常。"""
     cfg = config.AppConfig()

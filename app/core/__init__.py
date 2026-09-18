@@ -28,6 +28,7 @@ from . import registry  # noqa: F401  （对外转出，便于一处导入）
 from .adapter import PollingDeviceSession  # noqa: F401  （对外转出）
 from .capabilities import DeviceCapabilities  # noqa: F401  （对外转出，便于一处导入）
 from .device import (
+    CAMERA_STATE_TEXT,
     JOB_ACTIVE_STATES,
     JOB_FAILED,
     JOB_FINISHED,
@@ -40,6 +41,7 @@ from .device import (
     JOB_UNKNOWN,
     MAPPABLE_FIELDS,
     DeviceStatus,
+    camera_status_text,
 )
 from .registry import (  # noqa: F401  （对外转出）
     FAMILY_BAMBU,
@@ -50,6 +52,7 @@ from .registry import (  # noqa: F401  （对外转出）
 )
 
 __all__ = [
+    "CAMERA_STATE_TEXT",
     "CredentialPolicy",
     "DeviceCapabilities",
     "DeviceSession",
@@ -71,6 +74,7 @@ __all__ = [
     "JOB_STATE_TEXT",
     "JOB_UNKNOWN",
     "MAPPABLE_FIELDS",
+    "camera_status_text",
     "registry",
 ]
 

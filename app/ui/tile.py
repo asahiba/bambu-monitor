@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..bambu.models import PrinterStatus
 from ..bambu.printer import PrinterSession
+from ..core.device import camera_status_text
 from . import theme
 from .frame_decoder import FrameDecoder
 from .video_widget import VideoWidget
@@ -297,17 +298,26 @@ class CameraTile(QFrame):
         self._update_status_panel(status)
 
     def _connection_text(self, status: PrinterStatus) -> tuple[str, str]:
-        camera_state = self.session.last_camera_state
-        if status.camera_online and status.mqtt_online:
-            return "在线", theme.OK
-        if camera_state == "auth_error" or self.session.mqtt_auth_error:
-            return "访问代码错误", theme.ERROR
-        if status.camera_online:
-            return "画面正常·遥测断开", theme.WARN
-        if self.session.info.access_code:
-            detail = self.session.last_camera_detail or "连接中"
-            return detail[:12], theme.WARN
-        return "未配置访问代码", theme.ERROR
+        """角标文案：与网页版共用 `app.core.camera_status_text` 的判据。
+
+        完整说明（例如「RTSPS(322) 未取到画面…」）不再截断后塞进角标，而是
+        走 `setToolTip`（见 `_update_status_panel`），角标只放稳定的短标签。
+        """
+        label, _detail = camera_status_text(
+            camera_online=status.camera_online,
+            mqtt_online=status.mqtt_online,
+            camera_state=self.session.last_camera_state,
+            camera_detail=self.session.last_camera_detail,
+            mqtt_auth_error=self.session.mqtt_auth_error,
+            has_access_code=bool(self.session.info.access_code),
+        )
+        color = {
+            "在线": theme.OK,
+            "画面正常·遥测断开": theme.WARN,
+            "访问代码错误": theme.ERROR,
+            "未配置访问代码": theme.ERROR,
+        }.get(label, theme.WARN)
+        return label, color
 
     def _set_text(self, widget: QLabel, value: str) -> None:
         """只在文本变化时 setText：避免每 150ms 触发一次布局重算。"""
