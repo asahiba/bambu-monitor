@@ -588,6 +588,8 @@ def test_文件名与命令入口未被改名():
         "app/bambu/discovery.py",
         "app/bambu/camera.py",
         "app/bambu/rtsp.py",
+        # 无 OpenCV 时的画面通路（安卓唯一的一条），模块路径被测试与 printer.py 引用
+        "app/bambu/rtsp_h264.py",
         "app/bambu/mqtt_worker.py",
         "app/bambu/probe.py",
         "app/bambu/tlsutil.py",
@@ -668,6 +670,33 @@ def test_含中文的PowerShell脚本必须带UTF8_BOM():
         assert raw.startswith(b"\xef\xbb\xbf"), (
             f"{script.relative_to(PROJECT_ROOT)} 含非 ASCII 字符但没有 UTF-8 BOM，"
             "PowerShell 5.1 会按 ANSI 解码并破坏语法"
+        )
+
+
+def test_含中文的批处理脚本必须切到UTF8代码页():
+    """契约：含非 ASCII 字符的 `.bat` 必须在开头 `chcp 65001 >nul`。
+
+    **和 `.ps1` 正好相反**：`.bat` 不能靠 BOM 解决，而是要在脚本里自己切代码页。
+    实测（中文 Windows，控制台代码页 936）：
+
+    * UTF-8 无 BOM 的 `.bat` —— 命令照常执行，但 `echo` 出来的中文是乱码；
+    * UTF-16LE 的 `.bat`（本仓库历史上就是这种）—— **`echo` 什么都不输出**，
+      所有提示与错误信息对用户不可见，而且没有任何报错；
+    * UTF-8 无 BOM + `chcp 65001` —— 中文正常显示。
+
+    所以判据是「有非 ASCII 就必须有 `chcp 65001`」。三个 `.bat` 曾经漏了它
+    （`test.bat`、`build-onefile.bat`，以及 UTF-16LE 时期的全部），
+    表现是用户看不到「没找到 .venv」这类关键提示。
+    """
+    scripts = sorted(PROJECT_ROOT.glob("*.bat")) + sorted(PROJECT_ROOT.glob("*/*.bat"))
+    assert scripts, "没有找到任何 .bat 脚本，测试本身可能失效了"
+    for script in scripts:
+        raw = script.read_bytes()
+        if all(byte < 0x80 for byte in raw):
+            continue  # 纯 ASCII 脚本不受影响
+        assert b"chcp 65001" in raw, (
+            f"{script.relative_to(PROJECT_ROOT)} 含非 ASCII 字符但没有 chcp 65001，"
+            "中文提示在 cp936 控制台上会是乱码"
         )
 
 

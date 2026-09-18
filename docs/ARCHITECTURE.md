@@ -48,6 +48,8 @@
 │   app/bambu/mqtt_worker.py MQTT over TLS 8883 遥测与控制下发   │
 │   app/bambu/camera.py      TCP 6000 帧流（TLS + 80 字节鉴权）  │
 │   app/bambu/rtsp.py        RTSPS 322（OpenCV 拉流，可选依赖）  │
+│   app/bambu/rtsp_h264.py   同上但**不解码**：纯标准库取 H.264  │
+│                            交给网页端 WebCodecs（安卓用这条）  │
 │   app/bambu/tlsutil.py     打印机 TLS 上下文选择与记忆化       │
 │   app/bambu/probe.py       「测试连接」探测                    │
 │   app/bambu/models.py      机型识别、状态数据模型、报文解析    │
@@ -105,6 +107,9 @@
 **关键约束**：协议层不得 `import` 任何 Qt。`app/web/server.py` 只在转码时**延迟
 import** PySide6，因此无 Qt 的 Docker 也能跑（代价是转码失败，见 KNOWN_ISSUES）。
 `app/bambu/rtsp.py` 只在需要时延迟 import OpenCV，所以 `opencv-python` 是可选的。
+**没有 OpenCV 时 RTSPS 通道也不会退化成"没画面"**：改走 `app/bambu/rtsp_h264.py`
+（纯标准库取流、不在本机解码），码流经 `/api/live` 的 `KIND_H264` 记录交给
+网页端的 `VideoDecoder`。这是安卓版唯一的画面通路，详见 `KNOWN_ISSUES.md` §13。
 
 ## 2. 线程模型
 
@@ -115,6 +120,7 @@ import** PySide6，因此无 Qt 的 Docker 也能跑（代价是转码失败，�
 | `mqtt-<ip>` | `mqtt_worker.py:start()` | TLS 探测 + paho `loop_start()` 网络循环 | `MqttWorker.stop()` 置位并 join（5s） |
 | `camera-<name>` | `camera.py`（继承 Thread） | 6000 端口收帧 + 退避重连 | `PrinterSession._stop_streams()` join（3s） |
 | `rtsp-*` | `rtsp.py` | OpenCV 拉流 + 按目标尺寸编码 | 同上 |
+| `rtsp-h264-*` | `rtsp_h264.py`（继承 Thread） | 纯标准库拉 RTSPS，**不解码**，把 AVCC 访问单元交给网页端（无 OpenCV 时走这条） | `PrinterSession._stop_streams()`（与上两条同一处理） |
 | `video-setup-<ip>` | `printer.py:_spawn_video_thread()` | 建立视频通道（RTSPS 首帧最长等 20s） | `PrinterSession.stop()` join（2s，收在 `_video_threads`） |
 | `video-switch-<ip>` | 同上（看门狗触发） | 换道重试 | 同上 |
 | `video-watch-<ip>` | `printer.py:_video_watchdog()` | 每 15s 检查画面是否卡住、决定是否换道 | `_watchdog_stop` 事件 + join（2s） |
@@ -138,6 +144,11 @@ Qt 定时器按 `refresh_ms` 轮询，画面落后时旧帧直接丢弃。这样
 （桌面）`FrameDecoder` 解码后贴到 `VideoWidget`；（网页）`WebFrameCache` 缩放后
 由 `/api/live` 单连接多路复用推送。
 
+**视频（没有 OpenCV 时，安卓走的就是这条）**：打印机 → RTSPS →
+`RtspH264Client` 拆包成 AVCC 访问单元 → `PrinterSession.latest_h264()` →
+`/api/live` 的 `KIND_H264` 记录 → 网页端 `VideoDecoder` 解码 → `<canvas>`。
+这条通路**不在服务端解码**，因此不需要任何原生库。
+
 **控制**：界面/网页/命令行 → `PrinterSession.pause_print()` 等 →
 `MqttWorker.publish_command()` → `device/<序列号>/request`。
 **遥测不在线时一律拒绝下发**（`PrinterSession.can_control`）。
@@ -159,6 +170,8 @@ Qt 定时器按 `refresh_ms` 轮询，画面落后时旧帧直接丢弃。这样
 另外「6000 端口拒绝正确口令 + 遥测在线」也会触发换道。改这里的逻辑时请注意两条不变式：
 
 1. `video_channel == "rtsp"` 的机型**绝不能**退回 6000（那边必然失败）；
+   ⚠️ 这里曾经踩过：判据一度是「没有 OpenCV 就退 6000」，于是**安卓版永远没有画面**。
+   现在没有 OpenCV 会转 `_start_h264()`（见第 3 节），首选通道不变（`KNOWN_ISSUES.md` §13）；
 2. 换道必须经 `_spawn_video_thread()`，否则线程无法被 `stop()` 回收。
 
 ## 5. 配置与凭据

@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem 跑自动化测试（pytest）。用法：test.bat [pytest 参数]
 rem   例：test.bat -k web        只跑名字含 web 的用例
 rem       test.bat -m slow       只跑端到端慢测试（需先 set BAMBU_RUN_SLOW=1）

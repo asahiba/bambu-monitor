@@ -73,6 +73,8 @@ $must = @(
     "app\bambu\data\hms_zh_cn.json.gz",
     "app\headless.py",
     "app\web\server.py",
+    # 安卓版的画面通路：没有 OpenCV 时靠它取 RTSPS(322) 码流（缺了就是"永远没画面"）
+    "app\bambu\rtsp_h264.py",
     "device_server.py"
 )
 foreach ($m in $must) {

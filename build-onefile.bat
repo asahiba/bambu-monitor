@@ -7,6 +7,7 @@ rem
 rem 说明：打包成 --windowed 后没有控制台，因此 --help / --core-test 的输出
 rem       不会显示在控制台里（程序内部有兜底，不会崩）。要看命令行输出请用源码运行，
 rem       或查看 %APPDATA%\BambuMonitor\logs\app.log。详见 docs\PACKAGING.md。
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
