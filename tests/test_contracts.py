@@ -501,6 +501,65 @@ def test_配置文件字段向后兼容(tmp_path, monkeypatch):
     assert config.columns == 3
 
 
+def _fstring_backslash_lines(source: str) -> list[int]:
+    """找出「f-string 的替换字段里带反斜杠」的行号。
+
+    Python **3.12 之前**这是语法错误：
+        SyntaxError: f-string expression part cannot include a backslash
+    本项目要在 3.10 上跑（安卓版内嵌的就是 3.10），所以不能写这种代码。
+
+    为什么不能靠 ``ast.parse(..., feature_version=(3, 10))``：那条限制在 3.12 是
+    **词法/编译期**规则，``feature_version`` 不管它（实测照样通过）。
+    所以这里用 AST 反查：把替换字段的表达式 ``unparse`` 出来，看有没有反斜杠。
+    """
+    import ast as _ast
+
+    offenders: list[int] = []
+    tree = _ast.parse(source)
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.FormattedValue):
+            continue
+        try:
+            text = _ast.unparse(node.value)
+        except Exception:  # noqa: BLE001 - 反解析失败就别误报
+            continue
+        if "\\" in text:
+            offenders.append(getattr(node, "lineno", 0))
+    return offenders
+
+
+def test_fstring里不能出现只在_3_12_以上才合法的写法():
+    """契约：仓库里的代码必须能在 **Python 3.10** 上解析（安卓版就是 3.10）。
+
+    真实踩过的坑：`tools/web_check.py` 里写了
+    ``f"... {'id=\\"wall\\"' in html}"`` —— 3.12 起合法，3.10/3.11 直接
+    SyntaxError，CI 的 3.10 任务因此挂掉，而本地（3.13）一点问题都看不出来。
+    """
+    # 自证：这条必须被查出来（反斜杠出现在替换字段内部）
+    bad = "x = 1\ny = f\"{'a\\\\' in x}\"\n"
+    assert _fstring_backslash_lines(bad) == [2], "自证失败：没查出非法写法"
+    assert _fstring_backslash_lines('x = 1\nprint(f"a {x} b\\\\n")\n') == [], (
+        "反斜杠在替换字段**外面**是合法的，不该误报"
+    )
+
+    offenders: list[str] = []
+    for path in sorted(PROJECT_ROOT.rglob("*.py")):
+        if set(path.parts) & {".venv", "build", "dist", "dist-onefile", "android", "node_modules"}:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            lines = _fstring_backslash_lines(source)
+        except SyntaxError:
+            continue  # 语法问题由别的测试负责
+        offenders.extend(f"{path.relative_to(PROJECT_ROOT)}:{line}" for line in lines)
+    assert not offenders, (
+        "这些 f-string 在 3.12 之前是语法错误（安卓版跑 3.10）：" + "、".join(offenders)
+    )
+
+
 def test_文件名与命令入口未被改名():
     """契约：模块路径与入口是命令行、Docker、systemd、打包脚本的外部接口。"""
     for relative in (

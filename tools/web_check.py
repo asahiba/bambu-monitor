@@ -87,7 +87,13 @@ try:
     print("\n③ 首页 HTML")
     with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as response:
         html = response.read().decode("utf-8")
-    print(f"   状态码 {response.status}，{len(html)} 字节，包含监控墙容器：{'id=\"wall\"' in html}")
+        status_code = response.status
+    # ⚠️ 不能把带反斜杠的字符串字面量写进 f-string 的表达式里：
+    # Python 3.12 之前（本项目安卓版跑 3.10）会直接 SyntaxError
+    #     f-string expression part cannot include a backslash
+    # 曾经写成 f"... {'id=\"wall\"' in html}"，CI 的 3.10 任务因此挂掉。
+    has_wall = 'id="wall"' in html
+    print(f"   状态码 {status_code}，{len(html)} 字节，包含监控墙容器：{has_wall}")
 
     print("\n④ 单张快照 /api/frame/0")
     with urllib.request.urlopen(f"{base}/api/frame/0?token={TOKEN}", timeout=5) as response:

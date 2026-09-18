@@ -473,16 +473,16 @@ def test_网页端导入空内容给出可读提示(isolated_config_dir):
 
 
 def test_配置备份接口的令牌保护(web_server):
-    """契约：导出配置能拿到全部访问代码，必须同样受令牌保护。"""
+    """契约：导出配置能拿到全部访问代码，必须同样受令牌保护。
+
+    这条还顺带守住一个**只在 Windows 上暴露**的坑：服务端在没读完 POST 请求体
+    就回 401 时，keep-alive 连接里留下未读字节，客户端下一次写会撞上
+    WinError 10053「连接被主机中的软件中止」（Windows CI 就是这么炸的）。
+    见 `_Handler.do_POST` 的说明。
+    """
     base, _calls, _sessions = web_server
     for path in ("/api/config/export", "/api/config/import"):
         with pytest.raises(urllib.error.HTTPError) as info:
-            urllib.request.Request(
-                f"{base}{path}",
-                data=b"{}",
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
             urllib.request.urlopen(
                 urllib.request.Request(
                     f"{base}{path}",

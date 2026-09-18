@@ -218,6 +218,11 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "BambuMonitorWeb/1.0"
     protocol_version = "HTTP/1.1"
 
+    def __init__(self, *args, **kwargs) -> None:
+        #: POST 请求体缓存（一次读干净，见 do_POST 的说明）
+        self._raw_body: Optional[bytes] = None
+        super().__init__(*args, **kwargs)
+
     # ------------------------------------------------------------------ 工具
     @property
     def app(self) -> "WebServer":
@@ -710,10 +715,17 @@ class _Handler(BaseHTTPRequestHandler):
 
         * ``POST /api/command``       ``{"index":0,"action":"pause"}``
         * ``POST /api/add_printer``   ``{"name":"","ip":"","access_code":""}``
+
+        ⚠️ **先读掉请求体再决定怎么回**：HTTP/1.1 默认 keep-alive，如果我们在
+        没读完 body 的情况下就回错误（401 / 501 / 404），连接里会留下未读字节 ——
+        客户端下一次写就会撞上「连接被主机中的软件中止」（Windows =
+        ``ConnectionAbortedError: [WinError 10053]``），用户看到的是"网页请求
+        随机失败"。Windows 上的 CI 就是这么炸的（Linux 表现不同，所以本地一直没暴露）。
         """
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         path = parsed.path.rstrip("/") or "/"
+        self._read_raw_body()
         if not self._authorized(query):
             self._send_bytes(
                 json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
@@ -743,11 +755,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_bytes(b"not found", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
             return
         try:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-        except ValueError:
-            length = 0
-        try:
-            body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            body = json.loads(self._read_raw_body().decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._send_bytes(b'{"ok":false,"detail":"bad json"}', "application/json", HTTPStatus.BAD_REQUEST)
             return
@@ -1064,14 +1072,33 @@ class _Handler(BaseHTTPRequestHandler):
             HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
         )
 
-    def _read_json_body(self) -> Optional[dict]:
-        """读并解析请求体；格式不对返回 None（调用方回 400）。"""
+    def _read_raw_body(self) -> bytes:
+        """把请求体读进来缓存（一次），供后续解析。
+
+        上限 8 MB：网页端最大的请求体是「导入配置」，十来台设备也就几十 KB；
+        给一个上限可以避免构造出来的畸形 Content-Length 把内存吃满。
+        """
+        if self._raw_body is not None:
+            return self._raw_body
         try:
             length = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
             length = 0
+        length = max(0, min(length, 8 * 1024 * 1024))
+        data = b""
+        if length:
+            try:
+                data = self.rfile.read(length)
+            except OSError:
+                data = b""
+        self._raw_body = data
+        return data
+
+    def _read_json_body(self) -> Optional[dict]:
+        """读并解析请求体；格式不对返回 None（调用方回 400）。"""
+        raw = self._read_raw_body()
         try:
-            parsed = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            parsed = json.loads(raw.decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             return None
         return parsed if isinstance(parsed, dict) else None
