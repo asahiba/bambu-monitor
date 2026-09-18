@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
+from app import config
 from app.bambu.models import PrinterInfo, PrinterModel, PrinterStatus
 from app.config import AppConfig
 from app.web.host import SETTINGS_SPEC, WebHost
@@ -345,3 +347,242 @@ def test_宿主对越界索引给出可读提示(isolated_config_dir):
     result = host.manage_printer(index=3, action="remove")
     assert result["ok"] is False
     assert "共 0 台" in result["detail"]
+
+
+# --------------------------------------------------------------------------- 配置备份（跨版本）
+
+
+class _FakeSessionFactory:
+    """替身会话工厂：`import_config_text` 会用它重建会话列表。"""
+
+    def __init__(self, monkeypatch):
+        self.created: list = []
+        self.sessions_created: list = []
+        monkeypatch.setattr("app.bambu.printer.PrinterSession", self)
+
+    def __call__(self, info):
+        self.created.append(info)
+        session = _StubSession(info)
+        self.sessions_created.append(session)
+        return session
+
+
+class _StubSession:
+    """替身会话本体（只实现宿主会用到的方法）。"""
+
+    def __init__(self, info) -> None:
+        self.info = info
+
+    def set_max_fps(self, fps):  # noqa: D102
+        pass
+
+    def start(self):  # noqa: D102
+        self.started = True
+
+    def stop(self):  # noqa: D102
+        self.stopped = True
+
+
+def test_网页端导出配置返回可导入的内容(isolated_config_dir):
+    """契约：网页/安卓端也能导出配置（以前只有桌面版有菜单项）。"""
+    cfg = AppConfig()
+    cfg.printers = [PrinterInfo(ip="192.168.1.50", name="测试机", access_code="12345678")]
+    host = WebHost(cfg, lambda: [])
+
+    result = host.export_config_text()
+    assert result["ok"] is True
+    assert result["printers"] == 1
+    text = result["json"]
+    assert "192.168.1.50" in text
+
+    # 生成的内容必须能被「另一台机器」导入
+    fresh = AppConfig()
+    target = Path(config.config_dir()) / "from-web.json"
+    target.write_text(text, encoding="utf-8")
+    assert fresh.import_from(str(target)) is True
+    assert fresh.printers[0].access_code == "12345678"
+
+
+def test_网页端带口令导出可在任何版本导入(isolated_config_dir):
+    """契约：网页端也能带口令导出 —— 安卓版就靠这条把配置搬到别的机器。"""
+    cfg = AppConfig()
+    cfg.printers = [PrinterInfo(ip="192.168.1.50", name="测试机", access_code="12345678")]
+    host = WebHost(cfg, lambda: [])
+
+    result = host.export_config_text("共享口令")
+    assert result["ok"] is True and result["portable"] is True
+    assert "12345678" not in result["json"], "带口令导出不得出现明文访问代码"
+
+    fresh = AppConfig()
+    target = Path(config.config_dir()) / "web-portable.json"
+    target.write_text(result["json"], encoding="utf-8")
+    assert fresh.import_from(str(target), "共享口令") is True
+    assert fresh.printers[0].access_code == "12345678"
+
+
+def test_网页端导入配置会替换设备并重建会话(isolated_config_dir, monkeypatch):
+    """契约：导入 = 用文件里的设备替换当前配置，并立刻重建会话（不用重启服务）。"""
+    factory = _FakeSessionFactory(monkeypatch)
+    cfg = AppConfig()
+    cfg.printers = [PrinterInfo(ip="192.168.1.50", name="旧机", access_code="12345678")]
+    old_session = FakeSession(ip="192.168.1.50", name="旧机")
+    sessions = [old_session]
+    host = WebHost(cfg, lambda: sessions)
+
+    source = AppConfig()
+    source.printers = [
+        PrinterInfo(ip="10.0.0.9", name="导进来的", access_code="87654321"),
+        PrinterInfo(ip="10.0.0.10", name="第二台", access_code="11112222"),
+    ]
+    payload = source.to_json("pw")
+
+    result = host.import_config_text(payload, "pw")
+    assert result["ok"] is True, result
+    assert result["printers"] == 2
+    assert old_session.stopped is True, "旧会话必须停掉"
+    assert [info.ip for info in cfg.printers] == ["10.0.0.9", "10.0.0.10"]
+    assert [session.info.ip for session in sessions] == ["10.0.0.9", "10.0.0.10"]
+    assert AppConfig.load().printers[0].ip == "10.0.0.9", "必须落盘"
+
+
+def test_网页端导入口令错时报错且不动现有配置(isolated_config_dir, monkeypatch):
+    factory = _FakeSessionFactory(monkeypatch)
+    cfg = AppConfig()
+    cfg.printers = [PrinterInfo(ip="192.168.1.50", name="旧机", access_code="12345678")]
+    sessions = [FakeSession()]
+    host = WebHost(cfg, lambda: sessions)
+
+    source = AppConfig()
+    source.printers = [PrinterInfo(ip="10.0.0.9", name="导进来的", access_code="87654321")]
+    payload = source.to_json("pw")
+
+    result = host.import_config_text(payload, "错的")
+    assert result["ok"] is False
+    assert "口令" in result["detail"]
+    assert [info.ip for info in cfg.printers] == ["192.168.1.50"], "现有配置不能被破坏"
+    assert factory.created == [], "不该建任何会话"
+
+
+def test_网页端导入空内容给出可读提示(isolated_config_dir):
+    host = WebHost(AppConfig(), lambda: [])
+    result = host.import_config_text("   ")
+    assert result["ok"] is False and result["detail"]
+
+
+# --------------------------------------------------------------------------- 配置备份的 HTTP 接口
+
+
+def test_配置备份接口的令牌保护(web_server):
+    """契约：导出配置能拿到全部访问代码，必须同样受令牌保护。"""
+    base, _calls, _sessions = web_server
+    for path in ("/api/config/export", "/api/config/import"):
+        with pytest.raises(urllib.error.HTTPError) as info:
+            urllib.request.Request(
+                f"{base}{path}",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{base}{path}",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            )
+        assert info.value.code == 401
+
+
+def test_不支持时接口返回501而不是500(web_server):
+    """契约：宿主没注入回调时要明确说"不支持"（前端据此给出可读提示）。"""
+    base, _calls, _sessions = web_server
+    status, data = _post(base, "/api/config/export", {})
+    assert status == 501
+    assert data["supported"] is False
+    status, data = _post(base, "/api/config/import", {"json": "{}"})
+    assert status == 501
+
+
+# --------------------------------------------------------------------------- 通道诊断（网页/安卓）
+
+
+def test_网页端能跑通道诊断并返回报告(isolated_config_dir, monkeypatch):
+    """契约：桌面端有「通道诊断」对话框，网页/安卓端也要能诊断。
+
+    平板上没法跑 `tools/diagnose.py`；而"画面出不来"正是最需要诊断的场景。
+    这里把共用流程（`app/bambu/diagnostics.py`）打成桩，只验证编排与返回结构。
+    """
+    from app.bambu import diagnostics
+
+    monkeypatch.setattr(
+        diagnostics,
+        "run",
+        lambda *a, **k: iter(
+            [
+                diagnostics.SectionStart("① 端口连通性"),
+                diagnostics.SectionLines(["   8883 MQTT 遥测: 可连接 ✓"]),
+                diagnostics.SectionStart("③ 6000 端口画面"),
+                diagnostics.SectionLines(["   成功 ✓ 取得 32 KB 画面（0.1s）"]),
+            ]
+        ),
+    )
+    session = FakeSession()
+    session.info.access_code = "12345678"
+    host = WebHost(AppConfig(), lambda: [session])
+
+    result = host.diagnose(0)
+    assert result["ok"] is True
+    assert result["sections"][0]["title"] == "① 端口连通性"
+    assert "可连接" in result["sections"][0]["lines"][0]
+    assert result["sections"][1]["lines"] == ["   成功 ✓ 取得 32 KB 画面（0.1s）"]
+    assert result["tail"], "要给收尾提示（401 说明 RTSP 服务是活的）"
+
+
+def test_网页端诊断缺访问代码时给出可执行提示(isolated_config_dir):
+    session = FakeSession()
+    session.info.access_code = ""
+    host = WebHost(AppConfig(), lambda: [session])
+    result = host.diagnose(0)
+    assert result["ok"] is False
+    assert "访问代码" in result["detail"]
+
+
+def test_网页端诊断索引越界(isolated_config_dir):
+    host = WebHost(AppConfig(), lambda: [])
+    result = host.diagnose(3)
+    assert result["ok"] is False and "共 0 台" in result["detail"]
+
+
+# --------------------------------------------------------------------------- 画面大小
+
+
+def test_网页端可以设置重点画面(isolated_config_dir):
+    """契约：网页/安卓端能把这台设备设成重点画面（2×2），桌面端原有能力）。"""
+    session = FakeSession(ip="192.168.1.50")
+    cfg = AppConfig()
+    cfg.printers = [PrinterInfo(ip="192.168.1.50", name="测试机", access_code="12345678")]
+    host = WebHost(cfg, lambda: [session])
+
+    result = host.set_tile_span(0, 2)
+    assert result["ok"] is True
+    assert session.info.tile_span == 2
+    assert AppConfig.load().printers[0].tile_span == 2, "必须落盘（重启后要保住）"
+
+    assert host.set_tile_span(0, 1)["ok"] is True
+    assert AppConfig.load().printers[0].tile_span == 1
+
+    # 越界取值会被夹住，而不是写进非法值
+    host.set_tile_span(0, 9)
+    assert session.info.tile_span == 3
+
+
+def test_网页端诊断与布局接口在不支持时返回501(web_server):
+    base, _calls, _sessions = web_server
+    with pytest.raises(urllib.error.HTTPError) as info:
+        urllib.request.urlopen(f"{base}/api/diagnose?index=0&token=secret", timeout=10)
+    assert info.value.code == 501
+    status, data = _post(base, "/api/layout", {"index": 0, "span": 2})
+    assert status == 501
+    assert data["supported"] is False

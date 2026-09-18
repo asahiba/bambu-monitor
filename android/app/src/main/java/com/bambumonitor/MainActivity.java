@@ -3,6 +3,7 @@ package com.bambumonitor;
 import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -10,6 +11,7 @@ import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -52,6 +54,12 @@ public class MainActivity extends AppCompatActivity {
 
     /** 启动超时（毫秒）。首次启动要解压 Python 运行时与依赖，给足时间。 */
     public static final long START_TIMEOUT_MS = 60_000L;
+
+    /** 网页里 {@code <input type="file">} 的请求码（导入配置文件用）。 */
+    private static final int FILE_CHOOSER_REQUEST = 1001;
+
+    /** 正在等待结果的文件选择回调；没有请求时为 null。 */
+    private ValueCallback<Uri[]> fileCallback;
 
     private FrameLayout webContainer;
     private LinearLayoutSplash splash;
@@ -265,7 +273,35 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         });
-        view.setWebChromeClient(new WebChromeClient());
+        view.setWebChromeClient(new WebChromeClient() {
+            /**
+             * 让网页里的 {@code <input type="file">} 能用。
+             *
+             * <p>为什么必须要：网页端的「导入配置」有一个「从文件读取…」按钮
+             * （选 .json 配置文件）。**WebView 默认不实现文件选择** ——
+             * 不写这个回调，用户点下去毫无反应，而"配置能不能在平板上导入"
+             * 正是我们要保证的事（见 app/web/page.py 的配置备份区块）。
+             */
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (fileCallback != null) {
+                    fileCallback.onReceiveValue(null);  // 上一次没结束：先还回去
+                }
+                fileCallback = callback;
+                try {
+                    Intent intent = params.createIntent();
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+                    return true;
+                } catch (Exception exc) {
+                    fileCallback = null;
+                    Toast.makeText(MainActivity.this,
+                            "无法打开文件选择器：" + exc, Toast.LENGTH_LONG).show();
+                    return false;
+                }
+            }
+        });
 
         webContainer.addView(view);
         webView = view;
@@ -329,6 +365,37 @@ public class MainActivity extends AppCompatActivity {
             return true;
         }
         return super.onKeyDown(keyCode, event);
+    }
+
+    /**
+     * 文件选择器返回结果 → 交回给网页（见 {@code onShowFileChooser}）。
+     *
+     * <p>不管结果如何都必须回调一次：`ValueCallback` 只有在被调用后才会释放，
+     * 否则下次再点「从文件读取…」会被 WebView 忽略。
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            Uri[] results = null;
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    // 多选（我们只用到单选，但按规范处理，避免拿到 null）
+                    int count = data.getClipData().getItemCount();
+                    results = new Uri[count];
+                    for (int index = 0; index < count; index++) {
+                        results[index] = data.getClipData().getItemAt(index).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    results = new Uri[]{data.getData()};
+                }
+            }
+            if (fileCallback != null) {
+                fileCallback.onReceiveValue(results);
+                fileCallback = null;
+            }
+            return;  // 这个请求码归我们处理，不再交给父类
+        }
+        super.onActivityResult(requestCode, resultCode, data);
     }
 
     @Override

@@ -21,7 +21,13 @@ import pkgutil
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QInputDialog,
+    QMessageBox,
+)
 
 from app.bambu.models import HmsItem, PrinterInfo, PrinterModel  # noqa: E402
 from app.config import AppConfig  # noqa: E402
@@ -78,6 +84,11 @@ def test_main_window_click_slots_do_not_raise(window, tmp_path, monkeypatch):
         QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(target), "JSON"))
     )
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    # 「导出/导入配置」现在会问一个可选口令（QInputDialog 是模态的，
+    # offscreen 下不替换就会一直卡住）—— 这里给空口令 = 旧的导出方式
+    monkeypatch.setattr(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("", True))
+    )
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
 
     window.save_config_now()

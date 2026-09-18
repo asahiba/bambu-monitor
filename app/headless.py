@@ -384,6 +384,14 @@ def run_headless(argv: list[str] | None = None) -> int:
         manage_printer_fn=host.manage_printer,
         get_settings_fn=host.get_settings,
         update_settings_fn=host.update_settings,
+        # 配置备份：网页/安卓端也能导出导入（带口令的文件跨版本通用）
+        export_config_fn=host.export_config_text,
+        import_config_fn=host.import_config_text,
+        # 通道诊断与画面大小：桌面端有的能力，网页/安卓端也要有
+        # （平板上没法跑 tools/diagnose.py）
+
+        diagnose_fn=host.diagnose,
+        layout_fn=host.set_tile_span,
         # 网页端要能显示自己的令牌与局域网地址（安卓版没有终端，
         # 启动时这几行它看不到，只能靠界面提供）
         info_fn=host.info,

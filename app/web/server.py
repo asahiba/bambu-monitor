@@ -249,6 +249,22 @@ class _Handler(BaseHTTPRequestHandler):
         return self.app.update_settings_fn
 
     @property
+    def export_config_fn(self):
+        return self.app.export_config_fn
+
+    @property
+    def import_config_fn(self):
+        return self.app.import_config_fn
+
+    @property
+    def diagnose_fn(self):
+        return self.app.diagnose_fn
+
+    @property
+    def layout_fn(self):
+        return self.app.layout_fn
+
+    @property
     def info_fn(self):
         return self.app.info_fn
 
@@ -323,6 +339,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._manifest()
         elif path == "/api/info":
             self._info()
+        elif path == "/api/diagnose":
+            self._diagnose(query)
         elif path == "/sw.js":
             self._send_bytes(SERVICE_WORKER_JS.encode("utf-8"), "text/javascript; charset=utf-8")
         elif path in ("/favicon.ico", "/icon-192.png", "/icon-512.png",
@@ -707,6 +725,15 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             self._settings()
             return
+        if path == "/api/config/export":
+            self._config_export()
+            return
+        if path == "/api/config/import":
+            self._config_import()
+            return
+        if path == "/api/layout":
+            self._layout()
+            return
         if path != "/api/command":
             self._send_bytes(b"not found", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
             return
@@ -882,6 +909,156 @@ class _Handler(BaseHTTPRequestHandler):
             HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
         )
 
+    def _config_export(self) -> None:
+        """``POST /api/config/export`` ``{"passphrase": ""}`` → ``{ok, json, portable}``
+
+        网页与安卓端导出配置。带口令时导出的文件**在任何版本都能导入**
+        （Windows / Linux / Docker / 安卓都用同一套标准库算法，见
+        `app/util/secret.py` 的 PortableCipher）。
+        """
+        if self.export_config_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不支持导出配置"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body() or {}
+        passphrase = str(body.get("passphrase", "") or "")
+        try:
+            result = self.export_config_fn(passphrase)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _config_import(self) -> None:
+        """``POST /api/config/import`` ``{"json": "...", "passphrase": ""}``
+
+        导入会**停掉旧会话并按新配置重建**，所以界面上要提示"会重连"。
+        """
+        if self.import_config_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不支持导入配置"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        text = body.get("json", "")
+        if not isinstance(text, str):
+            # 也接受直接传对象（前端有时会先把内容 parse 过）
+            try:
+                text = json.dumps(body.get("config", {}), ensure_ascii=False)
+            except (TypeError, ValueError):
+                text = ""
+        passphrase = str(body.get("passphrase", "") or "")
+        try:
+            result = self.import_config_fn(text, passphrase)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _diagnose(self, query: dict) -> None:
+        """``GET /api/diagnose?index=N``：跑一遍只读诊断并返回报告。
+
+        桌面端的「通道诊断」对话框走的是同一份实现
+        （`app/bambu/diagnostics.py`），所以三处（桌面 / 网页 / 命令行）
+        给出的结论必然一致。
+        """
+        if self.diagnose_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不支持在网页上做通道诊断"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        try:
+            index = int((query.get("index", ["-1"])[0] or "-1"))
+        except ValueError:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "index 不合法"}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.diagnose_fn(index)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _layout(self) -> None:
+        """``POST /api/layout`` ``{"index": 0, "span": 2}``：设置画面占几格。"""
+        if self.layout_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"supported": False, "detail": "该运行方式不支持在网页上调整画面大小"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            index = int(body.get("index", -1))
+            span = int(body.get("span", 1))
+        except (TypeError, ValueError):
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "参数不合法"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.layout_fn(index, span)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
     def _read_json_body(self) -> Optional[dict]:
         """读并解析请求体；格式不对返回 None（调用方回 400）。"""
         try:
@@ -1012,6 +1189,10 @@ class WebServer:
         manage_printer_fn: Optional[Callable[..., dict]] = None,
         get_settings_fn: Optional[Callable[[], dict]] = None,
         update_settings_fn: Optional[Callable[[dict], dict]] = None,
+        export_config_fn: Optional[Callable[..., dict]] = None,
+        import_config_fn: Optional[Callable[..., dict]] = None,
+        diagnose_fn: Optional[Callable[..., dict]] = None,
+        layout_fn: Optional[Callable[..., dict]] = None,
         info_fn: Optional[Callable[[int], dict]] = None,
     ) -> None:
         self.get_sessions = get_sessions
@@ -1029,6 +1210,14 @@ class WebServer:
         self.manage_printer_fn = manage_printer_fn
         self.get_settings_fn = get_settings_fn
         self.update_settings_fn = update_settings_fn
+        #: 配置备份（导出/导入）。网页与安卓端以前完全没有这个能力，
+        #: 只能靠桌面版菜单 —— 平板上既备份不了、也搬不进去。
+        self.export_config_fn = export_config_fn
+        self.import_config_fn = import_config_fn
+        #: 通道诊断（桌面端有对话框，网页/安卓端靠这两个回调补上）
+        self.diagnose_fn = diagnose_fn
+        #: 画面布局（重点画面 2×2）
+        self.layout_fn = layout_fn
         #: 连接信息（令牌 + 局域网地址）。参数是服务端口。
         self.info_fn = info_fn
         #: 记住画面最大宽度：start() 重建转码线程时要原样恢复（否则重启后静默退回默认值）

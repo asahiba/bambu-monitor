@@ -3,10 +3,27 @@
 访问代码的存储见 `app/util/secret.py`：Windows 用 DPAPI，其它平台（Linux /
 Docker / NAS）在本机密钥可用时用「密钥文件 + Fernet」，都不可用时才退回明文
 （安卓 APK 不含 ``cryptography``，属于最后一种）。
+
+## 导出的配置文件为什么要有「口令」这一档
+
+本机加密天然**不可移植**：Windows 导出的 `dpapi:` 在 Linux/安卓上解不开，
+Linux 导出的 `fernet:` 换台机器也解不开。于是「在电脑上导出、在安卓上导入」
+这条最自然的用法会丢掉全部访问代码。
+
+所以导出时可以选择**用口令保护**（`app/util/secret.py` 的 :class:`PortableCipher`，
+只用标准库，安卓也能解），导出的文件在任意版本、任意平台都能导入：
+
+| 导出方式 | 文件里的访问代码 | 能在哪里导入 |
+| --- | --- | --- |
+| 不带口令（旧行为） | 本机加密（`dpapi:` / `fernet:`）或明文 | **同一台机器/同一用户**；跨平台只能重新填访问代码 |
+| 带口令（推荐） | `bmp1:` 口令加密 | **任何平台、任何版本**（Windows / Linux / Docker / 安卓） |
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import copy
 import json
 import logging
 import os
@@ -18,6 +35,9 @@ from .util import secret
 
 APP_NAME = "BambuMonitor"
 LOGGER = logging.getLogger("bambu-monitor.config")
+
+#: 导出文件的格式版本。1（或没有该字段）= 老格式；2 = 带 ``format``/``portable`` 标记
+EXPORT_FORMAT = 2
 
 
 def _new_token() -> str:
@@ -198,10 +218,18 @@ class AppConfig:
             fallback.last_error = f"配置无法读取（{last_problem}），已使用默认设置"
         return fallback
 
-    def to_json(self) -> str:
-        """序列化当前配置（访问代码加密后写入，见 `app/util/secret.py`）。"""
+    def to_json(self, passphrase: str = "") -> str:
+        """序列化当前配置。
+
+        :param passphrase: 非空时，访问代码改用**口令加密**（`bmp1:` 前缀）——
+            这样导出的文件在**任何版本、任何平台**都能导入（Windows / Linux /
+            Docker / 安卓）。留空则按本机方式加密（旧行为，只在本机能解）。
+        """
         secret.clear_last_error()
+        portable = bool(passphrase)
         data: dict[str, Any] = {
+            "format": EXPORT_FORMAT if portable else 1,
+            "portable": portable,
             "printers": [],
             "columns": self.columns,
             "window_geometry": self.window_geometry,
@@ -216,10 +244,13 @@ class AppConfig:
             "web_fps": self.web_fps,
             "web_max_width": self.web_max_width,
         }
+        # 一份文件里可能有十几台设备：只派生一次密钥（PBKDF2 20 万次要几百毫秒）
+        cipher = secret.PortableCipher(passphrase) if portable else None
         for printer in self.printers:
             item = asdict(printer)
             item["model"] = printer.model.value
-            item["access_code"] = secret.encrypt_text(printer.access_code)
+            code = printer.access_code or ""
+            item["access_code"] = cipher.encrypt(code) if cipher else secret.encrypt_text(code)
             data["printers"].append(item)
         return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -264,12 +295,22 @@ class AppConfig:
         if warning:
             self.warnings = warning
 
-    def export_to(self, path: str) -> bool:
+    def export_to(self, path: str, passphrase: str = "") -> bool:
+        """导出到文件。
+
+        :param passphrase: 非空时用口令保护访问代码（**跨版本/跨平台可导入**）；
+            留空则按本机方式加密 —— 那种文件换机器/换用户后访问代码要重填。
+        """
         self.last_error = ""
         self.warnings = ""
         try:
+            payload = self.to_json(passphrase)
+        except ValueError as exc:  # 例如口令为空字符串之外的问题
+            self.last_error = f"配置导出失败：{exc}"
+            return False
+        try:
             with open(path, "w", encoding="utf-8") as handle:
-                handle.write(self.to_json())
+                handle.write(payload)
         except OSError as exc:
             LOGGER.error("配置导出失败：%s", exc)
             self.last_error = f"配置导出失败：{exc}"
@@ -279,13 +320,36 @@ class AppConfig:
             self.warnings = warning
         return True
 
-    def import_from(self, path: str) -> bool:
-        """从导出的配置里恢复设置（访问代码需为同一 Windows 用户加密的）。
+    @staticmethod
+    def needs_passphrase(path: str) -> bool:
+        """这个导出文件是不是**用口令加密**的（导入前据此决定要不要问口令）。
 
-        这里以前只恢复 printers/columns/max_fps/refresh_ms/web_*，
-        而 ``to_json()`` 写出的 ``last_timeout`` / ``show_timestamp`` /
-        ``auto_connect`` / ``web_enabled`` 在导入后被**静默丢弃** ——
-        用户「导出再导入」后界面偏好并没有跟着回来，看起来像导入了一半。
+        读不到或不是 JSON 时返回 False —— 真正的错误留给 :meth:`import_from` 报。
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return False
+        return _is_portable_file(data)
+
+    def import_from(self, path: str, passphrase: str = "") -> bool:
+        """从导出的配置里恢复设置。
+
+        ## 三种文件都能导入
+
+        * **口令加密**（``portable: true``）：必须给对 ``passphrase``，
+          任何平台/版本都能解（Windows / Linux / Docker / 安卓）；
+        * **本机加密**（`dpapi:` / `fernet:`）：只有本机能解 —— 解不开的设备会被
+          逐个点名，并提示「下次导出时带口令」；
+        * **明文**：原样导入（安卓的降级存储、以及 `export_plain_config.py` 的产物）。
+
+        ## 以前的问题
+
+        这里只恢复 printers/columns/max_fps/refresh_ms/web_*，而 ``to_json()``
+        写出的 ``last_timeout`` / ``show_timestamp`` / ``auto_connect`` /
+        ``web_enabled`` 在导入后被**静默丢弃** —— 用户「导出再导入」后界面偏好
+        并没有跟着回来，看起来像导入了一半。
 
         ``window_geometry`` 仍然**不导入**：那是屏幕坐标，从 4K 机器导到小屏
         笔记本上会把窗口恢复到屏幕外（用户看到的是「导入配置后程序打不开了」）。
@@ -299,6 +363,22 @@ class AppConfig:
             LOGGER.error("配置导入失败：%s", exc)
             self.last_error = f"配置导入失败：{exc}"
             return False
+
+        undecryptable: list[str] = []
+        if _is_portable_file(data):
+            if not passphrase:
+                self.last_error = (
+                    "这个配置文件是用口令加密的：请在导入时输入当初导出所用的口令"
+                )
+                return False
+            data, undecryptable, total = _decrypt_portable_printers(data, passphrase)
+            if total and len(undecryptable) == total:
+                # 全部解不开 = 口令不对（或文件被改过），不要静默导入成空凭据
+                self.last_error = "口令不对，或配置文件被修改过，无法导入"
+                return False
+        else:
+            undecryptable = _unreadable_local_codes(data)
+
         try:
             loaded = _parse(data)
         except Exception as exc:  # noqa: BLE001 - 导入外部文件更不能让程序崩
@@ -308,7 +388,7 @@ class AppConfig:
         if not loaded.printers:
             return False
         # 导入成功；原文件里的凭据解不开只是提示（用户重填即可），不算导入失败
-        self.warnings = loaded.warnings
+        self.warnings = _join_warnings(loaded.warnings, _undecryptable_hint(undecryptable, data))
         self.printers = loaded.printers
         self.columns = loaded.columns
         self.show_timestamp = loaded.show_timestamp
@@ -324,3 +404,89 @@ class AppConfig:
         self.web_fps = loaded.web_fps
         self.web_max_width = loaded.web_max_width
         return True
+
+
+def _is_portable_file(data: Any) -> bool:
+    """是不是「口令加密」的导出文件。"""
+    if not isinstance(data, dict) or not data.get("portable"):
+        return False
+    try:
+        return int(data.get("format", 1) or 1) >= EXPORT_FORMAT
+    except (TypeError, ValueError):
+        return True  # 有 portable 标记但 format 写坏了：按口令加密处理更安全
+
+
+def _portable_salt(blob: str) -> bytes | None:
+    """从一条 ``bmp1:盐:nonce:密文:认证码`` 里取出盐。"""
+    parts = blob.split(":")
+    if len(parts) != 5:
+        return None
+    try:
+        return base64.b64decode(parts[1], validate=True)
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _decrypt_portable_printers(data: dict, passphrase: str) -> tuple[dict, list[str], int]:
+    """把 ``data`` 里口令加密的访问代码解开。
+
+    :returns: ``(新的 data, 解不开的设备名, 口令加密的设备总数)``
+
+    一份文件只派生一次密钥（同一把盐），所以先拿第一条凭据的盐建 cipher；
+    盐不一致说明文件被拼过，那条会解不开并被告知。
+    """
+    result = copy.deepcopy(data)
+    printers = result.get("printers")
+    if not isinstance(printers, list):
+        return result, [], 0
+    blobs = [
+        (item, str(item.get("access_code", "")))
+        for item in printers
+        if isinstance(item, dict) and secret.is_portable(str(item.get("access_code", "")))
+    ]
+    if not blobs:
+        return result, [], 0
+    salt = _portable_salt(blobs[0][1])
+    if salt is None:
+        return result, [str(item.get("name") or item.get("ip") or "?") for item, _ in blobs], len(blobs)
+    cipher = secret.PortableCipher(passphrase, salt)
+    failed: list[str] = []
+    for item, blob in blobs:
+        try:
+            item["access_code"] = cipher.decrypt(blob)
+        except ValueError:
+            item["access_code"] = ""
+            failed.append(str(item.get("name") or item.get("ip") or "?"))
+    return result, failed, len(blobs)
+
+
+def _unreadable_local_codes(data: dict) -> list[str]:
+    """找出「文件里有凭据、但本机解不开」的设备名（换机器/换用户的典型症状）。"""
+    printers = data.get("printers") if isinstance(data, dict) else None
+    if not isinstance(printers, list):
+        return []
+    names: list[str] = []
+    for item in printers:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("access_code", ""))
+        if raw and secret.is_encrypted(raw) and not secret.decrypt_text(raw):
+            names.append(str(item.get("name") or item.get("ip") or "?"))
+    return names
+
+
+def _undecryptable_hint(names: list[str], data: dict) -> str:
+    """凭据解不开时给用户的话（要说清原因与**下次怎么做**）。"""
+    if not names:
+        return ""
+    shown = "、".join(names[:5]) + ("…" if len(names) > 5 else "")
+    return (
+        f"有 {len(names)} 台设备的访问代码在本机解不开（{shown}）："
+        "它们是**在别的机器或别的用户下加密**的，需要在设置里重新填写。\n"
+        "下次导出时请输入一个口令（导出文件就会带口令保护），"
+        "带口令的配置文件可以在任何版本、任何平台导入（Windows / Linux / Docker / 安卓）。"
+    )
+
+
+def _join_warnings(*parts: str) -> str:
+    return "；".join(part for part in parts if part)

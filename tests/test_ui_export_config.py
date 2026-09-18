@@ -17,7 +17,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QFileDialog  # noqa: E402
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 from app.bambu.models import PrinterInfo, PrinterModel  # noqa: E402
 from app.config import AppConfig  # noqa: E402
@@ -25,6 +25,43 @@ from app.config import AppConfig  # noqa: E402
 
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+def _stub_passphrase_prompt(monkeypatch, value: str = "") -> list[str]:
+    """把「导出/导入配置」的口令输入框替换成固定答案。
+
+    ⚠️ 不替换的话测试会**卡住不动**：`QInputDialog.getText` 是模态的，
+    在 offscreen 下没人能点确定。返回的列表会记下每次被问到的提示语。
+    """
+    asked: list[str] = []
+
+    def fake_get_text(parent, title, label, *args, **kwargs):  # noqa: ANN001
+        asked.append(label)
+        return value, True
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(fake_get_text))
+    return asked
+
+
+def _stub_message_boxes(monkeypatch) -> list[tuple[str, str]]:
+    """把消息框换成记录器（同样是模态的，不替换就会卡住）。
+
+    返回 ``[(标题, 正文), …]``。导出成功后界面会弹一个说明框（告诉用户这份文件
+    能不能拿到别的设备上用），所以凡是要走导出路径的测试都必须先替换掉它。
+    """
+    seen: list[tuple[str, str]] = []
+
+    def fake_information(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        seen.append((str(title), str(text)))
+        return QMessageBox.Ok
+
+    def fake_warning(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        seen.append((str(title), str(text)))
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(fake_information))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(fake_warning))
+    return seen
 
 
 def _make_window(tmp_path, monkeypatch):
@@ -57,6 +94,8 @@ def test_export_config_button_writes_file(tmp_path, monkeypatch, isolated_config
         "getSaveFileName",
         staticmethod(lambda *args, **kwargs: (str(target), "JSON 文件 (*.json)")),
     )
+    _stub_passphrase_prompt(monkeypatch)  # 口令留空 = 旧的「只在本机可恢复」导出
+    _stub_message_boxes(monkeypatch)
     try:
         window.export_config()
     finally:
@@ -64,6 +103,44 @@ def test_export_config_button_writes_file(tmp_path, monkeypatch, isolated_config
 
     assert target.exists(), "导出按钮没有生成文件"
     assert target.stat().st_size > 0
+
+
+def test_export_config_带口令导出可在别的机器导入(tmp_path, monkeypatch, isolated_config_dir):
+    """回归：界面上「输入口令」导出的文件，必须能在一台**没有本机密钥**的机器上导入。
+
+    这是「导出的配置文件在所有版本都可用」的界面入口：不带口令时访问代码按本机方式
+    加密（Windows 是 DPAPI，绑定当前用户），换到安卓/别的电脑就解不开。
+    """
+    window = _make_window(tmp_path, monkeypatch)
+    target = tmp_path / "portable.json"
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *args, **kwargs: (str(target), "JSON 文件 (*.json)")),
+    )
+    asked = _stub_passphrase_prompt(monkeypatch, "我的口令")
+    _stub_message_boxes(monkeypatch)
+    try:
+        window.export_config()
+    finally:
+        window.close()
+
+    assert len(asked) == 2, "应当问两次（输入 + 确认）"
+    raw = target.read_text(encoding="utf-8")
+    assert "12345670" not in raw, "带口令导出时不得出现明文访问代码"
+    assert "bmp1:" in raw
+
+    # 模拟「换一台机器」：新配置对象 + 显式口令导入（中间不碰本机密钥）
+    fresh = AppConfig()
+    assert AppConfig.needs_passphrase(str(target)) is True
+    assert fresh.import_from(str(target), "我的口令") is True
+    assert [info.access_code for info in fresh.printers] == ["12345670", "12345671", "12345672"]
+
+    # 没给口令 / 口令错都必须失败，并且给出能看懂的原因
+    assert AppConfig().import_from(str(target)) is False
+    wrong = AppConfig()
+    assert wrong.import_from(str(target), "错口令") is False
+    assert "口令" in wrong.last_error
 
 
 def test_export_config_default_dir_uses_documents(tmp_path, monkeypatch, isolated_config_dir):
@@ -78,6 +155,8 @@ def test_export_config_default_dir_uses_documents(tmp_path, monkeypatch, isolate
         return "", ""
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
+    _stub_passphrase_prompt(monkeypatch)  # 口令留空
+    _stub_message_boxes(monkeypatch)
     try:
         window.export_config()
     finally:
@@ -131,15 +210,36 @@ def test_export_config_reports_failure_without_crashing(tmp_path, monkeypatch, i
         "getSaveFileName",
         staticmethod(lambda *args, **kwargs: (str(bad), "JSON 文件 (*.json)")),
     )
-    shown: list[str] = []
-    monkeypatch.setattr(
-        "app.ui.main_window.QMessageBox.warning",
-        staticmethod(lambda *args, **kwargs: shown.append("warning")),
-    )
+    _stub_passphrase_prompt(monkeypatch)
+    boxes = _stub_message_boxes(monkeypatch)
     try:
         window.export_config()
     finally:
         window.close()
 
     assert not bad.exists()
-    assert shown == ["warning"], "导出失败时应当弹一次警告"
+    assert boxes and "导出失败" in boxes[0][0], "导出失败时应当弹一次警告"
+
+
+def test_import_config_prompts_passphrase_for_portable_file(tmp_path, monkeypatch, isolated_config_dir):
+    """导入带口令的文件时，界面要先问口令；口令对了才真的导入。"""
+    source = _make_window(tmp_path, monkeypatch)
+    portable = tmp_path / "portable.json"
+    source.config.export_to(str(portable), "共享口令")
+    source.close()
+
+    window = _make_window(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *args, **kwargs: (str(portable), "JSON 文件 (*.json)")),
+    )
+    asked = _stub_passphrase_prompt(monkeypatch, "共享口令")
+    _stub_message_boxes(monkeypatch)
+    try:
+        window.import_config()
+    finally:
+        window.close()
+
+    assert asked, "导入带口令的文件时必须问一次口令"
+    assert window.config.printers, "口令正确时应当导入成功"

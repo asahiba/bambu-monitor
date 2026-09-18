@@ -111,6 +111,12 @@ INDEX_HTML = r"""<!doctype html>
   #modal input,#modal select{width:100%;box-sizing:border-box;background:#0d1114;
         border:1px solid var(--border);border-radius:6px;color:var(--fg);
         padding:8px 10px;font-size:14px;font-family:inherit}
+  /* 配置备份用的多行文本框：内容可能几 KB，必须能滚动、能选中复制 */
+  #modal textarea{width:100%;box-sizing:border-box;background:#0d1114;margin:8px 0;
+        border:1px solid var(--border);border-radius:6px;color:var(--fg);
+        padding:8px 10px;font-size:12px;font-family:ui-monospace,Consolas,monospace;
+        min-height:150px;resize:vertical;user-select:text;-webkit-user-select:text}
+  #modal .conn-row input{flex:1;min-width:0}
   #modal .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   #modal .row > *{flex:1 1 140px}
   #modal button{background:#1d272e;border:1px solid var(--border);border-radius:6px;
@@ -942,7 +948,8 @@ async function openSettings(){
     '<div class="status" id="set-status"></div>' +
     '<div class="actions"><button id="set-cancel">关闭</button>' +
     '<button id="set-ok" class="primary">保存</button></div>' +
-    '<div id="set-conn"></div>';
+    '<div id="set-conn"></div>' +
+    '<div id="set-backup"></div>';
   document.getElementById('set-cancel').addEventListener('click', closeModal);
   document.getElementById('set-ok').addEventListener('click', async () => {
     const status = document.getElementById('set-status');
@@ -1009,6 +1016,136 @@ async function openSettings(){
       '<label>在其它设备上打开</label><div class="hint">读取连接信息失败：' +
       escapeHtml(String(err)) + '</div>';
   }
+
+  // ---- 配置备份（导出 / 导入）----
+  // 网页与安卓端原来**没有**任何配置备份入口（只有桌面版有菜单项），
+  // 于是平板上既备份不了、也没法把电脑上的配置搬过来。
+  renderBackupSection();
+}
+
+/* ------------------------------------------------------------ 配置备份 */
+
+/**
+ * 渲染「配置备份」区块。
+ *
+ * 关键设计：**口令是可选的，但差别很大** ——
+ *   * 不带口令：访问代码按本机方式加密（Windows 是 DPAPI，绑定当前用户），
+ *     只有同一台机器/同一用户能恢复；
+ *   * 带口令：用标准库算法加密（`bmp1:`），**任何版本、任何平台**都能导入
+ *     （Windows / Linux / Docker / 安卓）。
+ * 安卓版没有 cryptography（APK 刻意不打包），所以两条路都必须能用 ——
+ * 带口令那条恰恰是安卓唯一能导入的加密形式。
+ */
+function renderBackupSection(){
+  const box = document.getElementById('set-backup');
+  if (!box) return;
+  box.innerHTML =
+    '<label>配置备份（跨设备 / 跨版本）</label>' +
+    '<div class="hint">导出会包含全部打印机与访问代码。' +
+    '<b>建议设置口令</b>：带口令的配置文件可以在任何版本导入' +
+    '（Windows 桌面版 / Linux / Docker / 安卓）。<br>' +
+    '不设口令时访问代码按本机方式加密，只有同一台机器、同一用户才能恢复。</div>' +
+    '<div class="conn-row">' +
+      '<input id="backup-pass" type="password" placeholder="口令（建议填写）">' +
+      '<button id="backup-export">导出</button>' +
+      '<button id="backup-import">导入</button>' +
+    '</div>' +
+    '<div id="backup-status" class="status"></div>';
+  document.getElementById('backup-export').addEventListener('click', doExportConfig);
+  document.getElementById('backup-import').addEventListener('click', openImportConfig);
+}
+
+async function doExportConfig(){
+  const status = document.getElementById('backup-status');
+  const passphrase = document.getElementById('backup-pass').value;
+  status.textContent = passphrase ? '正在生成（加密中）…' : '正在生成…';
+  const result = await postJson('/api/config/export', {passphrase});
+  if (!result.ok){ status.textContent = '导出失败：' + (result.detail || '未知原因'); return; }
+  const text = result.json || '';
+  status.textContent = '已生成 ' + (result.printers || 0) + ' 台设备的配置。' +
+    (result.portable ? '（带口令，可在任何版本导入）' : '（未设口令：只有本机能恢复访问代码）');
+  modalCard.innerHTML =
+    '<h2>导出配置</h2>' +
+    '<div class="hint">下面是完整的配置文件内容。三种拿走的方式，任选一种：<br>' +
+    '① 点「下载文件」保存成 .json；② 点「复制」发给自己；' +
+    '③ 在电脑上打开本页时也可以用 ①。<br>' +
+    (result.portable ? '这份内容已用口令保护，导入时需要同一个口令。'
+                     : '⚠ 未设口令：这份内容只有本机能恢复访问代码。') + '</div>' +
+    '<textarea id="backup-text" readonly></textarea>' +
+    '<div class="status" id="backup-status2"></div>' +
+    '<div class="actions">' +
+      '<button id="backup-download">下载文件</button>' +
+      '<button id="backup-copy">复制</button>' +
+      '<button id="backup-back">返回</button>' +
+    '</div>';
+  document.getElementById('backup-text').value = text;
+  document.getElementById('backup-back').addEventListener('click', openSettings);
+  document.getElementById('backup-copy').addEventListener('click', async () => {
+    const ok = await copyText(text);
+    document.getElementById('backup-status2').textContent = ok ? '已复制到剪贴板' : '复制失败，请长按手动选择';
+  });
+  document.getElementById('backup-download').addEventListener('click', () => {
+    try{
+      const blob = new Blob([text], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'bambu-monitor-config.json';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      document.getElementById('backup-status2').textContent =
+        '已开始下载（若没有反应，请用「复制」把内容带走）';
+    }catch(err){
+      document.getElementById('backup-status2').textContent =
+        '无法直接下载（本应用的浏览器内核可能不支持），请用「复制」：' + err;
+    }
+  });
+}
+
+function openImportConfig(){
+  modalCard.innerHTML =
+    '<h2>导入配置</h2>' +
+    '<div class="hint">把导出的配置文件内容粘贴到下面，然后点「导入」。<br>' +
+    '如果那份文件是用口令加密的，请填上同一个口令；' +
+    '带口令的文件在任何版本都能导入（Windows / Linux / Docker / 安卓）。<br>' +
+    '⚠ 导入会用文件里的设备**替换**当前配置，并重新连接。</div>' +
+    '<input id="import-file" type="file" accept=".json,application/json" style="display:none">' +
+    '<button id="import-pick">从文件读取…</button>' +
+    '<textarea id="import-text" placeholder="在此粘贴配置内容…"></textarea>' +
+    '<input id="import-pass" type="password" placeholder="口令（文件是加密的就填）">' +
+    '<div class="status" id="import-status"></div>' +
+    '<div class="actions">' +
+      '<button id="import-cancel">返回</button>' +
+      '<button id="import-ok" class="primary">导入</button>' +
+    '</div>';
+  document.getElementById('import-cancel').addEventListener('click', openSettings);
+  document.getElementById('import-pick').addEventListener('click',
+    () => document.getElementById('import-file').click());
+  document.getElementById('import-file').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    try{
+      document.getElementById('import-text').value = await file.text();
+      document.getElementById('import-status').textContent = '已读取 ' + file.name;
+    }catch(err){
+      document.getElementById('import-status').textContent = '读取文件失败：' + err;
+    }
+  });
+  document.getElementById('import-ok').addEventListener('click', async () => {
+    const status = document.getElementById('import-status');
+    const text = document.getElementById('import-text').value.trim();
+    const passphrase = document.getElementById('import-pass').value;
+    if (!text){ status.textContent = '请先粘贴配置内容，或用「从文件读取」。'; return; }
+    status.textContent = '正在导入并重连…';
+    const result = await postJson('/api/config/import', {json: text, passphrase});
+    if (!result.ok){ status.textContent = '导入失败：' + (result.detail || '未知原因'); return; }
+    toast(result.detail || '已导入');
+    if (result.warning) toast(result.warning);
+    // 配置换了，整页重载最干脆（会话已重建，索引也对得上）
+    setTimeout(() => location.reload(), 800);
+  });
 }
 
 /** 复制文本：优先用异步剪贴板 API（需要安全上下文），失败退回 execCommand。
@@ -1058,6 +1195,11 @@ function tileMenu(index, item){
     if (tile) tile.element.classList.toggle('full');
   });
   add('抓拍保存图片', () => snapshotTile(index, item));
+  // 通道诊断与画面大小：桌面端有，网页/安卓端以前没有 ——
+  // 平板上遇到「画面出不来」只能干瞪眼，也没法把关键那台放大
+  add('通道诊断…', () => openDiagnose(index, item));
+  add(item.span > 1 ? '取消重点画面' : '设为重点画面（2×2）',
+      () => toggleSpan(index, item));
   add('复制 IP', async () => {
     try{
       await navigator.clipboard.writeText(item.ip);
@@ -1078,6 +1220,71 @@ function tileMenu(index, item){
     toast(result.ok ? '已删除' : ('删除失败：' + (result.detail || '')));
     pollStatus();
   });
+}
+
+/* ---------------------------------------------------------------- 通道诊断 / 画面大小 */
+
+/**
+ * 跑一遍通道诊断并把报告显示出来。
+ *
+ * 服务端复用 `app/bambu/diagnostics.py`（与桌面端对话框、命令行工具同一份实现），
+ * 所以三处结论一致。一轮约 10~20 秒，期间显示「诊断中」。
+ */
+async function openDiagnose(index, item){
+  modalCard.innerHTML =
+    '<h2>通道诊断 · ' + escapeHtml(item.name || item.ip) + '</h2>' +
+    '<div class="hint">逐项检查端口 / TLS / 6000 画面 / RTSPS 鉴权 / MQTT 遥测。' +
+    '约 10-20 秒，期间请保持页面打开。</div>' +
+    '<div class="status" id="diag-status">正在诊断…</div>' +
+    '<div id="diag-report"></div>' +
+    '<div class="actions"><button id="diag-close">关闭</button></div>';
+  modal.style.display = 'flex';
+  document.getElementById('diag-close').addEventListener('click', closeModal);
+
+  let data;
+  try{
+    const response = await fetch(api('/api/diagnose?index=' + index), {cache:'no-store'});
+    if (response.status === 501){
+      document.getElementById('diag-status').textContent =
+        '该运行方式不支持在网页上做诊断（请用桌面版的「画面通道诊断」，或电脑上的 tools/diagnose.py）。';
+      return;
+    }
+    if (response.status === 401){ showLogin(true); return; }
+    data = await response.json();
+  }catch(err){
+    document.getElementById('diag-status').textContent = '诊断请求失败：' + err;
+    return;
+  }
+  if (!data.ok){
+    document.getElementById('diag-status').textContent = '诊断失败：' + (data.detail || '未知原因');
+    return;
+  }
+  let lines = [];
+  (data.sections || []).forEach(section => {
+    if (section.title) lines.push(section.title);
+    (section.lines || []).forEach(line => lines.push(line));
+    lines.push('');
+  });
+  (data.tail || []).forEach(line => lines.push(line));
+  const report = lines.join('\n');
+  document.getElementById('diag-status').textContent =
+    '诊断完成（' + escapeHtml(data.name || '') + ' ' + escapeHtml(data.ip || '') + '）';
+  document.getElementById('diag-report').innerHTML =
+    '<textarea id="diag-text" readonly></textarea>' +
+    '<div class="actions"><button id="diag-copy">复制报告</button></div>';
+  document.getElementById('diag-text').value = report;
+  document.getElementById('diag-copy').addEventListener('click', async () => {
+    const ok = await copyText(report);
+    toast(ok ? '报告已复制' : '复制失败，请长按手动选择');
+  });
+}
+
+/** 切换「重点画面」（1 格 <-> 2×2）。 */
+async function toggleSpan(index, item){
+  const target = (item.span || 1) > 1 ? 1 : 2;
+  const result = await postJson('/api/layout', {index: index, span: target});
+  toast(result.ok ? (result.detail || '已更新') : ('调整失败：' + (result.detail || '')));
+  if (result.ok) pollStatus();
 }
 
 /** 抓拍：把当前帧下成图片。 */

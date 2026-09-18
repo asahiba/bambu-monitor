@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Callable, Optional
 
@@ -175,6 +176,214 @@ class WebHost:
             # 明确告诉用户"加上了，但有件事要知道"，不要让提示看起来像失败
             result["warning"] = warning
         return result
+
+    # ------------------------------------------------------------------ 配置备份（跨版本）
+    def export_config_text(self, passphrase: str = "") -> dict:
+        """把当前配置导出成 JSON 文本（网页端「导出配置」用）。
+
+        网页/安卓端以前**没有**任何导出入口（只有桌面版有菜单项），于是用户
+        在平板上没法备份配置、也没法把电脑上的配置带过来。这里补上。
+
+        :param passphrase: 非空时用口令保护访问代码 —— 这样的文件**在任何版本、
+            任何平台**都能导入（Windows / Linux / Docker / 安卓）。
+            留空则按本机方式加密，换机器/换用户后访问代码需要重填。
+        """
+        self.stats["export"] = self.stats.get("export", 0) + 1
+        try:
+            text = self.config.to_json(passphrase)
+        except ValueError as exc:
+            return {"ok": False, "detail": f"导出失败：{exc}"}
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("导出配置失败", exc_info=True)
+            return {"ok": False, "detail": f"导出失败：{type(exc).__name__}: {exc}"}
+        LOGGER.info("网页端导出配置（%d 台，%s）", len(self.config.printers), "带口令" if passphrase else "本机加密")
+        return {
+            "ok": True,
+            "json": text,
+            "portable": bool(passphrase),
+            "printers": len(self.config.printers),
+            "detail": "已生成配置内容（带口令，可在任何版本导入）" if passphrase
+            else "已生成配置内容（未设口令：只有本机能恢复访问代码）",
+        }
+
+    def import_config_text(self, text: str, passphrase: str = "") -> dict:
+        """用一段配置 JSON 覆盖当前配置，并**立刻重建会话**。
+
+        `index` 顺序要与新配置一致，所以这里是「停掉全部旧会话 → 按新配置重建」，
+        而不是增量合并 —— 导入的语义就是「用这份配置替换」。
+        """
+        import json
+        import tempfile
+
+        self.stats["import"] = self.stats.get("import", 0) + 1
+        if not (text or "").strip():
+            return {"ok": False, "detail": "没有配置内容"}
+        # 先落成临时文件再走 import_from：那条路已经被测试与桌面版共用，
+        # 支持口令加密、本机加密、明文三种文件，没必要在这里再写一遍解析
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        try:
+            handle.write(text)
+            handle.close()
+            from ..config import AppConfig
+
+            probe = AppConfig()
+            if not probe.needs_passphrase(handle.name) and passphrase:
+                # 文件本身不需要口令：忽略多传的口令，不要因此报错
+                passphrase = ""
+            if not probe.import_from(handle.name, passphrase):
+                return {
+                    "ok": False,
+                    "detail": probe.last_error or "配置文件无法解析，或里面没有打印机",
+                }
+            warning = probe.warnings
+            new_printers = list(probe.printers)
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "detail": f"配置内容无法解析：{exc}"}
+        finally:
+            try:
+                os.unlink(handle.name)
+            except OSError:
+                pass
+
+        from ..bambu.printer import PrinterSession
+
+        with self._lock:
+            sessions = self._sessions()
+            for session in list(sessions):
+                try:
+                    session.stop()
+                except Exception:  # noqa: BLE001 - 停不掉也要继续（下面会清空列表）
+                    LOGGER.debug("导入时停止会话失败", exc_info=True)
+            sessions.clear()
+
+            # 把导入的设置应用到当前 config 对象上（桌面版与网页版共用同一个实例）
+            self.config.printers = new_printers
+            for key in (
+                "columns",
+                "show_timestamp",
+                "auto_connect",
+                "last_timeout",
+                "max_fps",
+                "refresh_ms",
+                "web_enabled",
+                "web_port",
+                "web_fps",
+                "web_max_width",
+            ):
+                setattr(self.config, key, getattr(probe, key))
+            self.config.save()
+            if self.config.last_error:
+                return {"ok": False, "detail": self.config.last_error}
+            if not warning:
+                warning = self.config.warnings or ""
+
+            for info in self.config.printers:
+                session = PrinterSession(info)
+                session.set_max_fps(float(getattr(self.config, "max_fps", 10.0) or 10.0))
+                session.start()
+                sessions.append(session)
+
+        LOGGER.info("网页端导入配置：%d 台设备", len(sessions))
+        self._notify_change()
+        result = {"ok": True, "detail": f"已导入 {len(sessions)} 台设备", "printers": len(sessions)}
+        if warning:
+            result["warning"] = warning
+        return result
+
+    # ------------------------------------------------------------------ 通道诊断
+    def diagnose(self, index: int = -1) -> dict:
+        """对某台设备跑一遍只读诊断，返回可显示的报告行。
+
+        桌面端有「通道诊断」对话框，而**网页/安卓端原来没有** —— 平板上遇到
+        「画面出不来」时只能干瞪眼（`tools/diagnose.py` 是电脑上跑的脚本）。
+        这里复用 `app/bambu/diagnostics.py`（与 CLI、桌面对话框同一份实现），
+        所以三处结论必然一致。
+
+        这是**同步**调用：一轮约 10~20 秒（三个端口 + 取帧 + 遥测）。
+        前端会给一个"诊断中"的提示；不做流式推送是因为报告行加起来才几十行，
+        为它再加一条通道不值得。
+        """
+        sessions = self._sessions()
+        if not 0 <= index < len(sessions):
+            return {"ok": False, "detail": f"没有第 {index + 1} 台设备（当前共 {len(sessions)} 台）"}
+        session = sessions[index]
+        info = getattr(session, "info", None)
+        ip = getattr(info, "ip", "")
+        code = getattr(info, "access_code", "")
+        if not ip:
+            return {"ok": False, "detail": "这台设备没有记录 IP" }
+        if not code:
+            return {"ok": False, "detail": "这台设备没有访问代码：请先在「编辑」里填写"}
+
+        from ..bambu import diagnostics
+
+        self.stats["diagnose"] = self.stats.get("diagnose", 0) + 1
+        report: list[dict] = []
+        try:
+            for event in diagnostics.run(
+                ip,
+                code,
+                serial=getattr(info, "serial", "") or "",
+                with_rtsp_frame=False,
+            ):
+                if isinstance(event, diagnostics.SectionStart):
+                    report.append({"title": event.title, "lines": []})
+                else:
+                    # 正文事件总是跟在标题之后；万一没有标题就单起一节
+                    if not report:
+                        report.append({"title": "", "lines": []})
+                    report[-1]["lines"].extend(event.lines)
+        except Exception as exc:  # noqa: BLE001 - 诊断失败也要给用户一个交代
+            LOGGER.warning("网页端诊断失败：%s", exc, exc_info=True)
+            return {"ok": False, "detail": f"诊断失败：{type(exc).__name__}: {exc}"}
+
+        # 结论行：与桌面版的收尾提示保持一致
+        tail = [
+            "若画面失败但 322 端口提示 401 Unauthorized，说明 RTSP 服务是活的，"
+            "请确认打印机已开启「局域网实时画面」。"
+        ]
+        return {
+            "ok": True,
+            "name": getattr(info, "display_name", lambda: ip)(),
+            "ip": ip,
+            "sections": report,
+            "tail": tail,
+            "detail": f"已完成 {getattr(info, 'display_name', lambda: ip)()} 的通道诊断",
+        }
+
+    # ------------------------------------------------------------------ 画面布局
+    def set_tile_span(self, index: int = -1, span: int = 1) -> dict:
+        """设置某路画面占几格（1 = 普通，2 = 重点画面 2×2）。
+
+        桌面端有「画面顺序与大小」菜单，网页端原来只能看不能改 ——
+        平板上没法把关键那台放大。
+        """
+        sessions = self._sessions()
+        if not 0 <= index < len(sessions):
+            return {"ok": False, "detail": f"没有第 {index + 1} 台设备（当前共 {len(sessions)} 台）"}
+        try:
+            span = max(1, min(3, int(span)))
+        except (TypeError, ValueError):
+            return {"ok": False, "detail": "画面大小取值不合法"}
+        session = sessions[index]
+        info = getattr(session, "info", None)
+        if info is None:
+            return {"ok": False, "detail": "这台设备没有可修改的信息"}
+        info.tile_span = span
+        # 同步回配置里那一份（配置对象是发信源，重启后要保住）
+        for item in self.config.printers:
+            if item.ip == getattr(info, "ip", ""):
+                item.tile_span = span
+                break
+        self.config.save()
+        if self.config.last_error:
+            return {"ok": False, "detail": self.config.last_error}
+        self.stats["layout"] = self.stats.get("layout", 0) + 1
+        self._notify_change()
+        label = "重点画面（2×2）" if span > 1 else "普通大小"
+        return {"ok": True, "detail": f"{getattr(info, 'display_name', lambda: '设备')()} 已设为{label}"}
 
     # ------------------------------------------------------------------ 管理
     def manage_printer(

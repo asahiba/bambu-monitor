@@ -586,28 +586,96 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        if self.config.export_to(path):
+        passphrase = self._ask_export_passphrase()
+        if passphrase is None:  # 用户取消
+            return
+        if self.config.export_to(path, passphrase):
             warning = getattr(self.config, "warnings", "")
             if warning:
                 QMessageBox.information(self, "导出提示", warning)
+            if passphrase:
+                QMessageBox.information(
+                    self,
+                    "导出完成",
+                    f"配置已导出：\n{path}\n\n"
+                    "文件用你输入的口令保护，**可以在任何版本导入**"
+                    "（Windows 桌面版 / Linux / Docker / 安卓）。\n"
+                    "请记住口令 —— 忘记后这份文件里的访问代码无法恢复。",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "导出完成",
+                    f"配置已导出：\n{path}\n\n"
+                    "这次**没有设口令**：访问代码按本机方式加密，"
+                    "只有同一台机器/同一用户才能恢复。\n"
+                    "若要拿到别的设备（例如安卓平板）上导入，请重新导出并设置口令。",
+                )
             self._notify(f"配置已导出：{path}")
         else:
             QMessageBox.warning(
                 self, "导出失败", self.config.last_error or "无法写入该文件，请换一个位置再试。"
             )
 
+    def _ask_export_passphrase(self) -> Optional[str]:
+        """问一个可选的导出加密口令；返回 ``None`` 表示用户取消。
+
+        为什么要问：访问代码默认按**本机**方式加密（Windows 是 DPAPI，绑定当前用户），
+        换到别的机器或安卓上就解不开。带口令的文件用标准库算法加密，
+        任何版本都能导入 —— 这是"导出的配置在所有版本都可用"的唯一办法。
+        """
+        from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+
+        text, ok = QInputDialog.getText(
+            self,
+            "导出配置 · 口令（可留空）",
+            "输入口令可以让这份配置在任何版本导入（Windows / Linux / Docker / 安卓）。\n"
+            "留空则只在本机同一用户下可恢复。\n\n口令：",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return None
+        passphrase = text.strip()
+        if not passphrase:
+            return ""
+        again, ok_again = QInputDialog.getText(
+            self,
+            "再输一次口令",
+            "请再输入一次同样的口令（避免打错导致以后解不开）：",
+            QLineEdit.Password,
+        )
+        if not ok_again:
+            return None
+        if again.strip() != passphrase:
+            QMessageBox.warning(self, "两次口令不一致", "两次输入的口令不一样，请重新导出。")
+            return None
+        return passphrase
+
     def import_config(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog, QInputDialog, QLineEdit
 
         path, _ = QFileDialog.getOpenFileName(self, "导入配置", "", "JSON 文件 (*.json)")
         if not path:
             return
-        if not self.config.import_from(path):
+        passphrase = ""
+        if AppConfig.needs_passphrase(path):
+            text, ok = QInputDialog.getText(
+                self,
+                "导入配置 · 需要口令",
+                "这份配置文件是用口令保护的。\n请输入当初导出时设置的口令：",
+                QLineEdit.Password,
+            )
+            if not ok:
+                return
+            passphrase = text
+        if not self.config.import_from(path, passphrase):
             QMessageBox.warning(
                 self,
                 "导入失败",
-                "文件无法解析，或里面没有打印机。\n"
-                "注意：访问代码使用当前 Windows 用户加密，换用户/换电脑后需要重新填写。",
+                self.config.last_error
+                or "文件无法解析，或里面没有打印机。\n"
+                "提示：换了机器/用户时访问代码需要重新填写 —— "
+                "下次导出请设置口令，那样任何版本都能导入。",
             )
             return
         for session in self.sessions:

@@ -128,6 +128,24 @@ def test_沉浸式全屏只在有触摸屏时才用():
     )
 
 
+def test_WebView_里网页的文件选择能用():
+    """契约：网页端「配置备份 → 从文件读取」在安卓 WebView 里必须点得动。
+
+    WebView **默认不实现** ``<input type="file">``：没有 `onShowFileChooser`，
+    用户点「从文件读取…」毫无反应，而且没有任何报错 —— 而"导出的配置文件
+    能不能在平板上导入"正是这一版要保证的事（见 app/web/page.py 的配置备份）。
+    拿到结果后必须把 `ValueCallback` 还回去，否则**下一次点击会被 WebView 忽略**。
+    """
+    source = (JAVA_DIR / "MainActivity.java").read_text(encoding="utf-8")
+    assert "onShowFileChooser" in source, "缺少 WebView 文件选择回调"
+    assert "FileChooserParams" in source
+    assert "onActivityResult" in source, "结果必须回调给网页"
+    assert "FILE_CHOOSER_REQUEST" in source, "应当用请求码区分自己的选择请求"
+    assert "onReceiveValue" in source, "必须把结果交回 ValueCallback"
+    # 未完成的选择请求要先还回去，避免 WebView 认为还有请求在路上
+    assert "fileCallback.onReceiveValue(null)" in source
+
+
 def test_服务用到的字符串资源都已定义(manifest):
     """契约：Java 里引用的 R.string.* 必须在 strings.xml 里存在。
 

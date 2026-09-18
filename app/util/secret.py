@@ -48,10 +48,13 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import ctypes
 import hashlib
+import hmac
 import logging
 import os
+import secrets as secrets_module
 import sys
 from ctypes import wintypes
 
@@ -299,15 +302,143 @@ def can_encrypt() -> bool:
 
     界面/诊断与测试用它判断「凭据是不是必然明文落盘」，避免把平台差异写成
     硬编码的平台判断（安卓的 ``sys.platform`` 也是 ``linux``）。
+
+    注意：**不包含**可移植口令加密（:func:`encrypt_portable`）—— 那条路只用标准库，
+    任何平台都能用，所以它不是"本机能不能加密"的判据。
     """
     if sys.platform == "win32":
         return True
     return _fernet() is not None
 
 
+# --------------------------------------------------------------------------- 可移植口令加密
+#
+# 目的：**导出的配置文件要在所有版本之间通用**。
+#
+# 本机加密（DPAPI / secret.key）天然不可移植：Windows 的 dpapi: 换到 Linux 解不开，
+# Linux 的 fernet: 换到别的机器也解不开。而用户的需求是「在电脑上导出、在安卓上导入」。
+# 所以导出的文件里可以带一份**口令保护**的访问代码。
+#
+# ## 为什么不用 cryptography 的 Fernet
+#
+# **安卓版刻意不打包 cryptography**（Chaquopy 的预编译包是 4096 字节对齐，
+# 在 16KB 内存页设备上会闪退，见 docs/PACKAGING.md 与 tests/test_android_packaging.py）。
+# 用 Fernet 就等于"安卓无法导入" —— 恰好违背这个功能的目的。
+# 因此这里只用标准库实现：PBKDF2-HMAC-SHA256 派生密钥 + HMAC-SHA256 计数器流
+# （PRF-CTR）+ 先加密后认证（encrypt-then-MAC）。这套组合是标准做法，
+# 不是自创算法；容器格式是应用私有的（``bmp1:`` 前缀），不追求与别的软件互通。
+
+_PORTABLE_PREFIX = "bmp1:"
+#: PBKDF2 迭代次数：手机上约 100~300ms，够用又不至于让用户等
+_PORTABLE_ITERATIONS = 200_000
+_PORTABLE_SALT_BYTES = 16
+_PORTABLE_NONCE_BYTES = 16
+
+
+def _portable_keys(passphrase: str, salt: bytes) -> tuple[bytes, bytes]:
+    """口令 + 盐 -> (加密密钥, 认证密钥)。"""
+    material = hashlib.pbkdf2_hmac(
+        "sha256", passphrase.encode("utf-8"), salt, _PORTABLE_ITERATIONS, 64
+    )
+    return material[:32], material[32:]
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    """HMAC-SHA256 计数器流（PRF-CTR）：和明文等长的密钥流。"""
+    stream = bytearray()
+    counter = 0
+    while len(stream) < length:
+        block = hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        stream += block
+        counter += 1
+    return bytes(stream[:length])
+
+
+class PortableCipher:
+    """一次口令派生、多次加解密。
+
+    为什么要做成对象：PBKDF2 20 万次迭代约 200~400ms，一份配置里可能有十几台设备 ——
+    每台都派生一次就是好几秒。所以**一次导出/导入只派生一次**，各条凭据共用一个盐、
+    各自带自己的 nonce（`bmp1:<盐>:<nonce>:<密文>:<认证码>`）。
+
+    只依赖标准库（见模块内注释：安卓版没有 `cryptography`）。
+    """
+
+    def __init__(self, passphrase: str, salt: bytes | None = None) -> None:
+        if not passphrase:
+            raise ValueError("口令不能为空")
+        self.salt = salt or secrets_module.token_bytes(_PORTABLE_SALT_BYTES)
+        self._enc_key, self._mac_key = _portable_keys(passphrase, self.salt)
+
+    @property
+    def salt_b64(self) -> str:
+        return base64.b64encode(self.salt).decode("ascii")
+
+    def encrypt(self, text: str) -> str:
+        if not text:
+            return ""
+        nonce = secrets_module.token_bytes(_PORTABLE_NONCE_BYTES)
+        data = text.encode("utf-8")
+        cipher = bytes(
+            left ^ right for left, right in zip(data, _keystream(self._enc_key, nonce, len(data)))
+        )
+        tag = hmac.new(self._mac_key, self.salt + nonce + cipher, hashlib.sha256).digest()
+        parts = (self.salt, nonce, cipher, tag)
+        return _PORTABLE_PREFIX + ":".join(base64.b64encode(p).decode("ascii") for p in parts)
+
+    def decrypt(self, blob: str) -> str:
+        if not blob.startswith(_PORTABLE_PREFIX):
+            raise ValueError("不是口令加密的凭据")
+        parts = blob[len(_PORTABLE_PREFIX) :].split(":")
+        if len(parts) != 4:
+            raise ValueError("凭据格式不正确")
+        try:
+            salt, nonce, cipher, tag = (base64.b64decode(part, validate=True) for part in parts)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("凭据格式不正确") from exc
+        if salt != self.salt:
+            # 不是同一份文件/同一批口令派生的：直接用本对象的密钥算认证码必然失败，
+            # 但这里给出更准确的结论
+            raise ValueError("凭据与本文件的盐不一致")
+        expected = hmac.new(self._mac_key, salt + nonce + cipher, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, tag):
+            # 先认证再解密：口令不对与文件被改过在这里是同一个结论
+            raise ValueError("口令不对，或配置文件被修改过")
+        data = bytes(
+            left ^ right for left, right in zip(cipher, _keystream(self._enc_key, nonce, len(cipher)))
+        )
+        return data.decode("utf-8")
+
+
+def encrypt_portable(text: str, passphrase: str) -> str:
+    """用口令加密一条凭据（单次使用；多条请复用 :class:`PortableCipher`）。"""
+    return PortableCipher(passphrase).encrypt(text)
+
+
+def decrypt_portable(blob: str, passphrase: str) -> str:
+    """解开口令加密的凭据；口令不对或内容被改过时抛 ``ValueError``。"""
+    if not blob.startswith(_PORTABLE_PREFIX):
+        raise ValueError("不是口令加密的凭据")
+    parts = blob[len(_PORTABLE_PREFIX) :].split(":")
+    if len(parts) != 4:
+        raise ValueError("凭据格式不正确")
+    try:
+        salt = base64.b64decode(parts[0], validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("凭据格式不正确") from exc
+    return PortableCipher(passphrase, salt).decrypt(blob)
+
+
+def is_portable(text: str) -> bool:
+    """是否是口令加密的可移植凭据。"""
+    return bool(text) and text.startswith(_PORTABLE_PREFIX)
+
+
 def is_encrypted(text: str) -> bool:
-    """是否已加密（任一前缀）。明文（含安卓降级存储的）返回 False。"""
-    return bool(text) and (text.startswith(_PREFIX) or text.startswith(_PREFIX_FERNET))
+    """是否已加密（本机加密或口令加密）。明文（含安卓降级存储的）返回 False。"""
+    return bool(text) and (
+        text.startswith(_PREFIX) or text.startswith(_PREFIX_FERNET) or is_portable(text)
+    )
 
 
 def token_hex(length: int = 8) -> str:
