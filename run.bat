@@ -1,18 +1,42 @@
 @echo off
+rem 启动监控台（GUI）。用法：run.bat [传给 app 的参数]
+rem   首次运行会自动创建 .venv 并安装依赖。
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo [1/2] 首次运行：正在创建虚拟环境 .venv ...
-    python -m venv .venv
-    if errorlevel 1 goto :failed
-    echo [2/2] 正在安装依赖，请稍候（约 2-5 分钟）...
-    ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt
-    if errorlevel 1 goto :failed
+set "PY=.venv\Scripts\python.exe"
+
+rem ── 环境自愈 ────────────────────────────────────────────────────────────
+rem 注意：**不能**只判断 python.exe 文件是否存在。本项目历史上搬过目录
+rem （D:\DSH\... -> L:\DSH\...）而基础 Python 又被删掉，此时
+rem .venv\Scripts\python.exe 仍在、却一启动就退出（退出码 103，
+rem 报 "did not find executable at ..."）。所以这里真的启动一次解释器，
+rem 启动不了就重建虚拟环境 —— 与 test.bat 用的是同一条判据。
+if not exist "%PY%" goto :setup
+
+"%PY%" -c "import sys" >nul 2>&1
+if not errorlevel 1 goto :run
+
+echo [!] .venv 存在但无法启动（基础 Python 可能已被移动或删除）。
+echo     正在重建虚拟环境...
+rmdir /s /q ".venv"
+if exist ".venv" (
+    echo [!] 无法删除 .venv，请手动删除后重新运行本脚本。
+    pause
+    exit /b 1
 )
 
-".venv\Scripts\python.exe" -m app %*
+:setup
+echo [1/2] 首次运行：正在创建虚拟环境 .venv ...
+python -m venv .venv
+if errorlevel 1 goto :failed
+echo [2/2] 正在安装依赖，请稍候（约 2-5 分钟）...
+"%PY%" -m pip install --disable-pip-version-check -r requirements.txt
+if errorlevel 1 goto :failed
+
+:run
+"%PY%" -m app %*
 exit /b %errorlevel%
 
 :failed

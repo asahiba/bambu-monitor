@@ -5,16 +5,32 @@
 交给 Windows PowerShell 5.1 的解析器过一遍。
 
 用法：python tools/check_workflow_ps.py
+
+需要 `PyYAML`（在 `requirements-dev.txt` 里）与 `powershell.exe`（Windows）。
+两者缺一时给出**可读的退出码 0/跳过后提示**，而不是抛 traceback ——
+它以前是直接 `import yaml`，在没装的机器上只会甩一段堆栈，看不出该装什么。
 """
 
 from __future__ import annotations
 
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 
-import yaml
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from tools._common import enable_utf8  # noqa: E402
+
+enable_utf8()
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - 只在没装 PyYAML 时走到
+    print("[skip] 缺少 PyYAML，无法解析工作流。安装：")
+    print("       .venv\\Scripts\\python.exe -m pip install PyYAML")
+    sys.exit(0)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
@@ -34,6 +50,13 @@ if ($e.Count) {
 
 
 def main() -> int:
+    if shutil.which("powershell.exe") is None:
+        print("[skip] 本平台没有 powershell.exe（工作流语法校验需要 Windows PowerShell）")
+        return 0
+    if not WORKFLOWS:
+        print("[skip] 没找到 .github/workflows/*.yml")
+        return 0
+
     checker_path = pathlib.Path(tempfile.gettempdir()) / "dsh_ps_check.ps1"
     checker_path.write_text(CHECKER, encoding="utf-8")
     body_path = pathlib.Path(tempfile.gettempdir()) / "dsh_ps_body.ps1"

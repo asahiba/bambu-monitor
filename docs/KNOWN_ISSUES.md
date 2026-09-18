@@ -179,10 +179,10 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 
 | # | 问题 | 位置 |
 | --- | --- | --- |
-| 13 | 33 个 `tools/*check*.py` 是「内部 `ok` 布尔 + 打印 + 退出码」模式，**没有断言**，无法定位失败点，也无法按用例筛选 | `tools/` 全体 |
-| 14 | 无退出码、进不了 CI：`tools/layout_check.py`、`tools/discovery_bench.py`、`tools/show_config.py`、`tools/dialog_smoke.py` | 同左 |
-| 15 | 五个对话框（诊断/布局/设置/HMS/网页）无冒烟覆盖（`tools/dialog_smoke.py` 只构造添加与搜索两个） | `tools/dialog_smoke.py:18-19` |
-| 16 | `app/web/page.py` 是近 500 行的单文件内嵌 HTML+CSS+JS，无前端构建、无语法检查、无测试 | `app/web/page.py` |
+| 13 | ~~33 个 `tools/*check*.py` 是「内部 `ok` 布尔 + 打印 + 退出码」模式，**没有断言**，无法定位失败点，也无法按用例筛选~~ **部分已修**：拿真机才能跑的诊断脚本**不该**改写成 pytest 用例（它们要连设备、占端口），但**离线可跑的那批**现在真的进了 CI —— 新增 `tests/test_tools_offline.py`：把 `check_qt_imports_probe.py` / `check_workflow_ps.py` / `run_bat_selfheal_check.py` 当子进程跑并断言退出码 0（每条一个用例，失败点一眼可见），同时静态守住「会打印 ✓/✗ 的脚本必须切 UTF-8」「`*check*.py` 必须有退出码」「`tools/*.py` 语法必须合法」。剩下需要真机的脚本维持现状（它们本来就是诊断工具，见 `tools/README.md` 开头的约定） | `tools/`、`tests/test_tools_offline.py` |
+| 14 | ~~无退出码、进不了 CI：`tools/layout_check.py`、`tools/discovery_bench.py`、`tools/show_config.py`、`tools/dialog_smoke.py`~~ **已修**：`layout_check.py` 补上退出码并顺手修掉自身两个坑（单画面模式下 `getItemPosition(-1)` 读到未初始化内存、脏数据导致 `range()` 展开上亿次 → 脚本看着像卡死）；`*check*.py` 的退出码由 `tests/test_tools_offline.py` 静态守住。`discovery_bench.py` 仍未加退出码（它是**基准测量**，结论是数字不是成败，已在 `tools/README.md` 标注） | 同左 |
+| 15 | ~~五个对话框（诊断/布局/设置/HMS/网页）无冒烟覆盖（`tools/dialog_smoke.py` 只构造添加与搜索两个）~~ **已修**：`tests/test_ui_smoke.py::test_dialogs_construct_and_close` 现在把六个对话框（含诊断/布局/设置/HMS/网页）在 offscreen 下全部构造并关闭，另外逐条调用工具栏/右键菜单槽函数 | `tests/test_ui_smoke.py` |
+| 16 | ~~`app/web/page.py` 是近 500 行的单文件内嵌 HTML+CSS+JS，无前端构建、无语法检查、无测试~~ **已修**：`tests/test_contracts.py` 用 `esprima` 真正解析内嵌 JS（语法错直接失败），CI 也装上 esprima；此外还有 PWA 清单、令牌鉴权、多路复用流等契约断言。仍然**没有前端构建**（有意为之：单文件内嵌是「不装 Node 也能跑」的取舍） | `app/web/page.py`、`tests/test_contracts.py` |
 | 17 | ~~`app/ui/tile.py:134-136` 的 `shutdown()` 只 `stop()` 解码线程不 join；`add_dialog.py:199`、`diagnose_dialog.py:200` 的 `QThread.wait()` 超时后未处理~~ **已修**：三处都补齐。后两处原来会让**整个进程 fail-fast 消失**（运行中的 QThread 被析构 = 0xC0000409，用户看到的是「点开诊断/点测试连接后随手关掉 → 程序没了」）——现在探测与诊断都支持取消（`probe.py`/`camera.py` 的 `should_stop`），并新增 `app/ui/qt_threads.py` 在进程退出前兜底等待；回归测试见 `tests/test_ui_thread_shutdown.py`（用子进程断言退出码，因为崩溃会直接带走 pytest） | `app/ui/tile.py`、`app/ui/add_dialog.py`、`app/ui/diagnose_dialog.py`、`app/ui/qt_threads.py` |
 
 ---
@@ -212,10 +212,20 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
    `D:\DSH\bambu-monitor` 搬到 `L:\DSH\bambu-monitor`，而 `D:\python` 又被删除，
    导致 `.venv\Scripts\python.exe` 存在但无法启动（退出码 103，报
    `did not find executable at 'D:\python\python.exe'`）。
-   **`run.bat` 的自愈分支判断的是「python.exe 文件是否存在」，因此不会自动重建。**
+   ~~**`run.bat` 的自愈分支判断的是「python.exe 文件是否存在」，因此不会自动重建。**~~
+   **已修**：`run.bat` 改成真的启动一次解释器（`-c "import sys"`，与 `test.bat` 同一条判据），
+   启动不了就删掉 `.venv` 重建；`tools/run_bat_selfheal_check.py` 会造一个「文件在但启动不了」
+   的假 `.venv` 来证明这条分支真的会走（已进 CI）。
 2. 修好环境后建议跑一次 `test.bat`：它会先用 `python -c "import sys"` 验证解释器真的能启动，
    比 `if exist` 可靠。
 3. `dist\BambuMonitor\` 是自包含的 PyInstaller 产物（约 240MB，241 项），
    即使源码环境坏了它也能跑 `--version` / `--core-test`，可作为对照基准。
-4. 本项目**没有 CI**（无 `.github/`）。`test.bat` 与 `linux/run-tests.sh` 都返回标准退出码，
-   接 CI 只需要一条命令。
+4. ~~本项目**没有 CI**（无 `.github/`）。~~ **已过时**：仓库现在有 `.github/workflows/ci.yml`
+   （Linux 3.13 / Linux 3.10 / Windows 3.13 三档跑 `pytest -q` 与 `-m slow`，外加 `ruff check`）
+   与 `release.yml`（Windows 打包与 APK 签名）。`tools/check_workflow_ps.py` 校验工作流里
+   `pwsh` 步骤的语法，`tests/test_tools_offline.py` 把离线可跑的检查脚本也接进了这条流水线。
+5. **工具脚本的 UTF-8 坑**：Windows 默认控制台是 GBK，脚本里打印 `✓`/`✗` 时只要输出被
+   重定向（CI、`> log.txt`、`subprocess(capture_output=True)`）就会 `UnicodeEncodeError` ——
+   「检查通过」被报成「工具自己崩了」。约定：这类脚本开头必须调用
+   `tools/_common.enable_utf8()`（或 `sys.stdout.reconfigure(encoding="utf-8")`），
+   由 `tests/test_tools_offline.py` 静态守住。

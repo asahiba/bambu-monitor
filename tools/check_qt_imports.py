@@ -20,6 +20,15 @@ import os
 import sys
 from typing import Iterable
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _common import enable_utf8  # noqa: E402
+
+#: 必须先切 stdout 到 UTF-8：下面要打印 ✓/✗，而 Windows 默认 GBK 控制台
+#: （或输出被管道/文件捕获时）会直接 UnicodeEncodeError 崩掉 ——
+#: 那是「检查通过」被报成「工具自己失败」的那类假故障。
+enable_utf8()
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DIRS = ("app", "tools", "tests", "run_app.py", "run_headless.py")
 

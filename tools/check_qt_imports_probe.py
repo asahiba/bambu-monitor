@@ -10,6 +10,15 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _common import enable_utf8  # noqa: E402
+
+#: 必须先切 stdout 到 UTF-8：本脚本要打印 ✓/✗，而 Windows 默认 GBK 控制台
+#: （或把输出重定向到管道/文件时）会直接 UnicodeEncodeError 崩掉 ——
+#: 明明是「检查通过」，却被报成工具自身失败。
+enable_utf8()
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECKER = os.path.join(ROOT, "tools", "check_qt_imports.py")
 

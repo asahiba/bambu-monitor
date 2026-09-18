@@ -17,3 +17,7 @@ ruff>=0.6
 # 装上它之后 `tests/test_contracts.py` 会真正解析一遍内嵌脚本
 # （没装则跳过那条断言，不会让测试失败 —— 所以它是可选依赖）。
 esprima>=4.0
+
+# 工作流语法校验（`tools/check_workflow_ps.py` 用它读 .github/workflows/*.yml）
+# 与 tests/test_tools_offline.py。没装时该工具会跳过并说明怎么装，不会报错。
+PyYAML>=6.0

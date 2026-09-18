@@ -98,7 +98,11 @@
 | --- | --- |
 | `check_qt_imports.py [目录…]` | 校验所有 PySide6 导入的属性真实存在（`from PySide6.QtWidgets import QStandardPaths` 这种错 pyflakes/ruff 查不出来），并提示正确来源模块 |
 | `check_qt_imports_probe.py` | 自证上面那个工具：故意写错的必须被查出，正确的必须通过 |
-| `check_workflow_ps.py` | 校验 GitHub 工作流里 `pwsh` 步骤的语法 |
+| `check_workflow_ps.py` | 校验 GitHub 工作流里 `pwsh` 步骤的语法（需要 `PyYAML`；非 Windows 会自行跳过） |
+| `run_bat_selfheal_check.py` | 造一个「文件在但启动不了」的假 `.venv`，验证 `run.bat` 的自愈分支真的会重建环境 |
+
+> 上面这几个 + `tools/*.py` 的语法与退出码约定由 `tests/test_tools_offline.py`
+> 在 CI 里守着（**离线可跑**的那部分才会进 CI，需要真机的诊断脚本不在其中）。
 
 ## 崩溃复现（都是「关对话框导致进程消失」那一类）
 

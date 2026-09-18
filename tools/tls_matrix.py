@@ -12,6 +12,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tools._common import enable_utf8  # noqa: E402
+
+#: 下面会打印 ✓；Windows 默认 GBK 控制台或输出被重定向时会 UnicodeEncodeError
+enable_utf8()
+
 from app.bambu.tlsutil import BBL_CA_FILE  # noqa: E402
 
 

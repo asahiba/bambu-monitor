@@ -7,6 +7,19 @@
 
 ### 修复
 
+- **`run.bat` 现在能自愈「虚拟环境坏了」**：它原来只判断 `.venv\Scripts\python.exe`
+  是否存在，而基础 Python 被移动/删除后那个文件还在、一启动就退出（退出码 103）——
+  用户双击只看到窗口一闪。现在会真的启动一次解释器，不行就重建 `.venv`
+  （与 `test.bat` 同一条判据），并有 `tools/run_bat_selfheal_check.py` 造现场自证。
+- **两个工具脚本「明明通过却被报成失败」**：`tools/check_qt_imports.py` /
+  `check_qt_imports_probe.py` 打印 `✓`/`✗` 前没切 UTF-8，在 Windows 上只要输出被
+  重定向（CI、`> log.txt`、`subprocess(capture_output=True)`）就 `UnicodeEncodeError`；
+  `tools/check_workflow_ps.py` 则因为缺 `PyYAML` 直接甩 traceback。现在前者统一
+  调用 `enable_utf8()`，后者缺依赖时给出安装提示并跳过（`PyYAML` 已加入
+  `requirements-dev.txt`）。
+- **`tools/layout_check.py` 会「卡死」**：单画面模式下不在网格里的画面
+  `getItemPosition(-1)` 返回未初始化内存（实测拿到 `@-57146960,451 -54902140×451`），
+  照着它 `range()` 展开就是上亿次循环。现在跳过不在网格中的画面、并给跨格加上限。
 - **Linux / Docker / NAS 上访问代码不再明文落盘**：以前只有 Windows 的 DPAPI，
   其它平台一律明文保存 `config.json`。现在补了第二层：32 字节随机密钥存在配置目录的
   `secret.key`（权限 `0600`），或用 `BAMBU_MONITOR_SECRET` 口令派生密钥（不落盘）、
@@ -65,6 +78,9 @@
 
 ### 测试
 
+- 新增 `tests/test_tools_offline.py`：把**离线可跑**的工具脚本接进 CI（子进程断言退出码），
+  并静态守住「打印 ✓/✗ 的脚本必须切 UTF-8」「`*check*.py` 必须有退出码」
+  「`tools/*.py` 语法必须合法」「新工具要登记到 `tools/README.md`」。
 - 新增 `tests/test_discovery_interfaces.py`（15 条）：网段手工指定、去重、三层来源的
   优先级，以及「没有外网也能枚举出网卡」。
 - 新增 `tests/test_web_shrink_jpeg.py`（7 条）：Qt / OpenCV / 两者都没有 三条路径。
