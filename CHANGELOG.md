@@ -67,10 +67,14 @@
 
 ### 变更
 
+- **通道诊断只剩一份实现**：`tools/diagnose.py` 与界面「通道诊断」原来各写了一遍
+  （连 RTSPS 候选路径都不一样 —— 命令行试 3 个、界面只试 1 个，于是出现过
+  「命令行说通了、界面说不行」）。现在流程在 `app/bambu/diagnostics.py`，
+  两个入口共用；步骤编号按实际顺序生成，界面少跑「真拉流」那步也不会跳号。
 - **超时与等待时长集中到 `app/bambu/timeouts.py`**（与端口表 `ports.py` 同一条纪律：
-  不导入任何其它 app 模块）。协议层 28 个常量分组命名（`*_TIMEOUT` / `*_JOIN` /
+  不导入任何其它 app 模块）。协议层 33 个常量分组命名（`*_TIMEOUT` / `*_JOIN` /
   `*_INTERVAL` / `*_CAP` / `*_SLACK`），`camera.py`、`rtsp.py`、`mqtt_worker.py`、
-  `probe.py`、`printer.py`、`discovery.py` 与两个对话框全部改为引用它。
+  `probe.py`、`printer.py`、`discovery.py`、`diagnostics.py` 与添加对话框全部改为引用它。
   数值一个都没改，只是终于能一处看全、一处调优。
 - **`--host` 的警告写清楚了**：默认 `0.0.0.0` 是**监听所有网卡**（为了让同网段的手机
   能看），现在帮助文本、`SECURITY.md`、`docs/DEPLOY.md` 都写明了，并新增 `BAMBU_HOST`
@@ -78,6 +82,9 @@
 
 ### 测试
 
+- 新增 `tests/test_diagnostics.py`（17 条）：诊断探测「失败不抛异常」、渲染结论可读、
+  编排顺序/编号/取消行为，以及一条「界面与 CLI 不得再自己写 socket / `connect_tls`」
+  的契约（防止两份实现再次漂移）。
 - 新增 `tests/test_tools_offline.py`：把**离线可跑**的工具脚本接进 CI（子进程断言退出码），
   并静态守住「打印 ✓/✗ 的脚本必须切 UTF-8」「`*check*.py` 必须有退出码」
   「`tools/*.py` 语法必须合法」「新工具要登记到 `tools/README.md`」。

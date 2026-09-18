@@ -13,7 +13,7 @@
 
 | 脚本 | 用途 |
 | --- | --- |
-| `diagnose.py <IP> [--auto]` | **首选**：端口、TLS 参数、6000 画面、RTSPS 鉴权与实际拉流、MQTT 遥测全跑一遍 |
+| `diagnose.py <IP> [--auto]` | **首选**：端口、TLS 参数、6000 画面、RTSPS 鉴权与实际拉流、MQTT 遥测全跑一遍（流程与界面「通道诊断」共用 `app/bambu/diagnostics.py`，结论必然一致） |
 | `session_check.py [秒数] [IP…]` | 按配置跑完整会话（遥测 + 画面），真机验证通道选择，逐台打印结果 |
 | `real_printer_check.py <IP…>` | 只读检查真实打印机端口与证书链（**不发送任何鉴权/控制指令**） |
 | `auth_error_check.py <IP>` | 用错误访问代码验证「访问代码错误」的提示路径 |
@@ -25,7 +25,7 @@
 | --- | --- |
 | `probe6000.py <IP…>` | 观察 6000 端口反应，区分「不支持该协议」与「口令不对」 |
 | `raw_camera_check.py <IP> [--auto]` | 直接用 socket 走完 6000 端口的 TLS + 80 字节鉴权包 + 帧格式 |
-| `rtsp_describe.py <IP> [--auto]` | 手工对 322 端口发 RTSP DESCRIBE，判断服务状态与鉴权方式 |
+| `rtsp_describe.py <IP> [--auto]` | 手工对 322 端口发 RTSP DESCRIBE，判断服务状态与鉴权方式（诊断对话框走的是同一套实现，见 `app/bambu/diagnostics.py`） |
 | `rtsp_check.py <IP> [--auto]` | 验证 RTSPS 通道实际能否拉到画面、耗时多少 |
 
 ## TLS
