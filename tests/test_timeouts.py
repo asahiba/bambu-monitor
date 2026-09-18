@@ -116,12 +116,21 @@ def test_模块级常量被_import_到使用方():
 
 
 def test_探测与诊断不再各写一份字面量():
-    """契约：探测默认超时与诊断 TCP/TLS 超时都必须来自常量表。"""
+    """契约：探测默认超时与诊断各步超时都必须来自常量表。
+
+    诊断流程现在只有一份实现（`app/bambu/diagnostics.py`），CLI 与界面共用，
+    所以这里盯的是它 + 添加对话框。
+    """
+    from app.bambu import diagnostics
     from app.ui import add_dialog, diagnose_dialog
 
     assert add_dialog.PROBE_MQTT_TIMEOUT is timeouts.PROBE_MQTT_TIMEOUT
-    assert diagnose_dialog.PROBE_MQTT_TIMEOUT is timeouts.PROBE_MQTT_TIMEOUT
-    assert diagnose_dialog.DIAG_TCP_TIMEOUT is timeouts.DIAG_TCP_TIMEOUT
+    # 诊断对话框把超时全部委托给共用模块，自己不再直接引用超时常量
+    assert not hasattr(diagnose_dialog, "DIAG_TCP_TIMEOUT"), (
+        "对话框不该再自己定义/引用诊断超时 —— 那是 app/bambu/diagnostics.py 的事"
+    )
+    assert diagnostics.DIAG_TCP_TIMEOUT is timeouts.DIAG_TCP_TIMEOUT
+    assert diagnostics.PROBE_MQTT_TIMEOUT is timeouts.PROBE_MQTT_TIMEOUT
 
 
 def test_各模块不再硬编码同一类超时(monkeypatch):
@@ -135,7 +144,8 @@ def test_各模块不再硬编码同一类超时(monkeypatch):
         "app/bambu/rtsp.py": [],
         "app/bambu/mqtt_worker.py": ["5.0", "4.0"],
         "app/bambu/discovery.py": [],
-        "app/ui/diagnose_dialog.py": ["4.0", "10.0", "3.0", "5.0", "6.0"],
+        "app/bambu/diagnostics.py": ["4.0", "10.0", "3.0", "5.0", "6.0"],
+        "app/ui/diagnose_dialog.py": [],
         "app/ui/add_dialog.py": ["10.0"],
     }
     leftover: list[str] = []
@@ -175,6 +185,7 @@ def test_各使用方导入的名字都真实存在():
         "app/bambu/rtsp.py",
         "app/bambu/mqtt_worker.py",
         "app/bambu/discovery.py",
+        "app/bambu/diagnostics.py",
         "app/ui/add_dialog.py",
         "app/ui/diagnose_dialog.py",
     ]

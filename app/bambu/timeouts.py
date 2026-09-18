@@ -51,6 +51,13 @@ CAMERA_FRAME_BODY_TIMEOUT = 30.0
 CAMERA_FIRST_FRAME_TIMEOUT = 12.0
 #: 停止 6000 通道时等线程收尾的上限。
 CAMERA_STREAM_JOIN = 3.0
+#: 连接失败后的首次退避，之后按 ``CAMERA_BACKOFF_FACTOR`` 递增到 ``CAMERA_BACKOFF_MAX``。
+CAMERA_BACKOFF_START = 1.0
+CAMERA_BACKOFF_FACTOR = 1.6
+CAMERA_BACKOFF_MAX = 15.0
+#: 鉴权失败（访问代码不对）后的退避。**不能太小**：口令错时高频重试只会
+#: 反复被拒，而用户改完访问代码会走 `restart()` 立刻重建，不依赖这里的退避。
+CAMERA_AUTH_BACKOFF = 5.0
 
 # --------------------------------------------------------------------------- 画面（RTSPS 322）
 #: FFmpeg/OpenCV 打开流的超时（毫秒，OpenCV 的参数单位）。

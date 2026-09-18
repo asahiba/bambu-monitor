@@ -1,10 +1,12 @@
-"""通道诊断对话框：逐项检查某台打印机的遥测与视频通道并给出报告。"""
+"""通道诊断对话框：逐项检查某台打印机的遥测与视频通道并给出报告。
+
+流程本身（端口 / TLS / 6000 取帧 / RTSPS DESCRIBE / MQTT）在
+`app/bambu/diagnostics.py`，与命令行工具 `tools/diagnose.py` 共用一份，
+本文件只负责「在对话框里边跑边显示 + 关闭时能取消」。
+"""
 
 from __future__ import annotations
 
-import base64
-import socket
-import time
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -20,19 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..bambu import tlsutil
-from ..bambu.camera import CameraStream
+from ..bambu import diagnostics
 from ..bambu.models import PrinterInfo
-from ..bambu.ports import CAMERA_PORT, MQTT_PORT, RTSP_PORT
-from ..bambu.probe import probe_printer
-from ..bambu.timeouts import (
-    CAMERA_FIRST_FRAME_TIMEOUT,
-    DIAG_RTSP_READ_TIMEOUT,
-    DIAG_RTSP_TLS_TIMEOUT,
-    DIAG_TCP_TIMEOUT,
-    DIAG_TLS_TIMEOUT,
-    PROBE_MQTT_TIMEOUT,
-)
 from . import theme
 from .qt_threads import retire_thread
 
@@ -78,111 +69,35 @@ class _DiagThread(QThread):
             self._emit("✗ 未填写访问代码，无法继续。请在「编辑打印机」里填写后重试。")
             return
 
-        # 1. 端口可达性
-        self._emit("① 端口连通性")
-        for port, name in (
-            (MQTT_PORT, "MQTT 遥测"),
-            (CAMERA_PORT, "JPEG 画面"),
-            (RTSP_PORT, "RTSPS 画面"),
-        ):
-            ok = self._tcp(port)
-            self._emit(f"   {port:>5} {name}: {'可连接 ✓' if ok else '不可达 ✗'}")
-
-        # 2. TLS 参数
-        self._emit("")
-        self._emit("② TLS 参数（证书链 + 安全级别）")
-        for port in (MQTT_PORT, CAMERA_PORT, RTSP_PORT):
-            try:
-                sock, verified = tlsutil.connect_tls(info.ip, port, timeout=DIAG_TLS_TIMEOUT)
-                sock.close()
-                self._emit(f"   {port:>5}: 握手成功 ✓  证书链{'已校验' if verified else '未校验'}")
-            except Exception as exc:  # noqa: BLE001
-                self._emit(f"   {port:>5}: 握手失败 ✗  {exc.__class__.__name__}: {exc}")
-
-        # 3. 6000 端口摄像头协议
-        self._emit("")
-        self._emit("③ 6000 端口画面（80 字节鉴权包 + JPEG 帧）")
-        camera = CameraStream(info.ip, code, serial=info.serial)
-        camera.start()
-        frame = camera.wait_first_frame(CAMERA_FIRST_FRAME_TIMEOUT)
-        camera.stop()
-        if frame:
-            self._emit(f"   成功 ✓  取得 {len(frame) // 1024} KB 画面，状态：{camera.detail}")
-        else:
-            self._emit(f"   失败 ✗  状态：{camera.state} —— {camera.detail}")
-
-        # 4. RTSPS(322)
-        self._emit("")
-        self._emit("④ RTSPS(322) 握手与鉴权")
-        self._rtsp_describe()
-
-        # 5. 遥测
-        self._emit("")
-        self._emit("⑤ MQTT 遥测(8883)")
-        result = probe_printer(
+        # 流程与命令行工具 tools/diagnose.py **共用** app/bambu/diagnostics.py。
+        # 以前两边各写一份，连 RTSPS 的候选路径都不一样（命令行会试 3 个路径，
+        # 界面只试 1 个），于是出现过「命令行说通了、界面上说不行」这种自相矛盾。
+        stream = diagnostics.run(
             info.ip,
             code,
             serial=info.serial,
-            timeout=PROBE_MQTT_TIMEOUT,
-            check_camera=False,
+            # 界面不额外做一次 RTSPS 真拉流（那一步最长 20 秒）；
+            # 需要完整拉到帧请用 tools/diagnose.py
+            with_rtsp_frame=False,
+            should_stop=lambda: self._aborted,
             on_step=self._emit,
         )
-        for text in result.summary().splitlines():
-            self._emit("   " + text)
+        try:
+            for event in stream:
+                if isinstance(event, diagnostics.SectionStart):
+                    self._emit("")
+                    self._emit(event.title)
+                else:
+                    for line in event.lines:
+                        self._emit(line)
+        finally:
+            # 走 _emit 抛出的 _DiagAborted 也要让生成器收尾：
+            # 里面的取帧/遥测线程靠它的 finally 停干净，否则关闭对话框会留下游离线程
+            stream.close()
 
         self._emit("")
         self._emit("诊断结束。若画面失败但 322 端口提示 401 Unauthorized，")
         self._emit("说明 RTSP 服务是活的，请确认打印机已开启「局域网实时画面」。")
-
-    def _tcp(self, port: int) -> bool:
-        try:
-            with socket.create_connection((self.info.ip, port), timeout=DIAG_TCP_TIMEOUT):
-                return True
-        except OSError:
-            return False
-
-    def _rtsp_describe(self) -> None:
-        try:
-            tls, verified = tlsutil.connect_tls(
-                self.info.ip, RTSP_PORT, timeout=DIAG_RTSP_TLS_TIMEOUT, server_hostname=self.info.ip
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._emit(f"   TLS 连接失败 ✗  {exc}")
-            return
-        try:
-            auth = base64.b64encode(f"bblp:{self.info.access_code}".encode()).decode()
-            request = (
-                f"DESCRIBE rtsps://{self.info.ip}:{RTSP_PORT}/streaming/live/1 RTSP/1.0\r\n"
-                "CSeq: 1\r\n"
-                "Accept: application/sdp\r\n"
-                f"Authorization: Basic {auth}\r\n\r\n"
-            )
-            tls.sendall(request.encode())
-            tls.settimeout(DIAG_RTSP_READ_TIMEOUT)
-            data = b""
-            started = time.time()
-            while b"\r\n\r\n" not in data and time.time() - started < DIAG_RTSP_READ_TIMEOUT:
-                chunk = tls.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-            text = data.decode("utf-8", "replace")
-            head = text.splitlines()[0] if text else "（无响应）"
-            self._emit(f"   DESCRIBE -> {head}（证书链{'已校验' if verified else '未校验'}）")
-            for line in text.splitlines()[1:8]:
-                if line.strip():
-                    self._emit(f"      {line}")
-            if "401" in head:
-                self._emit("   注：401 表示 RTSP 服务在运行，但用户名/口令未被接受")
-            elif "200" in head:
-                self._emit("   RTSP 服务正常，可以直接拉流 ✓")
-        except (OSError, socket.timeout, TimeoutError) as exc:
-            self._emit(f"   DESCRIBE 失败 ✗  {exc}")
-        finally:
-            try:
-                tls.close()
-            except OSError:
-                pass
 
 
 class DiagnoseDialog(QDialog):

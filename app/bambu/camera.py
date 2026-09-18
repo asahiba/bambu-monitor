@@ -42,6 +42,10 @@ from typing import Callable, Optional
 from . import tlsutil
 from .ports import CAMERA_PORT
 from .timeouts import (
+    CAMERA_AUTH_BACKOFF,
+    CAMERA_BACKOFF_FACTOR,
+    CAMERA_BACKOFF_MAX,
+    CAMERA_BACKOFF_START,
     CAMERA_FIRST_FRAME_TIMEOUT,
     CAMERA_FRAME_BODY_TIMEOUT,
     CAMERA_FRAME_HEADER_TIMEOUT,
@@ -292,21 +296,21 @@ class CameraStream(threading.Thread):
 
     def run(self) -> None:
         self._started_at = time.time()
-        backoff = 1.0
+        backoff = CAMERA_BACKOFF_START
         while not self._stop_event.is_set():
             if not self._open():
                 if self._stop_event.wait(backoff):
                     break
-                backoff = min(backoff * 1.6, 15.0)
+                backoff = min(backoff * CAMERA_BACKOFF_FACTOR, CAMERA_BACKOFF_MAX)
                 continue
-            backoff = 1.0
+            backoff = CAMERA_BACKOFF_START
             self._pump()
             self._close_socket()
             if self._stop_event.is_set():
                 break
             if self.state == self.STATE_AUTH_ERROR:
-                # 访问代码错误时不必高频重试
-                if self._stop_event.wait(5.0):
+                # 访问代码错误时不必高频重试（用户改完代码会走 restart() 立刻重建）
+                if self._stop_event.wait(CAMERA_AUTH_BACKOFF):
                     break
             elif self._stop_event.wait(1.0):
                 break
