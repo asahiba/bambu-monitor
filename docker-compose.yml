@@ -17,6 +17,11 @@ services:
       BAMBU_MAX_FPS: "10"         # 每路画面最大帧率（调低可省 CPU）
       BAMBU_MONITOR_CONFIG_DIR: /data
       BAMBU_TOKEN: ""             # 留空则用配置文件里的令牌
+      # 凭据加密口令（可选，推荐）：设了它，访问代码的密钥就由口令派生、不落盘。
+      # 不设则容器会在 /data 下生成 secret.key（0600）—— 密钥与配置同目录。
+      # BAMBU_MONITOR_SECRET: "换成一串你自己的口令"
+      # 手工指定搜索网段（可选）：纯内网 / 多网段 / 容器里枚举不到网卡时用
+      # BAMBU_MONITOR_SUBNETS: "192.168.31.0/24"
       TZ: Asia/Shanghai
     volumes:
       - ./data:/data              # 配置文件与日志

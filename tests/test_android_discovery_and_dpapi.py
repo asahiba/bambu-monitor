@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.bambu.discovery import DiscoveryService, merge_devices
 from app.bambu.models import PrinterInfo, PrinterModel
 from app.util import secret
@@ -96,10 +98,18 @@ def test_merge_devices_同样按序列号与IP双重去重():
 # --------------------------------------------------------------- DPAPI 提示不应阻断
 
 
-def test_没有DPAPI时加密只记提示不记错误(monkeypatch):
-    """非 Windows 上没 DPAPI 是平台事实，属于**提示**，不是错误。"""
+def test_没有DPAPI时降级只记提示不记错误(monkeypatch):
+    """非 Windows 上没 DPAPI 是平台事实，属于**提示**，不是错误。
+
+    分两种情形，都不该把操作判成失败：
+
+    * 有 ``cryptography``（Linux / Docker）-> 用本机密钥加密，凭据不明文落盘；
+    * 没有（**安卓**：APK 刻意不含 cryptography，见 `docs/PACKAGING.md`）-> 明文保存。
+    """
+    # 情形一：没有加密库（安卓）
     secret.clear_last_error()
     monkeypatch.setattr(secret.sys, "platform", "linux")
+    monkeypatch.setattr(secret, "_fernet", lambda: None)
 
     out = secret.encrypt_text("12345678")
 
@@ -108,6 +118,18 @@ def test_没有DPAPI时加密只记提示不记错误(monkeypatch):
         "「没有 DPAPI」被记成了错误 —— 这会让安卓上成功的添加被报成失败"
     )
     assert secret.last_warning(), "应当留下一条提示，让用户知道凭据是明文"
+
+
+def test_安卓上添加设备的提示仍然提到DPAPI(isolated_config_dir, monkeypatch):
+    """契约：非 Windows 的凭据保护提示里要能看出「没有 DPAPI」这件事。
+
+    （`app/web/host.py` 把它当 warning 回给前端，前端文案与它对应。）
+    """
+    secret.clear_last_error()
+    monkeypatch.setattr(secret.sys, "platform", "linux")
+    monkeypatch.setattr(secret, "_fernet", lambda: None)
+    secret.encrypt_text("12345678")
+    assert "DPAPI" in (secret.last_warning() or "")
 
 
 def test_有错误时错误通道仍然工作(monkeypatch):
@@ -129,7 +151,7 @@ def test_clear会同时清掉两条通道(monkeypatch):
 
 
 def test_添加设备不因明文提示而失败(isolated_config_dir, monkeypatch):
-    """**核心回归**：模拟安卓（无 DPAPI）下从网页添加一台打印机。
+    """**核心回归**：模拟安卓（无 DPAPI、也无 cryptography）下从网页添加一台打印机。
 
     设备必须真的加上（返回 ok=True、会话建出来），
     同时把「凭据是明文」作为 warning 告诉用户，而不是报失败。
@@ -137,8 +159,9 @@ def test_添加设备不因明文提示而失败(isolated_config_dir, monkeypatc
     from app.config import AppConfig
     from app.web.host import WebHost
 
-    # 让加密必定失败，模拟安卓没有 DPAPI
+    # 让加密必定失败，模拟安卓：APK 刻意不含 cryptography（见 docs/PACKAGING.md）
     monkeypatch.setattr(secret.sys, "platform", "linux")
+    monkeypatch.setattr(secret, "_fernet", lambda: None)
     monkeypatch.setattr(secret, "_crypt", lambda data, protect: (_ for _ in ()).throw(OSError("DPAPI 仅在 Windows 上可用")))
 
     config = AppConfig.load()
@@ -163,6 +186,44 @@ def test_添加设备不因明文提示而失败(isolated_config_dir, monkeypatc
         sessions[0].stop()
     except Exception:
         pass
+
+
+def test_Linux_Docker_添加设备时凭据不明文落盘(isolated_config_dir, monkeypatch):
+    """契约：有 cryptography 的非 Windows 部署（Docker/NAS）必须加密存储。
+
+    这是 KNOWN_ISSUES「Linux/Docker 无 DPAPI -> 明文保存」那条的回归用例：
+    加进去的设备要能用，且 config.json 里看不到明文访问代码。
+    """
+    from app.config import AppConfig
+    from app.web.host import WebHost
+
+    if secret._fernet() is None:  # noqa: SLF001 - 探一下有没有 cryptography
+        pytest.skip("没有 cryptography（安卓式精简部署），本用例不适用")
+
+    # 模拟非 Windows：DPAPI 不可用，但 cryptography 在
+    monkeypatch.setattr(secret.sys, "platform", "linux")
+    monkeypatch.setattr(
+        secret,
+        "_crypt",
+        lambda data, protect: (_ for _ in ()).throw(OSError("DPAPI 仅在 Windows 上可用")),
+    )
+
+    config = AppConfig.load()
+    sessions: list = []
+    host = WebHost(config, lambda: sessions)
+    result = host.add_printer(
+        name="车间 A2L", ip="192.168.2.99", access_code="87654321", model_label="A1", serial=""
+    )
+    assert result["ok"] is True, result
+    # 会话起来后会试着连真机（本地离线夹具会拦住它）—— 用完立刻停掉，
+    # 否则线程会以 connect 被禁的异常结束，冒出一条 PytestUnhandledThreadExceptionWarning
+    for session in sessions:
+        session.stop()
+
+    raw = (isolated_config_dir / "config.json").read_text(encoding="utf-8")
+    assert "87654321" not in raw, "Docker/Linux 上访问代码不得明文落盘"
+    assert "fernet:" in raw
+    assert AppConfig.load().printers[0].access_code == "87654321"
 
 
 def test_真正写盘失败时仍然算失败(isolated_config_dir, monkeypatch):

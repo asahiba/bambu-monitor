@@ -167,9 +167,9 @@ README 承诺「主配置损坏时会自动从备份恢复」，但 `load()` 只
 
 | # | 问题 | 位置 |
 | --- | --- | --- |
-| 10 | Linux/Docker 无 DPAPI → 访问代码**明文**保存在 `config.json`（已加诊断提示，但存储方式未变）。若要真正加密，需引入用户口令或系统密钥环 | `app/util/secret.py:29-30`、`app/config.py:141` |
-| 11 | 网卡枚举在非 Windows 上回退到「UDP connect 探测 + `getaddrinfo`」，**依赖外网连通**（探测 223.5.5.5/8.8.8.8/1.1.1.1）；纯内网环境可能枚举不到网段，导致搜索不全 | `app/bambu/discovery.py:245-275` |
-| 12 | 无 Qt 环境（Docker 只装 `requirements-server.txt`）时 `_shrink_jpeg()` 永远返回 None → 大于 90KB 的帧**不缩放直接推原图**，手机流量与内存开销上升。可加 OpenCV 兜底缩放 | `app/web/server.py:41-63,138-141` |
+| 10 | ~~Linux/Docker 无 DPAPI → 访问代码**明文**保存在 `config.json`（已加诊断提示，但存储方式未变）。若要真正加密，需引入用户口令或系统密钥环~~ **已修**：新增第二层加密（`fernet:` 前缀）——32 字节随机密钥落在配置目录的 `secret.key`（`os.open(..., 0o600)`，先建文件再写内容，避免"世界可读"窗口），或用 `BAMBU_MONITOR_SECRET` 口令 PBKDF2 派生（密钥不落盘），或用 `BAMBU_MONITOR_KEY_FILE` 挂到 Docker secrets。**安卓仍然明文**：APK 刻意不含 `cryptography`（4096 字节对齐的 wheel 会让 16 KB 内存页设备闪退，见 `docs/PACKAGING.md`），这条路必须保留。文档同步更新了 `SECURITY.md`（明确「防住配置文件被单独复制走、防不住能读目录的人」）与 `docs/DEPLOY.md` | `app/util/secret.py`、`app/config.py` |
+| 11 | ~~网卡枚举在非 Windows 上回退到「UDP connect 探测 + `getaddrinfo`」，**依赖外网连通**（探测 223.5.5.5/8.8.8.8/1.1.1.1）；纯内网环境可能枚举不到网段，导致搜索不全~~ **已修**：新增 POSIX `ioctl` 枚举（Linux/macOS，离线可用、能拿到真实掩码），并把依赖外网的探测降级为最后一层兜底；再加环境变量 `BAMBU_MONITOR_SUBNETS` 手工指定网段（纯内网用户的补救手段）；三层结果按 IP 去重（先出现的优先）。枚举不出任何可扫描网卡时会打一条日志告诉用户怎么手工指定。回归用例 `tests/test_discovery_interfaces.py`(15 条) | `app/bambu/discovery.py:250-300` |
+| 12 | ~~无 Qt 环境（Docker 只装 `requirements-server.txt`）时 `_shrink_jpeg()` 永远返回 None → 大于 90KB 的帧**不缩放直接推原图**，手机流量与内存开销上升。可加 OpenCV 兜底缩放~~ **已修**：拆成 `_shrink_with_qt` / `_shrink_with_cv2` 两条路径，OpenCV 兜底（`requirements-server.txt` 本来就装了 headless 版）；两条都不可用时**只提示一次**的日志（原来完全静默）。回归用例 `tests/test_web_shrink_jpeg.py`(7 条) | `app/web/server.py:41-63,138-141` |
 
 ### P2：测试与结构
 

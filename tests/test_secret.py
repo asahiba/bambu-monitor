@@ -8,12 +8,24 @@
 
 from __future__ import annotations
 
+import os
 import string
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from app.util import secret
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+try:  # 安卓 APK 刻意不含 cryptography，所以它是可选依赖
+    import cryptography  # noqa: F401
+
+    HAS_CRYPTOGRAPHY = True
+except ImportError:  # pragma: no cover - 只有精简部署才会走到
+    HAS_CRYPTOGRAPHY = False
 
 _HEX_DIGITS = set(string.hexdigits.lower())
 
@@ -134,13 +146,20 @@ def test_decrypt_broken_dpapi_payload_returns_empty(broken):
 
 
 def test_encrypt_text_falls_back_to_plaintext_when_dpapi_unavailable(monkeypatch):
-    """契约（模块 docstring）：DPAPI 调用失败时 ``encrypt_text`` 原样返回明文，保证功能可用。"""
+    """契约（模块 docstring）：DPAPI **且** 加密库都不可用时原样返回明文，保证功能可用。
+
+    这是**安卓**的处境：APK 刻意不装 ``cryptography``
+    （Chaquopy 的预编译包是 4096 字节对齐，会在 16 KB 内存页设备上闪退，
+    见 ``docs/PACKAGING.md`` 与 ``tests/test_android_packaging.py``）。
+    """
 
     def _boom(data, protect):
         raise OSError("模拟没有 DPAPI")
 
     monkeypatch.setattr(secret, "_crypt", _boom)
+    monkeypatch.setattr(secret, "_fernet", lambda: None)  # 模拟没有 cryptography
     assert secret.encrypt_text("12345678") == "12345678"
+    assert secret.last_error() is None, "平台不给加密能力是事实，不是这次操作失败"
 
 
 def test_decrypt_text_returns_empty_when_dpapi_unavailable(monkeypatch):
@@ -151,3 +170,129 @@ def test_decrypt_text_returns_empty_when_dpapi_unavailable(monkeypatch):
 
     monkeypatch.setattr(secret, "_crypt", _boom)
     assert secret.decrypt_text("dpapi:AAAA") == ""
+
+
+# --------------------------------------------------------------------------- 本机密钥（非 Windows）
+
+
+def _no_dpapi(monkeypatch):
+    """模拟「没有 DPAPI」（Linux / Docker / 安卓 都走这条路）。"""
+    monkeypatch.setattr(secret, "_crypt", lambda data, protect: (_ for _ in ()).throw(OSError("DPAPI 仅在 Windows 上可用")))
+    monkeypatch.setattr(secret.sys, "platform", "linux")
+
+
+requires_cryptography = pytest.mark.skipif(
+    not HAS_CRYPTOGRAPHY, reason="本机密钥加密需要 cryptography"
+)
+
+
+@requires_cryptography
+def test_没有DPAPI时用本机密钥加密而不是明文落盘(monkeypatch, isolated_config_dir):
+    """**核心回归**：Linux / Docker 不再把访问代码明文写进 config.json。
+
+    以前这里退回明文，只在配置目录权限上做文章；现在有 ``cryptography`` 时用
+    32 字节随机密钥（配置目录下的 ``secret.key``，0600）+ Fernet 加密。
+    """
+    _no_dpapi(monkeypatch)
+    blob = secret.encrypt_text("12345678")
+    assert blob.startswith("fernet:"), blob
+    assert "12345678" not in blob
+    assert secret.decrypt_text(blob) == "12345678"
+    assert secret.last_error() is None, "平台没有 DPAPI 是事实，不是这次操作失败"
+    assert secret.last_warning(), "应告诉用户凭据是怎么保护的"
+
+    key_file = isolated_config_dir / "secret.key"
+    assert key_file.exists(), "非 Windows 上应当生成密钥文件"
+    # 密钥文件必须只有本人可读（0600）；先写内容后 chmod 会留下"世界可读"的窗口。
+    # 这里用 os.name 而不是 sys.platform：本测试把 sys.platform 改成了 linux 以
+    # 模拟非 Windows，而 Windows 上 chmod 是空操作（模式位恒为 0666）。
+    if os.name == "posix":
+        assert (key_file.stat().st_mode & 0o077) == 0, oct(key_file.stat().st_mode)
+
+
+@requires_cryptography
+def test_另一个进程用同一个密钥文件也能解开(monkeypatch, isolated_config_dir, tmp_path):
+    """契约：密钥文件是**跨进程持久**的 —— 重启后必须还能解开老配置。
+
+    用子进程而不是 ``monkeypatch.undo()``：后者会把 autouse 的配置目录隔离一起
+    撤销（同一个 monkeypatch 实例），于是测试会去碰用户真实的
+    ``%APPDATA%\\BambuMonitor``。
+    """
+    _no_dpapi(monkeypatch)
+    blob = secret.encrypt_text("87654321")
+
+    script = tmp_path / "child_decrypt.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(_PROJECT_ROOT)!r})\n"
+        "from app.util import secret\n"
+        "print(secret.decrypt_text(sys.argv[1]))\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["BAMBU_MONITOR_CONFIG_DIR"] = str(isolated_config_dir)
+    env.pop("BAMBU_MONITOR_SECRET", None)
+    env.pop("BAMBU_MONITOR_KEY_FILE", None)
+
+    result = subprocess.run(
+        [sys.executable, str(script), blob],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(_PROJECT_ROOT),
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "87654321"
+
+
+@requires_cryptography
+def test_密钥文件丢失时给出明确提示而不是抛异常(monkeypatch, isolated_config_dir):
+    _no_dpapi(monkeypatch)
+    blob = secret.encrypt_text("12345678")
+    (isolated_config_dir / "secret.key").unlink()
+    # 重新生成一把新密钥（文件丢失后的真实情形）
+    assert secret.decrypt_text(blob) == ""
+    assert "密钥文件" in (secret.last_warning() or "")
+
+
+@requires_cryptography
+def test_环境变量口令优先于密钥文件(monkeypatch, isolated_config_dir):
+    """契约：设置了 ``BAMBU_MONITOR_SECRET`` 就不落盘密钥文件（最强的一档）。"""
+    _no_dpapi(monkeypatch)
+    monkeypatch.setenv("BAMBU_MONITOR_SECRET", "我的口令")
+    blob = secret.encrypt_text("12345678")
+    assert blob.startswith("fernet:")
+    assert not (isolated_config_dir / "secret.key").exists(), "用口令时不该生成密钥文件"
+    assert secret.decrypt_text(blob) == "12345678"
+    assert "BAMBU_MONITOR_SECRET" in (secret.last_warning() or "")
+
+    # 换一个口令 -> 解不开（而且不抛异常）
+    monkeypatch.setenv("BAMBU_MONITOR_SECRET", "别的口令")
+    assert secret.decrypt_text(blob) == ""
+
+
+@requires_cryptography
+def test_可以指定密钥文件路径(monkeypatch, tmp_path):
+    """契约：``BAMBU_MONITOR_KEY_FILE`` 让 Docker 用户把密钥挂到别处（secrets）。"""
+    _no_dpapi(monkeypatch)
+    target = tmp_path / "secrets" / "bm.key"
+    target.parent.mkdir()
+    monkeypatch.setenv("BAMBU_MONITOR_KEY_FILE", str(target))
+    blob = secret.encrypt_text("12345678")
+    assert target.exists()
+    assert secret.decrypt_text(blob) == "12345678"
+
+
+@requires_cryptography
+def test_can_encrypt_反映真实能力(monkeypatch):
+    assert secret.can_encrypt() is True
+    monkeypatch.setattr(secret, "_fernet", lambda: None)
+    monkeypatch.setattr(secret.sys, "platform", "linux")
+    assert secret.can_encrypt() is False, "没有加密库时必须如实报告「只能明文」"
+
+
+def test_is_encrypted_认识两种前缀():
+    """契约：``fernet:`` 与 ``dpapi:`` 都算已加密；明文（安卓降级）不算。"""
+    assert secret.is_encrypted("fernet:abc") is True
+    assert secret.is_encrypted("12345678") is False

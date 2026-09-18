@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from http import HTTPStatus
@@ -26,6 +27,8 @@ from .icons import icon_bytes
 from .page import INDEX_HTML
 from .service_worker import SERVICE_WORKER_JS
 
+LOGGER = logging.getLogger("bambu-monitor.web")
+
 BOUNDARY = "bmframe"
 #: 多路复用流：每条记录的帧头（魔数 2 字节 + 类型 1 + 画面序号 2 + 长度 4）
 RECORD_MAGIC = b"BM"
@@ -39,29 +42,87 @@ PASSTHROUGH_BYTES = 90_000
 CLIENT_TTL = 6.0
 
 
-def _shrink_jpeg(jpeg: bytes, max_width: int) -> Optional[bytes]:
-    """把大图缩到网页端合适的尺寸（在后台线程调用）。"""
-    try:
-        from PySide6.QtCore import QBuffer, QIODevice, QSize, Qt
-        from PySide6.QtGui import QImage
+def _shrink_with_qt(jpeg: bytes, max_width: int) -> Optional[bytes]:
+    """桌面版路径：用 Qt 解码/缩放/重编码。"""
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
+    from PySide6.QtGui import QImage
 
-        image = QImage.fromData(jpeg, "JPG")
-        if image.isNull():
-            return None
-        if image.width() > max_width:
-            image = image.scaled(
-                QSize(max_width, max_width), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-        from PySide6.QtCore import QByteArray
-
-        data = QByteArray()
-        buffer = QBuffer(data)
-        buffer.open(QIODevice.WriteOnly)
-        image.save(buffer, "JPG", 72)
-        buffer.close()
-        return bytes(data.data())
-    except Exception:  # noqa: BLE001 - 转码失败就退回原图
+    image = QImage.fromData(jpeg, "JPG")
+    if image.isNull():
         return None
+    if image.width() > max_width:
+        image = image.scaled(
+            QSize(max_width, max_width), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.WriteOnly)
+    image.save(buffer, "JPG", 72)
+    buffer.close()
+    return bytes(data.data())
+
+
+def _shrink_with_cv2(jpeg: bytes, max_width: int) -> Optional[bytes]:
+    """服务端路径（Linux / Docker / NAS，没有 Qt）：用 OpenCV 缩放。
+
+    ``requirements-server.txt`` 本来就装了 ``opencv-python-headless``（RTSPS 通道
+    需要它），所以这里不会是新的依赖。
+    """
+    import cv2
+    import numpy as np
+
+    buffer = np.frombuffer(jpeg, dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+    height, width = image.shape[:2]
+    if width > max_width:
+        scale = max_width / float(width)
+        # INTER_AREA 缩小时质量最好（INTER_LINEAR 会明显发糊）
+        image = cv2.resize(
+            image, (max_width, max(1, int(round(height * scale)))), interpolation=cv2.INTER_AREA
+        )
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    return bytes(encoded.tobytes()) if ok else None
+
+
+def _shrink_jpeg(jpeg: bytes, max_width: int) -> Optional[bytes]:
+    """把大图缩到网页端合适的尺寸（在后台线程调用）。
+
+    ## 为什么要有两条路径
+
+    桌面版有 Qt（``QImage``），服务端（``requirements-server.txt``）**故意不装
+    Qt**。原来这里只试 Qt，没有 Qt 时 ``import`` 就抛异常 -> 返回 None ->
+    调用方「转码失败就用原图」-> 纯服务端部署下**每一帧都是未缩放的原始大图**
+    （>90KB 的 1080p 画面），手机流量与内存开销成倍上涨，而且完全静默。
+
+    现在补 OpenCV 兜底，并且把「两条路都不行」的情况记一次日志（不刷屏）。
+    """
+    try:
+        return _shrink_with_qt(jpeg, max_width)
+    except Exception:  # noqa: BLE001 - 没有 Qt 或解码失败，换下一条路径
+        pass
+    try:
+        return _shrink_with_cv2(jpeg, max_width)
+    except Exception:  # noqa: BLE001 - 没有 OpenCV 或解码失败
+        _warn_shrink_unavailable()
+        return None
+
+
+_shrink_warned = False
+
+
+def _warn_shrink_unavailable() -> None:
+    """Qt 与 OpenCV 都不可用时只提示一次（每帧都打日志会把日志刷爆）。"""
+    global _shrink_warned
+    if _shrink_warned:
+        return
+    _shrink_warned = True
+    LOGGER.warning(
+        "既没有 Qt 也没有 OpenCV，超过 %d 字节的画面将按原图推送（网页流量会明显变大）。"
+        "服务端部署请安装 requirements-server.txt",
+        PASSTHROUGH_BYTES,
+    )
 
 
 class WebFrameCache(threading.Thread):

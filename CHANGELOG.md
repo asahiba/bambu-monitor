@@ -7,12 +7,38 @@
 
 ### 修复
 
+- **Linux / Docker / NAS 上访问代码不再明文落盘**：以前只有 Windows 的 DPAPI，
+  其它平台一律明文保存 `config.json`。现在补了第二层：32 字节随机密钥存在配置目录的
+  `secret.key`（权限 `0600`），或用 `BAMBU_MONITOR_SECRET` 口令派生密钥（不落盘）、
+  用 `BAMBU_MONITOR_KEY_FILE` 把密钥挂到别处。它防得住「配置文件被单独复制走」，
+  防不住能读整个目录的人 —— `SECURITY.md` 与 `docs/DEPLOY.md` 已写明。
+  **安卓版仍是明文**：APK 刻意不含 `cryptography`（见 `docs/PACKAGING.md`）。
+- **纯内网环境下自动搜索一台都搜不到**：网卡枚举原来会回退到「UDP 探测外网地址」，
+  没有默认路由就什么也枚举不到。现在改用 POSIX `ioctl` 直接问内核（离线可用、带真实掩码），
+  外网探测降级为最后一层兜底；还能用 `BAMBU_MONITOR_SUBNETS=192.168.1.0/24` 手工指定网段。
+- **Docker / NAS 上手机流量翻倍**：没有 Qt 时 `_shrink_jpeg()` 直接返回 None，
+  超过 90KB 的画面按原图推给手机，而且完全静默。现在用 OpenCV 兜底缩放。
 - **「导出配置」一点就报错**：`export_config()` 里写成了
   `from PySide6.QtWidgets import QStandardPaths`，而 `QStandardPaths` 属于 **QtCore**。
   这类错误 pyflakes / ruff 都查不出来（模块存在，只是名字不在里面），
   只有真的点按钮才会抛 `ImportError`；打包版报错信息里会出现
   `cannot import name 'QStandardPaths' from 'PySide6.QtWidgets' (...MEI0000...\PySide6\QtWidgets.pyd)`，
   后面的解包路径正是 PyInstaller 的临时目录。
+- **「导出配置 / 导入配置」少了一半字段**：`import_from()` 只恢复打印机列表与网页设置，
+  `last_timeout` / `show_timestamp` / `auto_connect` / `web_enabled` 被静默丢弃；
+  `PrinterInfo.discovered` 会被写出却从不读回。`window_geometry` 仍然有意不导入
+  （屏幕坐标跨机器会把窗口丢到屏幕外）。
+- **自动搜索列表里同一台打印机出现两次**：对话框用「序列号或 IP」单键去重，
+  而 SSDP 回包带序列号、2021 端口广播只认得出 IP。现在改走 `discovery.merge_devices()`
+  的双键合并，「已添加」的判定也一并按双键查。
+- **网页状态行把中文提示截成半句话**：`status_text` 原来是 `detail[:14]`。
+  现在桌面角标与网页共用 `app.core.camera_status_text()`（短标签 + 完整说明），
+  完整原因放在悬浮提示里。
+- **`python -O` 下发出的鉴权包可能畸形**：`build_auth_packet()` 的长度检查是 `assert`，
+  优化模式下会被整条去掉。已改成显式 `ValueError`。
+- **重连时新旧两轮线程并行**：`PrinterSession.restart()` 与轮询型适配器的
+  `PollingDeviceSession.restart()` 都是 `stop()` 后 `sleep(0.2)` 就重启，
+  而旧线程可能还在跑（RTSPS 取帧最长 20 秒）。现在改为等旧线程真正退出。
 - **关掉「通道诊断」/「添加打印机」对话框可能让程序整个消失**：
   两个对话框的 `QThread` 只等 2~3 秒，而一轮诊断要 20 秒以上；
   等不到就继续析构，**运行中的 QThread 被析构会让 Qt 直接 fail-fast**
@@ -28,6 +54,14 @@
 
 ### 测试
 
+- 新增 `tests/test_discovery_interfaces.py`（15 条）：网段手工指定、去重、三层来源的
+  优先级，以及「没有外网也能枚举出网卡」。
+- 新增 `tests/test_web_shrink_jpeg.py`（7 条）：Qt / OpenCV / 两者都没有 三条路径。
+- 新增 `tests/test_camera_status_text.py`（9 条）：状态标签的优先级与「完整说明不截断」。
+- 新增 `tests/test_discover_dialog_dedup.py`（5 条）：同一台设备带 IP / 带序列号时只列一行
+  （已用修复前的实现自证确实会列两行）。
+- 扩充 `tests/test_secret.py`：本机密钥加密、密钥文件 `0600`、跨进程复用（子进程验证）、
+  口令优先、密钥文件丢失的提示。
 - 新增 `tests/test_ui_export_config.py`：真实主窗口 + 打桩的文件对话框，
   直接调用「导出 / 导入配置」按钮的槽函数（原来只测了 `config.export_to`，
   界面那段代码从未被执行，所以 bug 漏到了用户手里）。

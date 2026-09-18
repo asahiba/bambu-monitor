@@ -15,6 +15,7 @@ import pytest
 
 from app import config
 from app.bambu.models import PrinterInfo, PrinterModel
+from app.util import secret
 
 from .conftest import real_config_dir
 
@@ -120,16 +121,18 @@ def test_save_load_roundtrip_preserves_printers():
 
 
 def test_save_load_roundtrip_preserves_access_code():
-    """契约：访问代码能原样往返；在 Windows 上还必须**不以明文落盘**。
+    """契约：访问代码能原样往返；只要有加密能力，就必须**不以明文落盘**。
 
     ⚠️ 这条测试以前写成「明文不得落盘」一刀切，于是**只在 Windows 上能过**：
-    非 Windows 平台没有 DPAPI，`secret.encrypt_text` 按设计退回明文保存
+    非 Windows 平台那时没有 DPAPI，`secret.encrypt_text` 按设计退回明文保存
     （见 `app/util/secret.py` 的模块文档与 `SECURITY.md`）。
     这种写法会让 CI 的 Linux 任务必然失败 —— 而它确实失败了，
     因为本地只在 Windows 上跑过全量回归。
 
-    所以这里按平台分别断言：**往返是共同契约**，加密落盘是 Windows 专有行为。
-    非 Windows 上反过来盯住「它是明文」这件事，避免哪天变成静默的意外。
+    之后又补了「非 Windows 上是明文」的断言。现在非 Windows 也有第二层加密
+    （本机密钥文件 / `BAMBU_MONITOR_SECRET` 口令 + Fernet），所以判据改成
+    **按能力而不是按平台**：`secret.can_encrypt()` 为真就必须看不到明文；
+    只有安卓那种「连 cryptography 都没有」的部署才允许明文，且必须留下提示。
     """
     cfg = config.AppConfig()
     cfg.printers = [PrinterInfo(ip="10.0.0.5", access_code="12345678")]
@@ -143,10 +146,14 @@ def test_save_load_roundtrip_preserves_access_code():
     if sys.platform == "win32":
         assert "12345678" not in raw, "Windows 上明文不得落盘"
         assert "dpapi:" in raw
+    elif secret.can_encrypt():
+        assert "12345678" not in raw, "本环境能加密，不该明文落盘"
+        assert "fernet:" in raw
+        assert cfg.warnings, "用了本机密钥加密（而非 DPAPI）应当告知用户"
     else:
-        # 没有 DPAPI：明文保存是既定行为，且必须留下提示告诉用户
+        # 没有 cryptography（典型是安卓 APK）：明文保存是既定行为，且必须留下提示
         assert "12345678" in raw, (
-            "非 Windows 平台预期以明文保存访问代码；"
+            "本环境预期以明文保存访问代码（连 cryptography 都没有）；"
             "若这里失败，说明加密策略变了，请同步更新 SECURITY.md 与 secret.py 的说明"
         )
         assert cfg.warnings, "明文保存必须留下 warnings 提示，不能静默"

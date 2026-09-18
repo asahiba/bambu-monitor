@@ -125,7 +125,8 @@ class PrinterEditDialog(QDialog):
 
         hint = QLabel(
             "提示：打印机需与电脑在同一局域网，并已开启「局域网模式」。"
-            "访问代码保存在本机（DPAPI 加密），不会上传到任何服务器。"
+            "访问代码只保存在本机并加密（Windows 用 DPAPI，其它平台用本机密钥），"
+            "不会上传到任何服务器。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.TEXT_DIM};")

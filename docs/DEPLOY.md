@@ -48,12 +48,25 @@ bash linux/wsl-test.sh
 
 > `stop` 不可恢复，必须显式加 `--yes`；遥测未连接时不会下发任何指令。
 
-配置文件默认在 `./data/config.json`（可用环境变量 `BAMBU_MONITOR_CONFIG_DIR` 改），
-**Linux 上没有 Windows 的 DPAPI**，访问代码会以明文保存在该文件里，请注意目录权限：
+配置文件默认在 `./data/config.json`（可用环境变量 `BAMBU_MONITOR_CONFIG_DIR` 改）。
+Linux 上没有 Windows 的 DPAPI，程序会用**本机密钥 + Fernet** 加密访问代码：
+密钥是 32 字节随机数，首次保存时生成在 `./data/secret.key`（权限 `0600`）。
+密钥和配置在一起 —— 这能防住「只把 `config.json` 复制走」，防不住能读整个目录的人。
+要更强就改用口令（不落盘）：
 
 ```bash
-chmod 700 ./data && chmod 600 ./data/config.json
+# 推荐：密钥由口令派生，secret.key 不会被创建
+export BAMBU_MONITOR_SECRET='你的口令'
 ```
+
+目录权限仍然要收一下：
+
+```bash
+chmod 700 ./data && chmod 600 ./data/config.json ./data/secret.key
+```
+
+> 注意：口令/密钥丢了就解不开已保存的访问代码（程序会提示「请在设置里重新填写」）。
+> 用 `BAMBU_MONITOR_KEY_FILE` 可以把密钥文件放到别处（Docker secrets / 只读挂载）。
 
 ### 1.3 开机自启（systemd）
 
@@ -79,6 +92,9 @@ journalctl -u bambu-monitor -f
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
 | `BAMBU_MONITOR_CONFIG_DIR` | 配置目录 | `%APPDATA%\BambuMonitor` / `./data` |
+| `BAMBU_MONITOR_SECRET` | 用口令派生凭据加密密钥（不落盘；非 Windows 才有意义） | 空（改用 `secret.key` 文件） |
+| `BAMBU_MONITOR_KEY_FILE` | 密钥文件路径（Docker secrets / 只读挂载） | `<配置目录>/secret.key` |
+| `BAMBU_MONITOR_SUBNETS` | 手工指定要搜索的网段（`192.168.1.0/24,10.0.0.0/24`），纯内网/多网段/网卡枚举不全时用 | 空（自动枚举网卡） |
 | `BAMBU_WEB_PORT` | 网页端口 | `8080` |
 | `BAMBU_TOKEN` | 网页访问令牌 | 配置文件里的随机令牌 |
 | `BAMBU_WEB_FPS` | 网页帧率 | `4` |

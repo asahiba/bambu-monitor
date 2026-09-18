@@ -17,7 +17,11 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
+import os
+import re
 import socket
+import struct
 import threading
 import time
 from ctypes import wintypes
@@ -25,6 +29,8 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 from .models import PrinterInfo, detect_model
+
+LOGGER = logging.getLogger("bambu-monitor.discovery")
 
 SSDP_ADDR = "239.255.255.250"
 SSDP_PORT = 1990
@@ -248,50 +254,206 @@ def _adapter_interfaces() -> list[LocalInterface]:
 
 
 def local_interfaces() -> list[LocalInterface]:
-    """枚举本机 IPv4 网卡（默认路由所在网卡排在最前）。"""
+    """枚举本机 IPv4 网卡（默认路由所在网卡排在最前）。
+
+    ## 枚举顺序（越靠前越可靠，且**都不依赖外网**）
+
+    1. ``GetAdaptersAddresses``（Windows，含真实子网掩码）；
+    2. POSIX 的 ``ioctl``（Linux/macOS，同样能拿到真实掩码）——见
+       :func:`_posix_interfaces`；
+    3. 环境变量 ``BAMBU_MONITOR_SUBNETS`` 手工指定的网段（见
+       :func:`_env_interfaces`）；
+    4. 最后才是「主机名解析 + UDP connect 探测」。**这一层依赖外网连通**：
+       纯内网（没有默认路由、DNS 不可达）时它什么都拿不到，所以只在前面全失败
+       时才用，并且在真的枚举不出任何网卡时打一条日志提示用户手工指定网段。
+    """
     interfaces = _adapter_interfaces()
     if not interfaces:
-        # 兜底：主机名解析 + 默认路由探测
-        addresses: list[str] = []
-        for probe in (("223.5.5.5", 53), ("8.8.8.8", 53), ("1.1.1.1", 53)):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.connect(probe)
-                    addresses.append(sock.getsockname()[0])
-                    break
-            except OSError:
-                continue
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                addresses.append(info[4][0])
-        except OSError:
-            pass
-        seen: set[str] = set()
-        for ip in addresses:
-            if ip in seen or ip.startswith("127."):
-                continue
-            seen.add(ip)
-            interfaces.append(
-                LocalInterface(ip=ip, prefix=_prefix_of(ip), broadcast=_prefix_of(ip) + ".255")
-            )
+        interfaces = _posix_interfaces()
+    if not interfaces:
+        interfaces = _resolve_interfaces()
+    interfaces = _dedupe_interfaces(interfaces + _env_interfaces())
 
-    # 默认路由出口（用于探测外网）所在网卡排最前；代理/隧道网段（198.18/19）最后
-    default_ip = ""
-    for probe in (("223.5.5.5", 53), ("8.8.8.8", 53)):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.connect(probe)
-                default_ip = sock.getsockname()[0]
-                break
-        except OSError:
-            continue
+    # 默认路由出口所在网卡排最前；代理/隧道网段（198.18/19）最后
+    default_ip = _default_route_ip()
 
     def sort_key(iface: LocalInterface) -> tuple[int, int]:
         skipped = 1 if not iface.scannable else 0
         is_default = 0 if iface.ip == default_ip else 1
         return (skipped, is_default)
 
+    scannable = [iface for iface in interfaces if iface.scannable]
+    if not scannable:
+        LOGGER.warning(
+            "没能枚举出任何可扫描的网卡（当前：%s）。纯内网环境可以手工指定："
+            "设置环境变量 BAMBU_MONITOR_SUBNETS=192.168.1.0/24（逗号分隔多个）",
+            [iface.ip for iface in interfaces] or "无",
+        )
     return sorted(interfaces, key=sort_key)
+
+
+def _dedupe_interfaces(interfaces: Iterable[LocalInterface]) -> list[LocalInterface]:
+    """按 IP 去重（保留先出现的那条：越靠前的来源越可靠）。"""
+    seen: set[str] = set()
+    result: list[LocalInterface] = []
+    for iface in interfaces:
+        if not iface.ip or iface.ip in seen:
+            continue
+        seen.add(iface.ip)
+        result.append(iface)
+    return result
+
+
+def _env_interfaces() -> list[LocalInterface]:
+    """从 ``BAMBU_MONITOR_SUBNETS`` 读手工指定的网段。
+
+    接受 ``192.168.1.0/24``、``192.168.1.`` 或 ``192.168.1.50`` 三种写法，
+    逗号/分号/空白分隔。它解决的是「枚举不到网卡就完全搜不到设备」里最难受的
+    那部分：纯内网、多网段、容器里网卡信息不完整时，用户没有任何补救手段。
+    """
+    raw = os.environ.get("BAMBU_MONITOR_SUBNETS", "").strip()
+    if not raw:
+        return []
+    interfaces: list[LocalInterface] = []
+    for chunk in re.split(r"[,;\s]+", raw):
+        item = chunk.strip()
+        if not item:
+            continue
+        mask = 24
+        if "/" in item:
+            item, _, mask_text = item.partition("/")
+            try:
+                mask = int(mask_text)
+            except ValueError:
+                LOGGER.warning("BAMBU_MONITOR_SUBNETS 的掩码无法解析：%s（按 /24 处理）", chunk)
+                mask = 24
+            if not 8 <= mask <= 30:
+                # 越界掩码（/0 会把半个互联网算进扫描范围）一律按 /24 处理，
+                # 而不是悄悄夹到边界 —— 那等于把用户填错的值变成另一个网段
+                LOGGER.warning("BAMBU_MONITOR_SUBNETS 的掩码越界：%s（按 /24 处理）", chunk)
+                mask = 24
+        try:
+            base = int.from_bytes(socket.inet_aton(item.rstrip(".") + (".0" if item.endswith(".") else "")), "big")
+        except OSError:
+            LOGGER.warning("BAMBU_MONITOR_SUBNETS 里有无法解析的网段：%s", chunk)
+            continue
+        mask_bits = (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF
+        network = base & mask_bits
+        broadcast = network | (~mask_bits & 0xFFFFFFFF)
+        ip = socket.inet_ntoa((network + 1).to_bytes(4, "big"))
+        interfaces.append(
+            LocalInterface(
+                ip=ip,
+                prefix=socket.inet_ntoa(network.to_bytes(4, "big")),
+                broadcast=socket.inet_ntoa(broadcast.to_bytes(4, "big")),
+                name="BAMBU_MONITOR_SUBNETS",
+                mask=mask,
+            )
+        )
+    return interfaces
+
+
+def _posix_interfaces() -> list[LocalInterface]:
+    """用 ``ioctl`` 枚举本机网卡（Linux/macOS，不需要外网、不需要外部命令）。
+
+    ## 为什么不能用「主机名解析 + UDP connect 探测」顶替
+
+    那两层都依赖**能连上外网地址**（或者至少有默认路由）。用户的真实场景是
+    纯内网：打印机在 192.168.31.x，机器没有默认路由 —— 探测连不上任何外网地址，
+    于是「一台设备都搜不到」。而 ``ioctl`` 直接问内核要网卡列表和掩码，离线可用。
+    """
+    try:
+        import fcntl
+    except ImportError:  # 非 POSIX（Windows 走 GetAdaptersAddresses）
+        return []
+
+    # (取地址, 取掩码) 的候选请求码：Linux 与 Darwin 的编号不同，两个都试
+    code_pairs = ((0x8915, 0x891B), (0xC0206921, 0xC020692A))
+
+    def query(code: int, name: str) -> Optional[bytes]:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                return fcntl.ioctl(sock.fileno(), code, struct.pack("256s", name[:15].encode()))
+        except OSError:
+            return None
+
+    try:
+        names = [name for _, name in socket.if_nameindex()]
+    except OSError:
+        return []
+
+    interfaces: list[LocalInterface] = []
+    for name in names:
+        for addr_code, mask_code in code_pairs:
+            raw = query(addr_code, name)
+            if raw is None or len(raw) < 24:
+                continue
+            ip = socket.inet_ntoa(raw[20:24])
+            if ip.startswith("127."):
+                break
+            mask = 24
+            mask_raw = query(mask_code, name)
+            if mask_raw is not None and len(mask_raw) >= 24:
+                mask_value = int.from_bytes(mask_raw[20:24], "big")
+                if mask_value:
+                    mask = max(8, min(30, bin(mask_value).count("1")))
+            mask_bits = (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF
+            ip_value = int.from_bytes(socket.inet_aton(ip), "big")
+            network = ip_value & mask_bits
+            broadcast = network | (~mask_bits & 0xFFFFFFFF)
+            interfaces.append(
+                LocalInterface(
+                    ip=ip,
+                    prefix=socket.inet_ntoa(network.to_bytes(4, "big")),
+                    broadcast=socket.inet_ntoa(broadcast.to_bytes(4, "big")),
+                    name=name,
+                    mask=mask,
+                )
+            )
+            break  # 这组请求码可用，换下一块网卡
+    return interfaces
+
+
+def _resolve_interfaces() -> list[LocalInterface]:
+    """最后的兜底：主机名解析 + UDP connect 探测（**依赖外网连通**）。"""
+    addresses: list[str] = []
+    default_ip = _default_route_ip()
+    if default_ip:
+        addresses.append(default_ip)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addresses.append(info[4][0])
+    except OSError:
+        pass
+    interfaces: list[LocalInterface] = []
+    for ip in addresses:
+        if ip.startswith("127."):
+            continue
+        interfaces.append(
+            LocalInterface(ip=ip, prefix=_prefix_of(ip), broadcast=_prefix_of(ip) + ".255")
+        )
+    return interfaces
+
+
+#: UDP connect 探测用的外网地址。只用来问内核「默认路由走哪块网卡」，**不发包**。
+DEFAULT_ROUTE_PROBES = (("223.5.5.5", 53), ("8.8.8.8", 53), ("1.1.1.1", 53))
+
+
+def _default_route_ip() -> str:
+    """本机默认路由出口 IP；拿不到就返回空串。
+
+    UDP ``connect`` 不真的发包，只是让内核按路由表挑源地址 —— 它查的是**本机
+    路由**，不代表外网可达。即便如此它仍可能失败（没有默认路由、受限沙箱里
+    socket 被拦），而它的用途只是给网卡排个序，所以一律吞掉异常返回空串。
+    """
+    for probe in DEFAULT_ROUTE_PROBES:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(probe)
+                return sock.getsockname()[0]
+        except Exception:  # noqa: BLE001 - 探测失败只影响排序，不该影响搜索
+            continue
+    return ""
 
 
 def _new_socket(bind_ip: str = "", bind_port: int = 0, multicast_if: str = "") -> Optional[socket.socket]:

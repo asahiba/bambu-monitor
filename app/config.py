@@ -1,4 +1,9 @@
-"""应用配置读写（打印机列表、界面偏好）。访问代码使用 DPAPI 加密存储。"""
+"""应用配置读写（打印机列表、界面偏好）。
+
+访问代码的存储见 `app/util/secret.py`：Windows 用 DPAPI，其它平台（Linux /
+Docker / NAS）在本机密钥可用时用「密钥文件 + Fernet」，都不可用时才退回明文
+（安卓 APK 不含 ``cryptography``，属于最后一种）。
+"""
 
 from __future__ import annotations
 
@@ -150,8 +155,8 @@ class AppConfig:
     #: 最近一次读写配置的**失败**说明（保存失败、导出失败、导入失败…）；
     #: 空字符串表示没有问题。调用方据此判定"操作是不是真的失败了"。
     last_error: str = ""
-    #: 最近一次读写配置的**提示**（不阻断操作）：例如「本平台没有 DPAPI，
-    #: 访问代码以明文保存」「某台打印机的访问代码解不开，请重填」。
+    #: 最近一次读写配置的**提示**（不阻断操作）：例如「本平台没有 DPAPI，已改用
+    #: 本机密钥加密」「访问代码只能明文保存」「某台打印机的访问代码解不开，请重填」。
     #: 与 last_error 分开是必须的：把提示当错误会让安卓上成功的添加被报成失败。
     warnings: str = ""
 
@@ -194,7 +199,7 @@ class AppConfig:
         return fallback
 
     def to_json(self) -> str:
-        """序列化当前配置（访问代码用 DPAPI 加密，只有本机当前用户能解密）。"""
+        """序列化当前配置（访问代码加密后写入，见 `app/util/secret.py`）。"""
         secret.clear_last_error()
         data: dict[str, Any] = {
             "printers": [],
@@ -253,7 +258,7 @@ class AppConfig:
             LOGGER.error("配置保存失败：%s", exc)
             self.last_error = f"配置保存失败：{exc}"
             return
-        # 凭据加密若有降级（例如安卓/Linux 没有 DPAPI），只作为提示告知用户，
+        # 凭据加密若有降级（例如安卓连 cryptography 都没有），只作为提示告知用户，
         # **不**影响"保存成功"这个结论
         warning = secret.last_warning()
         if warning:
