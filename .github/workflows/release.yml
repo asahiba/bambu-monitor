@@ -378,10 +378,26 @@ jobs:
           # CLI 版必须真的在包里（它曾经"文档里说有、实际从没产出过"）
           test -f BambuMonitor-windows-x64-cli.exe || { echo "::error::缺少 Windows CLI 产物"; exit 1; }
 
+      - name: 生成发布说明（取 CHANGELOG 里对应版本的那一段）
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p release
+          # 用仓库自己的 Python 工具抽取（同一份逻辑在 tests/test_release_notes.py 里有验证）；
+          # 段落缺失时它会打印 ::warning:: 并写一份兜底说明，**不会**让发布失败
+          python tools/extract_release_notes.py "$TAG" release/RELEASE_NOTES.md
+
       - name: 建 Release 并上传
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
+          # ⚠️ 同时给 body_path 与 generate_release_notes：
+          # body_path 里的 CHANGELOG 段落是**人写的**（为什么改、怎么验证），
+          # 自动生成的变更列表作为补充。v1.0.5 第一次发布时只用了
+          # generate_release_notes，而直接推 commit（无 PR）时它几乎产不出内容，
+          # 发布页上只有一行 compare 链接。
+          body_path: release/RELEASE_NOTES.md
           generate_release_notes: true
           draft: false
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
