@@ -27,6 +27,12 @@
 | `raw_camera_check.py <IP> [--auto]` | 直接用 socket 走完 6000 端口的 TLS + 80 字节鉴权包 + 帧格式 |
 | `rtsp_describe.py <IP> [--auto]` | 手工对 322 端口发 RTSP DESCRIBE，判断服务状态与鉴权方式（诊断对话框走的是同一套实现，见 `app/bambu/diagnostics.py`） |
 | `rtsp_check.py <IP> [--auto]` | 验证 RTSPS 通道实际能否拉到画面、耗时多少 |
+| `rtsp_channel_check.py <IP> [--auto]` | 深查 322 通道本身：TLS + DESCRIBE（Basic→Digest）、打印 SDP、解析 SPS，并试着 SETUP/PLAY 探一段 RTP |
+| `rtsp_h264_check.py <IP> [--auto] [秒数]` | 用**纯 Python 客户端**（`app/bambu/rtsp_h264.py`，安卓走的就是这条）拉一段码流，写成 Annex-B 落盘，再用 OpenCV 解码自证可解 |
+| `h264_stream_check.py <IP> [--auto] [秒数]` | **端到端**验证网页端通路：强制关掉 OpenCV（等价于安卓）起真实会话 → 按网页端记录格式（`KIND_H264`）写一遍 → 按前端 `processBuffer` 的规则解析回来 → 还原 Annex-B 解码。用来在没有安卓设备时验证「取流 → 传输 → 前端拿到的东西能解」 |
+
+> `h264_stream_check.py` 里那句「强制关掉 OpenCV」是必需的：
+> 电脑上装了 OpenCV 时会走服务端解码那条路，就验不到安卓的路径了。
 
 ## TLS
 

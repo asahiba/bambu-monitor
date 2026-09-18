@@ -11,14 +11,20 @@ from .camera import CameraStream
 from .models import PrinterInfo, PrinterStatus
 from .mqtt_worker import MqttWorker
 from .timeouts import (
+    CAMERA_STREAM_JOIN,
     MQTT_STUCK_SECONDS,
     RTSP_ADOPT_TIMEOUT,
+    RTSP_FIRST_FRAME_TIMEOUT,
     RTSP_RETRY_PAUSE,
     RTSP_STREAM_JOIN,
     VIDEO_RESTART_JOIN,
     VIDEO_STOP_JOIN,
     WATCHDOG_INTERVAL,
 )
+
+#: H.264 访问单元最多缓存多少帧（网页端没连上时不至于无限堆积）。
+#: 1080p 单帧约 8KB，30 帧 ≈ 240KB，够网页端接上，也不会吃内存。
+H264_QUEUE_LIMIT = 30
 
 if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避免与 app.core 形成环
     from ..core.capabilities import DeviceCapabilities
@@ -54,6 +60,12 @@ class PrinterSession:
         self._mqtt: Optional[MqttWorker] = None
         self._camera: Optional[CameraStream] = None
         self._rtsp: Any = None
+        #: 纯 Python 的 H.264 通路（没有 OpenCV 时用，例如安卓版）
+        self._h264: Any = None
+        #: H.264 通路的解码初始化参数与最近的访问单元（网页端 WebCodecs 用）
+        self._h264_lock = threading.Lock()
+        self._h264_units: list[Any] = []
+        self._h264_dropped = 0
         self._lock = threading.Lock()
         self.running = False
         self.last_camera_state = CameraStream.STATE_STOPPED
@@ -144,6 +156,57 @@ class PrinterSession:
                 self._rtsp.stop()
                 self._rtsp.join(timeout=3.0)
                 self._rtsp = None
+            if self._h264 is not None:
+                self._h264.stop()
+                self._h264.join(timeout=CAMERA_STREAM_JOIN)
+                self._h264 = None
+            with self._h264_lock:
+                self._h264_units.clear()
+
+    # ------------------------------------------------------------------ H.264（无 OpenCV 时）
+    def _on_h264_unit(self, unit: Any) -> None:
+        """收下网页端要用的 H.264 访问单元（只留最近的几帧）。"""
+        with self._h264_lock:
+            self._h264_units.append(unit)
+            # 网页端可能一时没连上：只保留最近的少量帧，避免无限堆积
+            while len(self._h264_units) > H264_QUEUE_LIMIT:
+                self._h264_units.pop(0)
+                self._h264_dropped += 1
+
+    def latest_h264(self) -> tuple[dict, list[Any]]:
+        """取出解码参数与待发送的访问单元（网页端 WebCodecs 用）。
+
+        返回 ``(parameters, units)``；``parameters`` 形如
+        ``{"codec": "avc1.641029", "description": b"\\x01d\\x10)…"}``，
+        没有视频时是空字典。
+        """
+        client = self._h264
+        if client is None:
+            return {}, []
+        params = client.parameters
+        if not params.ready:
+            return {}, []
+        with self._h264_lock:
+            units = self._h264_units
+            self._h264_units = []
+        return {
+            "codec": params.codec_string,
+            "description": params.avcc_description,
+            "width": 0,
+            "height": 0,
+        }, units
+
+    def h264_queue_depth(self) -> int:
+        with self._h264_lock:
+            return len(self._h264_units)
+
+    @property
+    def video_mode(self) -> str:
+        """当前画面的交付方式：``jpeg``（会话里有现成 JPEG 帧）或 ``h264``。
+
+        网页端据此决定是显示 ``<img>`` 还是用 WebCodecs 解 H.264。
+        """
+        return "h264" if self._h264 is not None else "jpeg"
 
     def _mqtt_watchdog_tick(self) -> None:
         """遥测自愈：paho 的重连卡死时，整条重建连接。
@@ -294,12 +357,11 @@ class PrinterSession:
             return "rtsp"
         channel = self.info.model.video_channel
         if channel == "rtsp":
-            from .rtsp import RtspStream  # 延迟导入：OpenCV 为可选依赖
-
-            if RtspStream.available():
-                return "rtsp"
-            self.warnings.append("未安装 opencv-python，无法使用 RTSPS；该机型不支持 6000 端口画面")
-            return "tcp6000"
+            # 只有 RTSPS 一条路的机型一律选 RTSPS，**不管有没有 OpenCV**：
+            # 没有 OpenCV 时 `_start_camera_locked` 会转走纯 Python 的 H.264 通路
+            # （见 app/bambu/rtsp_h264.py）。以前这里直接退 6000，而这类机型在
+            # 6000 上一定失败 —— 结果是"永远没有画面"，用户还看不出原因。
+            return "rtsp"
         if channel == "tcp6000":
             return "tcp6000"
         # 未知机型：先试 RTSPS，失败再退 6000
@@ -311,29 +373,28 @@ class PrinterSession:
     def video_unavailable_reason(self) -> str:
         """该机型在本机**根本没法出画面**时给出的可执行说明（否则空串）。
 
-        目前只有一种情形：机型只提供 RTSPS(322) 通道（X1 / X1C / X2D / H2 / P2S…），
-        而本环境没有 OpenCV —— 典型就是**安卓版**：APK 刻意不打包 opencv/numpy
-        （Chaquopy 的预编译包是 4096 字节对齐，在 16KB 内存页设备上会闪退，
-        见 docs/PACKAGING.md），于是这类机型在安卓上永远没有画面。
+        现在只剩一种真正没救的情形：机型只提供 RTSPS(322)（X1 / X1C / X2D / H2 / P2S…）
+        而**浏览器端也不支持 WebCodecs** —— 此时码流取得到、但没人能解。
 
-        以前这种情况只会给出一句「RTSPS 错误：未开启局域网实时画面，或访问代码不正确」，
-        把用户引到错误的方向（他明明开了、代码也是对的）。现在把真实原因与出路
-        明确说出来，网页端会把它直接显示在画面上（触屏看不到 tooltip）。
+        以前这里覆盖的是"本机没有 OpenCV"，而安卓版永远没有 OpenCV；现在
+        没有 OpenCV 会走 :meth:`_start_h264`（纯 Python 取流 + 网页端解码），
+        所以那条限制已经**不再是死路**（见 `app/bambu/rtsp_h264.py`）。
         """
         if not self.info.access_code:
             return ""
         if self.info.model.video_channel != "rtsp":
             return ""
-        from .rtsp import RtspStream  # 延迟导入：OpenCV 为可选依赖
+        from .rtsp import RtspStream
 
         if RtspStream.available():
             return ""
+        if self._h264 is not None:
+            # 走的是纯 Python 通路：能不能显示取决于浏览器（网页里会检查 VideoDecoder）
+            return ""
         return (
-            "该机型只有 RTSPS(322) 画面通道，而当前运行环境没有 OpenCV 解码器"
-            "（安卓版为兼容 16KB 内存页设备刻意不内置），所以在这里看不到画面。\n"
-            "遥测（进度 / 温度 / 耗材 / HMS）不受影响，一切照常。\n"
-            "要看画面请用：Windows 桌面版、Linux/Docker 服务端（它们带 OpenCV），"
-            "或用浏览器打开服务端的网页。"
+            "该机型只有 RTSPS(322) 画面通道，而这台设备既没有 OpenCV、"
+            "纯 Python 通路也没有起来（请稍候或点「重连」）。\n"
+            "遥测（进度 / 温度 / 耗材 / HMS）不受影响。"
         )
 
     def _start_camera(self, prefer: Optional[str] = None) -> None:
@@ -361,50 +422,51 @@ class PrinterSession:
             from .rtsp import RtspStream  # 延迟导入：OpenCV 为可选依赖
 
             if not RtspStream.available():
-                self.warnings.append("未安装 opencv-python，无法使用 RTSPS，改用 6000 端口")
-                channel = "tcp6000"
-            else:
-                # 首次拉流要等 FFmpeg 初始化（打包版首次加载 cv2 可能更慢），给足时间；
-                # 只有 RTSPS 一条路的机型多试几次，避免偶发失败就长时间没画面
-                attempts = 3 if rtsp_only else 2
-                for attempt in range(attempts):
-                    if not self.running:
-                        return
-                    holder: list = []
-                    stream = RtspStream(
-                        host=self.info.ip,
-                        access_code=self.info.access_code,
-                        on_state=self._state_callback(holder),
-                        name=self.info.display_name(),
-                    )
-                    holder.append(stream)
-                    stream.start()
-                    if stream.wait_first_frame(RTSP_ADOPT_TIMEOUT) is not None and self.running:
-                        self._rtsp = stream
-                        self.video_channel = "rtsp"
-                        # 采纳该流之后同步一次状态，否则界面还停留在「未连接」
-                        self._handle_stream_state(stream, stream.state, stream.detail)
-                        return
-                    stream.stop()
-                    stream.join(timeout=RTSP_STREAM_JOIN)
-                    if not self.running:
-                        return
-                    if attempt + 1 < attempts:
-                        self.warnings.append(
-                            f"RTSPS 未取到画面，第 {attempt + 2} 次重试…"
-                        )
-                        time.sleep(RTSP_RETRY_PAUSE)
-                if rtsp_only:
-                    # 该机型只有 RTSPS 一条路，绝不能退回 6000（那边一定失败）。
-                    # 交由看门狗周期性重试。
-                    self.warnings.append(
-                        "RTSPS(322) 未取到画面：请在打印机屏幕上开启「局域网实时画面 / LAN Mode Liveview」"
-                    )
-                    self.video_channel = "rtsp"
-                    self._set_state_hint("RTSPS 未取到画面，等待重试")
+                # 没有 OpenCV（典型是安卓版）：改走**纯 Python 取流 + 网页端解码**那条路。
+                # 以前这里直接退 6000，而只有 RTSPS 的机型在 6000 上一定失败 ——
+                # 于是"永远没有画面"，且用户完全不知道原因。
+                return self._start_h264(sock_lock_held=True)
+            # 首次拉流要等 FFmpeg 初始化（打包版首次加载 cv2 可能更慢），给足时间；
+            # 只有 RTSPS 一条路的机型多试几次，避免偶发失败就长时间没画面
+            attempts = 3 if rtsp_only else 2
+            for attempt in range(attempts):
+                if not self.running:
                     return
-                self.warnings.append("RTSPS(322) 未取到画面，已回退到 6000 端口")
-                channel = "tcp6000"
+                holder: list = []
+                stream = RtspStream(
+                    host=self.info.ip,
+                    access_code=self.info.access_code,
+                    on_state=self._state_callback(holder),
+                    name=self.info.display_name(),
+                )
+                holder.append(stream)
+                stream.start()
+                if stream.wait_first_frame(RTSP_ADOPT_TIMEOUT) is not None and self.running:
+                    self._rtsp = stream
+                    self.video_channel = "rtsp"
+                    # 采纳该流之后同步一次状态，否则界面还停留在「未连接」
+                    self._handle_stream_state(stream, stream.state, stream.detail)
+                    return
+                stream.stop()
+                stream.join(timeout=RTSP_STREAM_JOIN)
+                if not self.running:
+                    return
+                if attempt + 1 < attempts:
+                    self.warnings.append(
+                        f"RTSPS 未取到画面，第 {attempt + 2} 次重试…"
+                    )
+                    time.sleep(RTSP_RETRY_PAUSE)
+            if rtsp_only:
+                # 该机型只有 RTSPS 一条路，绝不能退回 6000（那边一定失败）。
+                # 交由看门狗周期性重试。
+                self.warnings.append(
+                    "RTSPS(322) 未取到画面：请在打印机屏幕上开启「局域网实时画面 / LAN Mode Liveview」"
+                )
+                self.video_channel = "rtsp"
+                self._set_state_hint("RTSPS 未取到画面，等待重试")
+                return
+            self.warnings.append("RTSPS(322) 未取到画面，已回退到 6000 端口")
+            channel = "tcp6000"
 
         self.video_channel = "tcp6000"
         holder = []
@@ -418,6 +480,38 @@ class PrinterSession:
         holder.append(camera)
         self._camera = camera
         camera.start()
+
+    def _start_h264(self, sock_lock_held: bool = False) -> None:
+        """建立**纯 Python 的 H.264 通路**（没有 OpenCV 时用，典型场景是安卓版）。
+
+        与另外两条通道的区别：这里**不在这边解码**。码流原样交给网页端
+        （Android WebView 的 WebCodecs），所以不需要任何原生解码库 ——
+        这正是绕开"APK 不能打包 OpenCV"的办法。
+
+        失败时给出一句能指导用户的话（而不是笼统的"连接中"）。
+        """
+        from .rtsp_h264 import RtspH264Client
+
+        holder: list = []
+        client = RtspH264Client(
+            host=self.info.ip,
+            access_code=self.info.access_code,
+            on_access_unit=self._on_h264_unit,
+            on_state=self._state_callback(holder),
+            name=self.info.display_name(),
+        )
+        holder.append(client)
+        self._h264 = client
+        self.video_channel = "rtsp-h264"
+        client.start()
+        if client.wait_first_unit(timeout=RTSP_FIRST_FRAME_TIMEOUT) or not self.running:
+            self._handle_stream_state(client, client.state, client.detail)
+            return
+        # 没拿到码流：保留线程（它会自己退避重试），但把当前的失败原因告诉用户
+        self.warnings.append(
+            f"RTSPS(H.264) 未取到画面：{client.detail or '请检查是否开启「局域网实时画面」'}"
+        )
+        self._handle_stream_state(client, client.state, client.detail)
 
     def _state_callback(self, holder: list):
         """生成带来源标识的状态回调，便于丢弃已经切换掉的通道的事件。"""
@@ -438,7 +532,7 @@ class PrinterSession:
 
     def _handle_stream_state(self, source: object, state: str, detail: str) -> None:
         """只接受当前生效通道的状态，避免旧通道的收尾回调覆盖新通道。"""
-        active = {id(self._camera), id(self._rtsp)}
+        active = {id(self._camera), id(self._rtsp), id(self._h264)}
         if source is not None and id(source) not in active:
             return
         self.last_camera_state = state

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import threading
@@ -35,6 +36,8 @@ RECORD_MAGIC = b"BM"
 RECORD_HEADER = 9
 KIND_FRAME = 1
 KIND_STATUS = 2
+#: H.264 记录：负载首字节区分「初始化参数」与「访问单元」，见 _push_h264
+KIND_H264 = 3
 STATUS_INDEX = 0xFFFF
 #: 小于这个体积的 JPEG 直接复用，不再解码重编码
 PASSTHROUGH_BYTES = 90_000
@@ -123,6 +126,17 @@ def _warn_shrink_unavailable() -> None:
         "服务端部署请安装 requirements-server.txt",
         PASSTHROUGH_BYTES,
     )
+
+
+def _video_mode_of(session: PrinterSession) -> str:
+    """这台设备的画面怎么交给前端：``jpeg`` 还是 ``h264``。
+
+    默认 ``jpeg``（会话里有现成 JPEG 帧，直接塞进 ``<img>``）。
+    只有走上「纯 Python 取流 + 网页端解码」那条路时才返回 ``h264`` ——
+    典型场景是安卓版没有 OpenCV 时对 RTSPS-only 机型的处理。
+    """
+    mode = getattr(session, "video_mode", "jpeg")
+    return "h264" if mode == "h264" else "jpeg"
 
 
 class WebFrameCache(threading.Thread):
@@ -524,6 +538,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "span": max(1, min(3, int(info.tile_span or 1))),
                     "backend": session.video_backend,
                     "fps": round(session.camera_fps, 1),
+                    # 画面交付方式：jpeg = 直接给 <img>；h264 = 码流走多路复用通道，
+                    # 由网页端用 WebCodecs 解码（安卓版没有 OpenCV，只能这样）
+                    "video_mode": _video_mode_of(session),
                     "status_text": status_text,
                     "status_detail": status_detail,
                     "mqtt_online": mqtt,
@@ -655,11 +672,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ 多路复用
     def _live(self) -> None:
-        """一条连接同时推送所有画面的帧与状态。
+        """一条连接同时推送所有画面的帧、H.264 码流与状态。
 
         浏览器的同域长连接上限是 6 条，而每一路 MJPEG 各占一条，
         因此超过 6 路时后面的画面会一直排队 —— 这里改成单连接多路复用：
         记录格式为 BM(2) + 类型(1) + 画面序号(2,LE) + 长度(4,LE) + 负载。
+
+        三种记录：
+
+        * ``KIND_FRAME``  —— 一帧 JPEG（直接给 ``<img>``）；
+        * ``KIND_STATUS`` —— 状态 JSON；
+        * ``KIND_H264``   —— 一路的 H.264「初始化参数」或「访问单元」（AVCC），
+          由网页端的 WebCodecs 解码。没有 OpenCV 的环境（安卓版）靠它出画面。
         """
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/octet-stream")
@@ -672,12 +696,17 @@ class _Handler(BaseHTTPRequestHandler):
         cache.add_live_client()
         last_seq: dict[int, int] = {}
         last_status = 0.0
+        sent_params: set[int] = set()
         try:
             while not self.app.stopping:
                 sessions = self._sessions()
                 if not sessions:
                     break
-                for index in range(len(sessions)):
+                for index, session in enumerate(sessions):
+                    if _video_mode_of(session) == "h264":
+                        if not self._push_h264(index, session, sent_params):
+                            return
+                        continue
                     cache.touch(index)
                     seq, jpeg = cache.frame(index)
                     if not jpeg or last_seq.get(index) == seq:
@@ -694,6 +723,37 @@ class _Handler(BaseHTTPRequestHandler):
                 time.sleep(0.02)
         finally:
             cache.remove_live_client()
+
+    def _push_h264(self, index: int, session: PrinterSession, sent_params: set[int]) -> bool:
+        """把一路的 H.264 参数与访问单元推给网页端。
+
+        参数（codec 串 + avcC description）只在开头推一次：网页端拿到后才能
+        ``VideoDecoder.configure()``；之后每条记录就是一个访问单元。
+        记录负载的格式：1 字节类型 + 内容 ——
+        ``0x01`` = 初始化参数（JSON，``description`` 是 base64），``0x02`` = 访问单元。
+        """
+        fetcher = getattr(session, "latest_h264", None)
+        if not callable(fetcher):
+            return True
+        params, units = fetcher()
+        if params and index not in sent_params:
+            payload = json.dumps(
+                {
+                    "codec": params.get("codec", ""),
+                    "description": base64.b64encode(params.get("description", b"")).decode("ascii"),
+                    "width": params.get("width", 0),
+                    "height": params.get("height", 0),
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            if not self._write_record(KIND_H264, index, b"\x01" + payload):
+                return False
+            sent_params.add(index)
+        for unit in units:
+            key = b"\x03" if unit.is_keyframe else b"\x02"
+            if not self._write_record(KIND_H264, index, key + unit.data):
+                return False
+        return True
 
     def _write_record(self, kind: int, index: int, payload: bytes) -> bool:
         header = (

@@ -353,6 +353,9 @@ def test_前端多路复用解析参数未变():
     assert f"HEADER = {web_server.RECORD_HEADER}" in INDEX_HTML, "前端记录头长度与服务端不一致"
     assert f"KIND_FRAME = {web_server.KIND_FRAME}" in INDEX_HTML
     assert f"KIND_STATUS = {web_server.KIND_STATUS}" in INDEX_HTML
+    assert f"KIND_H264 = {web_server.KIND_H264}" in INDEX_HTML, (
+        "前端不认识 H.264 记录类型时会把它当未知包丢掉，安卓版就一直没画面"
+    )
 
 
 def _control_handler(session):
@@ -454,6 +457,7 @@ def test_多路复用记录格式未变():
     assert web_server.RECORD_HEADER == 9
     assert web_server.KIND_FRAME == 1
     assert web_server.KIND_STATUS == 2
+    assert web_server.KIND_H264 == 3
     assert web_server.STATUS_INDEX == 0xFFFF
 
 

@@ -193,9 +193,12 @@ INDEX_HTML = r"""<!doctype html>
 
 <script>
 "use strict";
-const state = {tiles: new Map(), token: "", live: false, liveFails: 0, fallback: false};
+const state = {tiles: new Map(), token: "", live: false, liveFails: 0, fallback: false,
+               // H.264（WebCodecs）解码器：画面序号 -> {canvas, decoder, …}
+               decoders: new Map()};
 const wall = document.getElementById('wall');
-const MAGIC_A = 0x42, MAGIC_B = 0x4D, HEADER = 9, KIND_FRAME = 1, KIND_STATUS = 2;
+const MAGIC_A = 0x42, MAGIC_B = 0x4D, HEADER = 9, KIND_FRAME = 1, KIND_STATUS = 2,
+      KIND_H264 = 3;
 
 /* ---------------------------------------------------------------- 令牌 */
 function cookieGet(name){
@@ -579,6 +582,8 @@ function processBuffer(buffer){
     offset += HEADER + length;
     if (kind === KIND_FRAME){
       applyFrame(index, payload);
+    } else if (kind === KIND_H264){
+      applyH264(index, payload);
     } else if (kind === KIND_STATUS){
       try { applyStatus(JSON.parse(new TextDecoder().decode(payload))); } catch (err) { /* 忽略坏包 */ }
     }
@@ -586,6 +591,149 @@ function processBuffer(buffer){
   let rest = buffer.slice(offset);
   if (rest.length > 16 * 1024 * 1024) rest = new Uint8Array(0);  // 防御：异常数据不要无限增长
   return rest;
+}
+
+/* ------------------------------------------------------------ H.264（WebCodecs）
+
+   为什么有这条通路：**安卓版没有 OpenCV**。APK 刻意不打包 opencv/numpy
+   （Chaquopy 的轮子是 4096 字节对齐，16KB 内存页设备会拒绝加载 → 闪退），
+   而只提供 RTSPS(322) 通道的机型（X1/X1C/X2D/H2/P2S）想拿画面就必须解码 H.264。
+   服务端于是**不解码**，只把码流（AVCC 格式）推过来，由这里的 WebCodecs
+   （Android WebView / Chrome 都自带硬件解码器）解出来画到 canvas 上。
+
+   数据格式（KIND_H264 的负载）：首字节 0x01 = 初始化参数(JSON)
+   （codec 串 + avcC description 的 base64），0x02 = 增量帧，0x03 = 关键帧。
+*/
+function decoderSupported(){
+  return typeof window.VideoDecoder === 'function';
+}
+
+function ensureDecoder(index){
+  let entry = state.decoders.get(index);
+  if (entry) return entry;
+  const tile = state.tiles.get(index);
+  if (!tile) return null;
+  // 画面容器：优先复用 <img> 所在的 .video 区，换成 canvas
+  const canvas = document.createElement('canvas');
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.objectFit = 'contain';
+  canvas.style.display = 'block';
+  tile.img.parentNode.insertBefore(canvas, tile.img);
+  tile.img.style.display = 'none';
+  entry = {canvas, decoder: null, configured: false, pending: [], codec: '', created: 0,
+           index};
+  state.decoders.set(index, entry);
+  return entry;
+}
+
+function applyH264(index, payload){
+  if (!decoderSupported()){
+    showH264Unsupported(index);
+    return;
+  }
+  if (payload.length < 1) return;
+  const kind = payload[0];
+  const body = payload.slice(1);
+  const entry = ensureDecoder(index);
+  if (!entry) return;
+
+  if (kind === 0x01){
+    let params;
+    try { params = JSON.parse(new TextDecoder().decode(body)); }
+    catch (err) { return; }
+    configureDecoder(index, entry, params);
+    return;
+  }
+
+  if (!entry.configured){
+    // 初始化参数还没到：先攒几帧，等 configure 之后再喂（WebCodecs 要求先配置）
+    if (entry.pending.length < 60) entry.pending.push({key: kind === 0x03, data: body});
+    return;
+  }
+  decodeChunk(entry, kind === 0x03, body);
+}
+
+function configureDecoder(index, entry, params){
+  const codec = params.codec || '';
+  const description = params.description ? base64ToBytes(params.description) : null;
+  // codec 换了（换了机型/固件）：重建解码器
+  if (entry.decoder && entry.codec === codec){
+    entry.configured = true;
+    return;
+  }
+  try {
+    if (entry.decoder){ try { entry.decoder.close(); } catch (err) {} }
+    entry.decoder = new VideoDecoder({
+      output: frame => drawFrame(index, frame),
+      error: err => { h264Failed(index, '解码器错误：' + err); },
+    });
+    const config = {codec, optimizeForLatency: true};
+    if (description){ config.description = description; }
+    entry.decoder.configure(config);
+    entry.codec = codec;
+    entry.configured = true;
+    const queued = entry.pending; entry.pending = [];
+    queued.forEach(item => decodeChunk(entry, item.key, item.data));
+  }catch(err){
+    entry.configured = false;
+    h264Failed(index, '该浏览器无法解码 ' + codec + '（' + err + '）');
+  }
+}
+
+function decodeChunk(entry, isKey, data){
+  if (!entry.decoder || entry.decoder.state !== 'configured') return;
+  // 队列太长说明解码跟不上：丢掉增量帧，只保留关键帧（否则延迟越积越大）
+  if (entry.decoder.decodeQueueSize > 20 && !isKey) return;
+  try {
+    entry.decoder.decode(new EncodedVideoChunk({
+      type: isKey ? 'key' : 'delta',
+      timestamp: entry.created++ * 40000,   // 单调递增即可（微秒）
+      data,
+    }));
+  }catch(err){
+    h264Failed(entry.index, '解码失败：' + err);
+  }
+}
+
+function drawFrame(index, frame){
+  const entry = state.decoders.get(index);
+  if (!entry) { frame.close(); return; }
+  const canvas = entry.canvas;
+  if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight){
+    canvas.width = frame.displayWidth;
+    canvas.height = frame.displayHeight;
+  }
+  try {
+    canvas.getContext('2d').drawImage(frame, 0, 0, canvas.width, canvas.height);
+    const tile = state.tiles.get(index);
+    if (tile) tile.nosignal.style.display = 'none';
+  }catch(err){ /* 画不出来就算了，下一帧还有机会 */ }
+  frame.close();
+}
+
+function h264Failed(index, message){
+  const tile = state.tiles.get(index);
+  if (!tile) return;
+  tile.nosignal.style.display = 'flex';
+  tile.nosignal.textContent = message;
+}
+
+/** 浏览器不支持 WebCodecs 时给出的说明（这是唯一真正无解的情形）。 */
+function showH264Unsupported(index){
+  const tile = state.tiles.get(index);
+  if (!tile || tile._h264Unsupported) return;
+  tile._h264Unsupported = true;
+  tile.nosignal.style.display = 'flex';
+  tile.nosignal.textContent = '这台设备的浏览器不支持 WebCodecs（需要 WebView 94+）：' +
+    '该机型只有 RTSPS(322) 画面通道，无法在此解码。用电脑版或服务端网页看画面即可。';
+}
+
+function base64ToBytes(text){
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 async function startLive(){

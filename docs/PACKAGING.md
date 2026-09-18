@@ -9,7 +9,7 @@
 | **Windows** | `dist-onefile/BambuMonitor.exe`（单文件，约 93 MB） | `build-onefile.bat` | 什么都不用装 |
 | **Linux** | `dist-onefile-headless/BambuMonitor-headless`（单文件，约 89 MB） | `bash linux/build-headless-docker.sh` | 什么都不用装 |
 | **Docker** | `dist-docker/bambu-monitor-latest-image.tar.gz`（单文件镜像，约 132 MB） | `build-docker-image.ps1` | 只需 Docker |
-| **安卓** | `dist-android/BambuMonitor-1.0.5-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
+| **安卓** | `dist-android/BambuMonitor-1.0.6-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
 
 Linux 另有一个**带 Qt 的变体**（`linux/build-onefile-docker.sh`，约 143 MB），
 能开图形界面；但服务器/NAS 场景请用上面的 headless 变体，原因见第 2 节。
@@ -66,7 +66,7 @@ build-onefile.bat
 **已验证**（在本机实测）：
 
 ```
-BambuMonitor-cli.exe --version    → Bambu Monitor 1.0.5（管道/重定向均可捕获）
+BambuMonitor-cli.exe --version    → Bambu Monitor 1.0.6（管道/重定向均可捕获）
 BambuMonitor-cli.exe --core-test  → 自检结果：全部通过 ✓（约 14 秒）
 BambuMonitor.exe --sim --screenshot shot.png --exit-after 14
                                   → 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标全部正常
@@ -194,8 +194,11 @@ docker run -d --name bambu-monitor --network host -v $PWD/data:/data bambu-monit
 > 否则「从文件读取…」点下去毫无反应（而且不报错）。
 > `tests/test_android_manifest.py` 有契约测试盯着这段代码。
 
-**同类机型的功能差异**：RTSPS-only 机型（X1/X1C/X2D/H2/P2S）在安卓上看不到画面，
-原因与提示见上面「为什么安卓版不装任何预编译原生包」那一节。
+**同类机型的画面通路不同，但都能出画面**：RTSPS-only 机型（X1/X1C/X2D/H2/P2S）
+在安卓上走「纯 Python 取流 + 网页端 WebCodecs 解码」，A1/P1/A2L 走 6000 端口 JPEG。
+唯一仍看不到画面的情形是 **WebView 不支持 WebCodecs（需要 94+）**——
+Android System WebView 会自动更新，旧设备上页面上会写明原因。
+原理与真机验证结果见 `docs/KNOWN_ISSUES.md` §13。
 
 前置条件：JDK 17+、Android SDK、以及 **Python 3.10**
 （`android/build-apk.ps1` 会先做前置检查并明确告诉你缺什么、怎么装）。
@@ -226,19 +229,20 @@ Chaquopy 17.0.0 的发布说明原文：
 
 | 去掉的包 | 影响 | 兜底位置 |
 | --- | --- | --- |
-| `opencv` / `numpy` | RTSPS(322) 通道不可用 → 自动退回 6000 端口 JPEG | `app/bambu/rtsp.py` 的 `available()` / `except ImportError` |
+| `opencv` / `numpy` | 没有 OpenCV 就不在本机解码 —— RTSPS(322) 机型改走**纯 Python 取流 + 网页端 WebCodecs 解码**（`app/bambu/rtsp_h264.py` + `app/web/page.py`） | `PrinterSession._start_camera_locked()` 转 `_start_h264()`；`RtspStream.available()` 只决定「本机解不解码」 |
 | `cryptography` | 只给内置模拟器生成自签证书（安卓不用模拟器） | `app/sim/simulator.py` 函数内导入 |
 
-**代价**：只提供 RTSPS 的机型（X1 / X1C / X2D / H2 / P2S）在安卓上看不到画面；
-A1 / P1 / A2L 走 6000 端口，不受影响。换来的是"在所有设备上都能启动"。
+**代价与收益**：换来的是"在所有设备上都能启动"，代价只有一条 ——
+**WebView 太旧（< 94）时不支持 WebCodecs**，那种设备上看不到 322 机型的画面。
+以前这条代价大得多（X1/X1C/X2D/H2/P2S 全线没有画面，因为代码在没有 OpenCV 时
+直接放弃 322 端口去试一定失败的 6000；详见 `docs/KNOWN_ISSUES.md` §13）。
 
-> ⚠️ 这个代价**必须让用户看得见**，否则他只会看到一个永远空着的画面，
+> ⚠️ 真出不了画面时**必须让用户看得见**，否则他只会看到一个永远空着的画面，
 > 然后去开「局域网实时画面」、重填访问代码 —— 全是白费。
-> 所以 `PrinterSession.video_unavailable_reason` 会把结论说出来
-> （「该机型只有 RTSPS(322) 通道，而当前环境没有 OpenCV 解码器…遥测不受影响…
-> 要看画面请用桌面版/服务端」），网页端把它**直接画在画面上**
-> （触屏看不到悬浮提示），不是只塞进 tooltip。
-> 回归用例：`tests/test_video_availability.py`。
+> 所以两种情况都会把结论**直接画在画面上**（触屏看不到悬浮提示）：
+> `PrinterSession.video_unavailable_reason`（本机取不到码流）与网页端的
+> `showH264Unsupported()`（浏览器解不了），不是只塞进 tooltip。
+> 回归用例：`tests/test_video_availability.py`、`tests/test_web_h264.py`。
 
 **收益**：APK 从 33 MB 降到 **19 MB**。
 
@@ -313,7 +317,7 @@ keytool -genkeypair -v -keystore bambu-monitor-release.jks `
 | | 桌面版 | 安卓版 |
 |---|---|---|
 | Python | 3.13（`.venv`） | 3.10（`.venv310`，构建用） |
-| OpenCV | `opencv-python` 4.8+ | **不装**（16 KB 页兼容性，见上） |
+| OpenCV | `opencv-python` 4.8+ | **不装**（16 KB 页兼容性，见上）→ 322 机型由网页端 WebCodecs 解码 |
 | 原生依赖 | 无限制 | **一个都不装**（只 `paho-mqtt`） |
 | GUI | PySide6 | 无（界面是 WebView） |
 

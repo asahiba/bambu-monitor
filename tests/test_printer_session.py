@@ -112,12 +112,19 @@ def test_preferred_channel_显式stream_mode覆盖机型默认(model, stream_mod
     assert session._preferred_channel() == expected
 
 
-def test_preferred_channel_无opencv时RTSPS机型降级并告警(rtsp_available):
-    """契约：X2D 这类只有 RTSPS 的机型在缺少 opencv 时降级到 tcp6000，并写入告警。"""
+def test_preferred_channel_无opencv时RTSPS机型仍然走RTSPS(rtsp_available):
+    """契约：X2D 这类**只有 RTSPS(322)** 的机型，没有 OpenCV 也必须选 RTSPS。
+
+    以前这里在缺少 opencv 时降级到 tcp6000 —— 而这类机型在 6000 端口上一定失败，
+    结果是「画面永远出不来，用户还不知道为什么」（安卓版从来就没有 OpenCV，
+    于是安卓上 X1/X1C/X2D/H2/P2S 全线没有画面）。
+    现在没有 OpenCV 会转走纯 Python 取流 + 网页端 WebCodecs 解码
+    （``app/bambu/rtsp_h264.py``），首选通道因此仍然是 rtsp，且**不该再告警**。
+    """
     rtsp_available(False)
     session = make_session(model=PrinterModel.X2D)
-    assert session._preferred_channel() == "tcp6000"
-    assert any("opencv" in text for text in session.warnings)
+    assert session._preferred_channel() == "rtsp"
+    assert session.warnings == [], "这条通路现在是正常路径，不该再提示 opencv 缺失"
 
 
 def test_preferred_channel_自动模式的X1C优先RTSPS(rtsp_available):

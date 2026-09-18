@@ -7,13 +7,16 @@
 
 ## 〇、当前测试保护情况
 
-修复过程中建立了 pytest 回归套件（`tests/`，13 个文件）：
+修复过程中建立了 pytest 回归套件（`tests/`，38 个文件）：
 
 ```
-test.bat                        →  433 passed, 7 skipped   （约 14 秒，完全离线）
+test.bat                        →  904 passed, 7 skipped    （约 2 分钟，完全离线）
 set BAMBU_RUN_SLOW=1 && test.bat -m slow
-                                →  7 passed                （内置模拟器端到端，约 5 秒）
+                                →  7 passed                 （内置模拟器端到端，约 5 秒）
 ```
+
+> 上面是 Windows 桌面环境（装了 PySide6 + OpenCV）的数字；CI 的 Linux/无 Qt
+> 环境是 868 passed / 21 skipped（界面用例跳过）。
 
 覆盖范围：机型识别与报文解析、配置读写与钳制、DPAPI 凭据、`build_auth_packet` 布局、
 网页服务全部路由与鉴权、`PrinterSession` 通道选择与控制、HMS 文案层与数据文件降级、
@@ -23,7 +26,8 @@ set BAMBU_RUN_SLOW=1 && test.bat -m slow
 > `app/ui/` 全部界面逻辑（`main_window.py` 715 行、`tile.py` 522 行只有离屏装箱检查）、
 > `app/bambu/tlsutil.select_context()` 的握手降级与缓存、
 > `app/bambu/discovery.py` 的真实收发路径与网卡枚举、
-> `app/web/page.py` 的前端 JS（无前端测试与语法检查）、
+> `app/web/page.py` 的前端 JS（**语法**已由 `tests/test_contracts.py` 用 esprima
+> 真解析一遍，记录格式也有 `tests/test_web_h264.py` 盯着；但渲染效果仍需人工看）、
 > `app/headless.py` 的 `--discover` / `--add-printer` 命令行管理流程。
 
 ### 安卓版踩过的坑（都在通用代码里，桌面版看不出来）
@@ -140,12 +144,14 @@ Docker 镜像、安卓 APK、以及发布流水线（`release.yml` / `ci.yml` / 
 | 1 | **目录式打包与单文件打包的依赖列表不一致** | `BambuMonitor.spec` 只列了 `paho` / `cv2`，没有 `app.core.*` 与 `app.adapters.*`（设备族适配器是运行时按族动态导入的，PyInstaller 静态分析可能漏掉）；而 `build_exe.bat` 又把同样的参数**另写了一份在 bat 里**。现在两边列表一致，bat 直接调用 spec —— 同一件事只有一处定义 |
 | 2 | **无界面 Linux 产物可能缺解码器** | `BambuMonitor-headless.spec` 没显式列 `cv2` / `cryptography`。缺 `cv2` 的后果是「X1/X2D/H2/P2S 这类只有 RTSPS 通道的机型看不到画面」，而 Linux 服务器正是这类用户的常见部署方式。两处 spec 都已补齐 |
 | 3 | **文档与实际行为矛盾** | `RELEASING.md` 写着「APK 是 debug 签名、只能自用安装」，而 `release.yml` 早已改成固定发布签名并**强制拒绝** debug 签名（否则用户无法覆盖安装）。文档已按实际行为改写 |
-| 4 | **安卓版 RTSPS-only 机型没有画面，而且不说明原因** | 见 §5 的详细说明。现在 `PrinterSession.video_unavailable_reason` 把结论写出来，网页端直接画在画面上 |
+| 4 | **安卓版 RTSPS-only 机型没有画面，而且不说明原因** | 见 §13 的详细说明（含真机验证结论）。`PrinterSession.video_unavailable_reason` 先把结论写出来画在画面上，随后又补上了纯 Python 取流 + 网页端 WebCodecs 解码，这类机型在安卓上**已经能看到画面** |
 
 仍然存在的、**有意的**限制（不是待修项）：
 
-* 安卓版没有 OpenCV → RTSPS-only 机型（X1 / X1C / X2D / H2 / P2S）在安卓上看不到画面。
-  取舍理由：Chaquopy 仓库里的 opencv/numpy 预编译包是 4096 字节对齐，
+* 安卓版的画面通路：RTSPS-only 机型（X1 / X1C / X2D / H2 / P2S）走「纯 Python 取流 +
+  网页端 WebCodecs 解码」（见 §13），**唯一**仍看不到画面的情形是
+  **WebView 不支持 WebCodecs（需要 WebView 94+）**，此时页面上会写明原因。
+  之所以不装 OpenCV：Chaquopy 仓库里的 opencv/numpy 预编译包是 4096 字节对齐，
   在 16KB 内存页设备上会闪退；装回它们等于「在新设备上根本打不开」。
   等 Chaquopy 提供对齐的 wheel 再考虑（`tests/test_android_packaging.py` 盯着这件事）。
 * Windows exe 没有代码签名 → 杀毒软件可能误报（要根治只能买证书）。
@@ -160,6 +166,48 @@ Docker 镜像、安卓 APK、以及发布流水线（`release.yml` / `ci.yml` / 
 （并且必须回调 `ValueCallback`，否则下一次点击会被忽略），
 网页里「导入配置 → 从文件读取…」点下去**毫无反应且不报错**。
 `MainActivity` 已补上，`tests/test_android_manifest.py` 有契约测试盯着。
+
+### 13. 安卓版 RTSPS-only 机型到底能不能出画面（深查 + 真机验证）
+
+疑问：「RTSPS(322) 通道连不上」这件事到底是不是真的。**深查结论：连接本身没有
+问题，问题是取到码流之后没人解码，而且代码在安卓上根本没去连 322。**
+
+复查过程（不是静态推断，全部实跑）：
+
+| 环节 | 结论 |
+| --- | --- |
+| 真机 322 端口（X2D，192.168.31.110） | TLS 可连；`DESCRIBE` 先返回 401 Basic，改 **Digest**（realm 固定 `LIVE555 Streaming Media`）后 200，SDP 里 `m=video 0 RTP/AVP 96`、`a=rtpmap:96 H264/90000`、`packetization-mode=1`、`profile-level-id=641029`，`sprop-parameter-sets` 齐全 |
+| MQTT 侧 | 遥测本来就是通的（`mqtt_online=True`）——说明**访问代码没有错**，所以「连不上」不是口令问题 |
+| 旧代码为什么没画面 | `_preferred_channel()` 在缺少 OpenCV 时把 RTSPS-only 机型**降级到 tcp6000**，而这类机型在 6000 上一定失败 → 322 端口从头到尾没被连过。安卓版永远没有 OpenCV，于是安卓上 X1/X1C/X2D/H2/P2S 全线没画面 |
+| 即使连上 322 | 服务端原来只能交「已解码的 JPEG」，而解码 H.264 需要 OpenCV —— 安卓装不了（见 §11 的对齐问题），所以必须**换个交付方式**：服务端不解码，把码流交给 WebView 自带的 WebCodecs |
+
+修法（`app/bambu/rtsp_h264.py` 新增约 800 行，纯标准库）：
+
+1. 自己实现 RTSP 客户端：DESCRIBE(Digest) → SETUP → PLAY，解析 SDP 的 media 级
+   `a=control`（会话级是 `*`，直接拼会 405）；
+2. 解析交织（interleaved）数据、RTP 单 NAL / FU-A / STAP-A，按 marker + 时间戳
+   切出访问单元，转成 **AVCC**（4 字节长度前缀）——WebCodecs 要的就是这个格式；
+3. 由 SPS/PPS 生成 `avcC`，codec 串取 `avc1.<profile-level-id>`（真机是 `avc1.641029`）；
+4. 服务端新增 `KIND_H264` 记录（`0x01` 初始化参数 / `0x02` 增量帧 / `0x03` 关键帧），
+   网页端用 `VideoDecoder` 解码后画到 `<canvas>`；浏览器不支持 WebCodecs 时在画面上
+   直接说明（这是唯一真正无解的情形）；
+5. `_preferred_channel()` 不再因为「没有 OpenCV」而降级 —— 该机型只有 322 一条路。
+
+验证（`tools/` 下三个只读脚本，都不下发任何控制命令）：
+
+* `tools/rtsp_channel_check.py`：只做 TLS + DESCRIBE，打印 SDP 与 SPS 解析结果；
+* `tools/rtsp_h264_check.py`：拉一段码流写成 Annex-B，再用 OpenCV 解码自证；
+* `tools/h264_stream_check.py`：**把网页端那条通路的记录格式跑一遍** ——
+  起真实会话（强制关掉 OpenCV，等价于安卓）→ 用 `_push_h264` 的同一段逻辑写记录 →
+  按网页端 `processBuffer` 的规则解析回来 → 还原 Annex-B 解码。
+
+真机结果：8 秒收到 65 个访问单元（3 个关键帧），`avcC` 42 字节，
+OpenCV 把还原出的 65 帧**全部解出**。也就是说除了「WebView 里真的画出来」这一步
+（需要安卓设备），其余环节都已实跑验证过。
+
+回归用例：`tests/test_rtsp_h264.py`（21 条：SDP/Digest/avcC/RTP 拆包/状态串与界面一致）、
+`tests/test_web_h264.py`（8 条：`video_mode` 字段、记录格式与顺序、参数只推一次、
+对端断开时收尾、`/api/live` 端到端）、`tests/test_video_availability.py`（9 条）。
 
 ---
 

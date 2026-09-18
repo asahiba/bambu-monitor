@@ -18,8 +18,14 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+
+# 这里用 OpenCV 造「大图」并验证缩放结果；没有 OpenCV 时整文件跳过，而不是报错。
+# 以前是直接 `import numpy`：在既没 cv2 也没 numpy 的环境（比如精简的复现环境）里
+# 会变成**收集期错误**，把整个测试会话打断，而不是干净地跳过这几条。
+pytest.importorskip("cv2", reason="缩放路径的验证需要 OpenCV（CI 装了 opencv-python）")
+
+import numpy as np  # noqa: E402
 
 from app.web import server as web_server  # noqa: E402
 

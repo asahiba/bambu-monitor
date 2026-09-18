@@ -8,6 +8,8 @@ __pycache__/
 _*.log
 _*.png
 _*.txt
+# 排障脚本（tools/rtsp_h264_check.py、tools/h264_stream_check.py）落盘的取样码流
+_*.h264
 
 # 单文件打包的产物与中间目录（体积上百 MB，绝不入库）
 dist-onefile/
