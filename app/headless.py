@@ -26,6 +26,18 @@ from .bambu.models import PrinterInfo, detect_model
 from .bambu.ports import DEFAULT_ACCESS_CODE
 from .bambu.printer import PrinterSession
 from .config import AppConfig, config_path
+from .core import (
+    FAMILY_BAMBU,
+    all_families,
+    create_session,
+    credential_label,
+    default_port,
+    display_model,
+    display_status,
+    has_credential,
+    is_registered,
+    resolve_family,
+)
 from .util import secret
 
 #: ``run_headless`` 最终真正用于服务的那一个令牌。
@@ -102,10 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--add-printer",
-        metavar="\"名称 IP 访问代码\"",
+        metavar="\"名称 IP 凭据 [端口]\"",
         action="append",
         default=[],
-        help="添加/更新一台打印机（可重复）",
+        help=(
+            "添加/更新一台设备（可重复）。第三方族写成 \"族id@名称 IP 凭据 [端口]\"，"
+            "例如 \"moonraker@Voron 192.168.1.90 abc123 7125\"；凭据在免鉴权族上可省略"
+        ),
     )
     parser.add_argument("--remove-printer", metavar="IP", action="append", default=[], help="删除指定 IP 的打印机")
     parser.add_argument(
@@ -130,8 +145,96 @@ def _cmd_list(config: AppConfig) -> int:
         return 0
     print(f"共 {len(config.printers)} 台（{config_path()}）：")
     for info in config.printers:
-        code = "有" if len(info.access_code) == 8 else "无"
-        print(f"  {info.display_name():14} {info.ip:16} {info.model.label:9} 访问代码={code} 跨度={info.tile_span}")
+        # 凭据的说法按族走：拓竹是「访问代码」，第三方族是「API Key」，
+        # 而且第三方族常常**不需要**凭据（内网 Moonraker 免鉴权）
+        label = credential_label(info)
+        credential = "有" if has_credential(info) else ("可选" if not _requires_credential(info) else "无")
+        extra = ""
+        if resolve_family(info).family != FAMILY_BAMBU:
+            port = default_port(info)
+            extra = f" {resolve_family(info).label} 端口={port or '默认'}"
+        print(
+            f"  {info.display_name():14} {info.ip:16} {display_model(info):9} "
+            f"{label}={credential} 跨度={info.tile_span}{extra}"
+        )
+    return 0
+
+
+def _requires_credential(info: PrinterInfo) -> bool:
+    """该族是否**必须**填凭据（拓竹必填；内网 Moonraker 免鉴权，可选）。"""
+    return bool(resolve_family(info).credential.required)
+
+
+def _parse_add_spec(spec: str) -> tuple[PrinterInfo, str] | tuple[None, str]:
+    """解析一条 ``--add-printer`` 规格，返回 ``(PrinterInfo, 错误说明)``。
+
+    格式（方括号内可选，族用 ``族id@`` 前缀指定，省略即拓竹）::
+
+        "名称 IP 凭据 [端口]"
+        "moonraker@Voron 192.168.1.90 abc123 7125"
+        "moonraker@Voron 192.168.1.90"          # 免鉴权族可以不填凭据
+
+    ⚠️ 以前只支持 ``"名称 IP 访问代码"`` 三个字段，第三方族根本没入口 ——
+    而 Docker / NAS 用户**只能**用命令行（没有桌面界面），所以这里必须补上。
+    凭据按族写进对应字段（拓竹 ``access_code``、第三方 ``api_key``），
+    并且在必填族缺凭据时**当场报错**，而不是加进去之后一直连不上。
+    """
+    parts = spec.split()
+    if len(parts) < 2:
+        return None, f'格式不正确：{spec!r}（应为 "名称 IP 凭据 [端口]"，族可写成 "族id@名称"）'
+    name, ip = parts[0], parts[1]
+    family = ""
+    if "@" in name:
+        family, name = name.split("@", 1)
+    if family and not is_registered(family):
+        available = "、".join(item.family for item in all_families())
+        return None, f"不认识的设备族 {family!r}（可用：{available}）"
+    descriptor = resolve_family(PrinterInfo(family=family))
+    policy = descriptor.credential
+    credential = parts[2] if len(parts) > 2 else ""
+    if policy.required and not credential:
+        return None, f'{spec!r} 缺少{policy.label}（该族必填）'
+    port = 0
+    if len(parts) > 3:
+        try:
+            port = int(parts[3])
+        except ValueError:
+            return None, f"端口不是数字：{parts[3]!r}"
+        if not 0 <= port <= 65535:
+            return None, f"端口超出范围：{port}"
+    if len(parts) > 4:
+        return None, f"字段太多：{spec!r}（应为 \"名称 IP 凭据 [端口]\"）"
+    info = PrinterInfo(ip=ip, name=name, family=family, port=port)
+    if credential:
+        setattr(info, policy.key, credential)
+    if not family or family == FAMILY_BAMBU:
+        info.model = detect_model("", name)
+    return info, ""
+
+
+def _cmd_add(config: AppConfig, specs: list[str]) -> int:
+    for spec in specs:
+        info, error = _parse_add_spec(spec)
+        if info is None:
+            print(error)
+            return 2
+        assert info is not None
+        existing = next((item for item in config.printers if item.ip == info.ip), None)
+        if existing is None:
+            config.printers.append(info)
+            print(f"已添加 {info.display_name()}（{info.ip}）")
+        else:
+            existing.name = info.name
+            existing.family = info.family
+            if info.port:
+                existing.port = info.port
+            # 凭据写到该族对应的字段上；用户没填就保留原来的
+            policy_key = resolve_family(info).credential.key
+            new_credential = getattr(info, policy_key, "")
+            if new_credential:
+                setattr(existing, policy_key, new_credential)
+            print(f"已更新 {info.display_name()}（{info.ip}）")
+    config.save()
     return 0
 
 
@@ -158,32 +261,10 @@ def _cmd_discover(config: AppConfig, timeout: float) -> int:
             existing.model = info.model if info.model.is_known else existing.model
     config.save()
     print(f"共发现 {len(found)} 台，新增 {added} 台；已写入配置")
-    print("提示：访问代码需要另外填写（--add-printer \"名称 IP 访问代码\"），否则只看得到进度、看不到画面")
-    return 0
-
-
-def _cmd_add(config: AppConfig, specs: list[str]) -> int:
-    for spec in specs:
-        parts = spec.split()
-        if len(parts) < 3:
-            print(f"格式不正确：{spec!r}（应为 \"名称 IP 访问代码\"）")
-            return 2
-        name, ip, code = parts[0], parts[1], parts[2]
-        existing = next((item for item in config.printers if item.ip == ip), None)
-        if existing is None:
-            info = PrinterInfo(
-                ip=ip,
-                name=name,
-                access_code=code,
-                model=detect_model("", name),
-            )
-            config.printers.append(info)
-            print(f"已添加 {name}（{ip}）")
-        else:
-            existing.name = name
-            existing.access_code = code
-            print(f"已更新 {name}（{ip}）")
-    config.save()
+    print(
+        '提示：访问代码需要另外填写（--add-printer "名称 IP 访问代码"），'
+        "否则只看得到进度、看不到画面"
+    )
     return 0
 
 
@@ -241,7 +322,7 @@ def _cmd_control(config: AppConfig, args: argparse.Namespace) -> int:
         print("停止打印不可恢复：确认请加 --yes（例如 --control stop --yes --target 192.168.1.50）")
         return 2
 
-    sessions = [PrinterSession(item) for item in targets]
+    sessions = [create_session(item) for item in targets]
     for session in sessions:
         session.set_max_fps(0)
         session.start()
@@ -292,7 +373,7 @@ def _cmd_control(config: AppConfig, args: argparse.Namespace) -> int:
         if args.control in ("pause", "resume", "stop"):
             time.sleep(2.0)
             for session in sessions:
-                status = session.snapshot()
+                status = display_status(session.snapshot())
                 print(
                     f"   {session.info.display_name():14} 状态={status.state_text} "
                     f"进度={status.progress}% 舱灯={status.light_on}"
@@ -330,15 +411,15 @@ def _cmd_remove(config: AppConfig, ips: list[str]) -> int:
 
 # --------------------------------------------------------------------------- 状态输出
 def _print_status(sessions: list[PrinterSession]) -> None:
-    online_camera = sum(1 for s in sessions if s.snapshot().camera_online)
-    online_mqtt = sum(1 for s in sessions if s.snapshot().mqtt_online)
-    printing = sum(1 for s in sessions if s.snapshot().is_printing)
+    online_camera = sum(1 for s in sessions if display_status(s.snapshot()).camera_online)
+    online_mqtt = sum(1 for s in sessions if display_status(s.snapshot()).mqtt_online)
+    printing = sum(1 for s in sessions if display_status(s.snapshot()).is_printing)
     print(
         f"[{time.strftime('%H:%M:%S')}] 共 {len(sessions)} 台 · 画面在线 {online_camera} · "
         f"遥测在线 {online_mqtt} · 打印中 {printing}"
     )
     for session in sessions:
-        status = session.snapshot()
+        status = display_status(session.snapshot())
         if not (status.camera_online or status.mqtt_online):
             continue
         print(
@@ -416,7 +497,7 @@ def run_headless(argv: list[str] | None = None) -> int:
         print("=" * 68)
 
     for info in config.printers:
-        session = PrinterSession(info)
+        session = create_session(info)
         session.set_max_fps(args.max_fps)
         sessions.append(session)
     for session in sessions:

@@ -101,8 +101,12 @@ class WebHost:
         access_code: str = "",
         model_label: str = "",
         serial: str = "",
+        family: str = "",
+        port: int = 0,
+        api_key: str = "",
+        camera_url: str = "",
     ) -> dict:
-        """添加或更新一台打印机：写配置 + 落盘 + **立即建会话**。
+        """添加或更新一台设备：写配置 + 落盘 + **立即建会话**。
 
         「立即建会话」很关键：否则用户加完设备要等服务重启才能看到画面，
         会以为没加上。
@@ -111,35 +115,67 @@ class WebHost:
         没有序列号时订阅会退化成通配 `device/#`，在真机密集的网络里容易收错报文，
         而且首次拿到报文前的状态一直是"离线"。网页端的「自动搜索」会把序列号带过来，
         手动添加时也可以从序列号栏填入。
+
+        ``family`` 非空时按该族处理（默认拓竹）：以该族的 ``CredentialPolicy``
+        决定凭据填在哪个字段（拓竹 ``access_code``、Moonraker ``api_key``），
+        并校验是否必填 —— 界面上的标签与必填性都来自注册表，不写死。
         """
         from ..bambu.models import PrinterInfo, detect_model
-        from ..bambu.printer import PrinterSession
+        from ..core import create_session, is_registered, resolve_family
+        from ..core.registry import FAMILY_BAMBU, get
 
         ip = (ip or "").strip()
         if not ip:
             return {"ok": False, "detail": "IP 地址不能为空"}
+        family = (family or "").strip()
+        if family and not is_registered(family):
+            return {"ok": False, "detail": f"不支持的设备族：{family}"}
+        descriptor = get(family or FAMILY_BAMBU)
+        assert descriptor is not None  # is_registered 已经查过一次
+        policy = descriptor.credential
+        credential = api_key if policy.key == "api_key" else access_code
+        if policy.required and not credential:
+            return {"ok": False, "detail": f"{policy.label}不能为空"}
         self.stats["add"] += 1
+
+        def apply_credential(target: PrinterInfo, value: str) -> None:
+            """把凭据写进该族对应的字段（用户在网页上只填一个输入框）。"""
+            if not value:
+                return
+            setattr(target, policy.key, value)
 
         with self._lock:
             existing_info = next((item for item in self.config.printers if item.ip == ip), None)
+            # 记住改之前的族：换了族就必须换会话实现（拓竹 ↔ Moonraker），
+            # restart() 只能在同一个实现里重连
+            previous_family = resolve_family(existing_info).family if existing_info else ""
             if existing_info is not None:
                 if name:
                     existing_info.name = name
-                if access_code:
-                    existing_info.access_code = access_code
+                # 凭据写在**该族对应的字段**上（拓竹 access_code / 第三方 api_key）
+                apply_credential(existing_info, credential)
                 if model_label:
                     existing_info.model = detect_model("", model_label)
                 if serial:
                     existing_info.serial = serial
+                if family:
+                    existing_info.family = family if family != FAMILY_BAMBU else ""
+                if port > 0:
+                    existing_info.port = int(port)
+                if camera_url:
+                    existing_info.camera_url = camera_url
                 info = existing_info
             else:
                 info = PrinterInfo(
                     ip=ip,
                     name=name,
                     serial=serial,
-                    access_code=access_code,
                     model=detect_model(serial, model_label) if model_label else detect_model(serial),
+                    family=family if family and family != FAMILY_BAMBU else "",
+                    port=int(port or 0),
+                    camera_url=camera_url or "",
                 )
+                apply_credential(info, credential)
                 self.config.printers.append(info)
 
             self.config.save()
@@ -154,15 +190,20 @@ class WebHost:
             # 已有会话就重启它（换了访问代码必须重连），没有就新建
             sessions = self._sessions()
             opened = next((s for s in sessions if getattr(s.info, "ip", "") == ip), None)
+            if opened is not None and previous_family != descriptor.family:
+                # 族换了：会话类型也跟着换，不能只 restart
+                opened.stop()
+                sessions.remove(opened)
+                opened = None
             if opened is not None:
-                opened.info.access_code = info.access_code
+                setattr(opened.info, policy.key, getattr(info, policy.key, ""))
                 opened.info.name = info.name
                 if serial:
                     opened.info.serial = serial
                 opened.restart()
                 detail = "已更新并重连"
             else:
-                session = PrinterSession(info)
+                session = create_session(info)
                 session.set_max_fps(float(getattr(self.config, "max_fps", 10.0) or 10.0))
                 session.start()
                 sessions.append(session)
@@ -247,7 +288,7 @@ class WebHost:
             except OSError:
                 pass
 
-        from ..bambu.printer import PrinterSession
+        from ..core import create_session
 
         with self._lock:
             sessions = self._sessions()
@@ -280,7 +321,7 @@ class WebHost:
                 warning = self.config.warnings or ""
 
             for info in self.config.printers:
-                session = PrinterSession(info)
+                session = create_session(info)
                 session.set_max_fps(float(getattr(self.config, "max_fps", 10.0) or 10.0))
                 session.start()
                 sessions.append(session)
@@ -387,7 +428,13 @@ class WebHost:
 
     # ------------------------------------------------------------------ 管理
     def manage_printer(
-        self, index: int = -1, action: str = "", name: str = "", access_code: str = ""
+        self,
+        index: int = -1,
+        action: str = "",
+        name: str = "",
+        access_code: str = "",
+        api_key: str = "",
+        port: int = 0,
     ) -> dict:
         """重连 / 编辑 / 删除。索引基于当前会话列表（与网页端看到的一致）。"""
         sessions = self._sessions()
@@ -403,16 +450,25 @@ class WebHost:
             return {"ok": True, "detail": "正在重连…"}
 
         if action == "update":
+            from ..core import resolve_family
+
+            # 凭据字段按族定：拓竹填访问代码，第三方族填 API Key
+            policy_key = resolve_family(session.info).credential.key
+            credential = api_key if policy_key == "api_key" else access_code
             if name:
                 session.info.name = name
-            if access_code:
-                session.info.access_code = access_code
+            if credential:
+                setattr(session.info, policy_key, credential)
+            if port > 0:
+                session.info.port = int(port)
             # 同步回配置里那一份（发信源是配置对象，界面读的是会话上的 info）
             for item in self.config.printers:
                 if item.ip == ip:
                     item.name = session.info.name
-                    if access_code:
-                        item.access_code = access_code
+                    if credential:
+                        setattr(item, policy_key, credential)
+                    if port > 0:
+                        item.port = int(port)
                     break
             self.config.save()
             # 同 add_printer：只认 last_error，warnings 不阻断

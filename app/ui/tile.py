@@ -21,9 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..bambu.models import PrinterStatus
 from ..bambu.printer import PrinterSession
-from ..core.device import camera_status_text
+from ..core.device import DisplayStatus, camera_status_text, display_status
 from . import theme
 from .frame_decoder import FrameDecoder
 from .video_widget import VideoWidget
@@ -252,7 +251,7 @@ class CameraTile(QFrame):
 
     # ------------------------------------------------------------------ 控制
     def _open_hms(self, event=None) -> None:  # noqa: ANN001
-        status = self.session.snapshot()
+        status = display_status(self.session.snapshot())
         if not status.hms_items:
             return
         from .hms_dialog import HmsDialog
@@ -262,7 +261,7 @@ class CameraTile(QFrame):
     def _toggle_pause(self) -> None:
         if self._show_blocked_reason("pause", "无法暂停 / 继续"):
             return
-        status = self.session.snapshot()
+        status = display_status(self.session.snapshot())
         name = self.session.info.display_name()
         if status.is_paused:
             ok = self.session.resume_print()
@@ -290,7 +289,7 @@ class CameraTile(QFrame):
     def _toggle_light(self) -> None:
         if self._show_blocked_reason("light", "无法控制灯光"):
             return
-        status = self.session.snapshot()
+        status = display_status(self.session.snapshot())
         name = self.session.info.display_name()
         target = not bool(status.light_on)
         ok = self.session.set_light(target)
@@ -329,14 +328,14 @@ class CameraTile(QFrame):
             self.video.set_fps(self.session.camera_fps)
 
         info = self.session.info
-        status = self.session.snapshot()
+        status = display_status(self.session.snapshot())
         self.video.set_title(f"{info.display_name()}", f"{info.ip} · {info.model.label}")
 
         state_text, color = self._connection_text(status)
         self.video.set_status(state_text, color)
         self._update_status_panel(status)
 
-    def _connection_text(self, status: PrinterStatus) -> tuple[str, str]:
+    def _connection_text(self, status: DisplayStatus) -> tuple[str, str]:
         """角标文案：与网页版共用 `app.core.camera_status_text` 的判据。
 
         完整说明（例如「RTSPS(322) 未取到画面…」）不再截断后塞进角标，而是
@@ -364,7 +363,7 @@ class CameraTile(QFrame):
             self._text_cache[widget] = value
             widget.setText(value)
 
-    def _update_status_panel(self, status: PrinterStatus) -> None:
+    def _update_status_panel(self, status: DisplayStatus) -> None:
         state = status.state_text if (status.mqtt_online or status.gcode_state) else "离线"
         if state != self._last_state_text:
             self._last_state_text = state
@@ -415,7 +414,7 @@ class CameraTile(QFrame):
             self._tooltip = tooltip
             self.setToolTip(tooltip)
 
-    def _update_info_row(self, status: PrinterStatus) -> None:
+    def _update_info_row(self, status: DisplayStatus) -> None:
         """喷嘴/热床/仓温/层数/WiFi/预计完成/错误码，渲染成一个可换行的富文本标签。"""
         if not (status.mqtt_online or status.last_message_ts):
             self._set_text(self.info_label, "")
@@ -444,7 +443,7 @@ class CameraTile(QFrame):
             parts.append(f"<b style='color:{theme.ERROR}'>{label}</b>")
         self._set_text(self.info_label, "&nbsp;&nbsp;".join(parts))
 
-    def _update_filament_row(self, status: PrinterStatus) -> None:
+    def _update_filament_row(self, status: DisplayStatus) -> None:
         """耗材行：AMS 各槽位色块 + 类型 + 余量，以及外挂料盘（单个可换行标签）。"""
         entries = list(status.ams_trays)
         if status.vt_tray is not None and not status.vt_tray.empty:
@@ -487,13 +486,13 @@ class CameraTile(QFrame):
         if wide:
             self.pause_button.setText("▶ 继续" if paused else "⏸ 暂停")
             self.stop_button.setText("⏹ 停止")
-            self.light_button.setText("💡 关灯" if self.session.snapshot().light_on else "💡 开灯")
+            self.light_button.setText("💡 关灯" if display_status(self.session.snapshot()).light_on else "💡 开灯")
         else:
             self.pause_button.setText("▶" if paused else "⏸")
             self.stop_button.setText("⏹")
             self.light_button.setText("💡")
 
-    def _update_controls(self, status: PrinterStatus) -> None:
+    def _update_controls(self, status: DisplayStatus) -> None:
         """控制按钮的可用状态与文案。
 
         ⚠️ 按钮可用性要**按命令分别判断**：固件要求 MQTT 命令签名时，
@@ -599,7 +598,7 @@ class CameraTile(QFrame):
         if size.width() > 16 and size.height() > 16:
             self.decoder.set_target_size(size.width(), size.height())
             self.session.set_video_target_size(size.width(), size.height())
-        self._apply_button_labels(self.session.snapshot().is_paused)
+        self._apply_button_labels(display_status(self.session.snapshot()).is_paused)
 
     def _copy_ip(self) -> None:
         clipboard = QGuiApplication.clipboard()

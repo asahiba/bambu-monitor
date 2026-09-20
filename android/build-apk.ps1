@@ -236,7 +236,7 @@ $apk = Join-Path $Here "app\build\outputs\apk\debug\app-debug.apk"
 if (-not (Test-Path $apk)) { throw "构建结束但找不到 APK：$apk" }
 $outDir = Join-Path $ProjectRoot "dist-android"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$target = Join-Path $outDir "BambuMonitor-1.0.6-arm64.apk"
+$target = Join-Path $outDir "BambuMonitor-1.1.0-arm64.apk"
 Copy-Item $apk $target -Force
 $mb = [math]::Round((Get-Item $target).Length / 1MB, 1)
 

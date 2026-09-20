@@ -21,9 +21,10 @@
 │ 设备无关内核（不依赖任何厂商模块，也不依赖 Qt）                │
 │   app/core/__init__.py       DeviceSession 协议（界面依赖的契约）│
 │   app/core/capabilities.py   DeviceCapabilities：设备「能做什么」│
-│   app/core/device.py         DeviceStatus：通用状态 + apply_mapped│
+│   app/core/device.py         DeviceStatus：通用状态 + apply_mapped │
+│                             + display_status()：界面用的统一只读视图│
 │   app/core/adapter.py        PollingDeviceSession：轮询型适配器基类│
-│   app/core/registry.py       设备族注册表（凭据策略/端口/发现方式）│
+│   app/core/registry.py       设备族注册表 + create_session()（唯一入口）│
 ├──────────────────────────────────────────────────────────────┤
 │ 界面层（只有它依赖 Qt Widgets）                               │
 │   app/ui/main_window.py   监控墙、工具栏、布局、轮巡、配置     │
@@ -41,6 +42,8 @@
 ├──────────────────────────────────────────────────────────────┤
 │ 会话层                                                        │
 │   app/bambu/printer.py  PrinterSession：遥测 + 视频聚合成一台  │
+│   app/core/registry.py  设备族表 + create_session()（唯一入口）│
+│   app/adapters/moonraker/  Klipper/Moonraker 族（HTTP + WS）   │
 ├──────────────────────────────────────────────────────────────┤
 │ 协议层（不含 GUI，可单独测试/复用）                            │
 │   app/bambu/ports.py       端口与共享常量（8883/6000/322 等）  │
@@ -94,10 +97,18 @@
    基类负责线程回收、限流、错误抑制与退避、增量合并 —— 这四件事都是本项目
    历史上真踩过的坑，因此不要在适配器里重写。
 2. 在 `app/core/registry.py` 里 `register(FamilyDescriptor(...))`：
-   声明族 id、展示名、凭据策略（`CredentialPolicy`）、端口与发现方式。
-   **只登记已经能用的族** —— 提前登记会让界面出现一个选了也没用的选项。
-3. 在配置文件里给该族设备写入 `family` 字段。老配置没有该字段时
-   一律解析为拓竹（`resolve_family`），因此**老用户不需要迁移**。
+   声明族 id、展示名、凭据策略（`CredentialPolicy`）、端口与发现方式，
+   并在该族的模块里提供 `create_session(info, **options)` 作为 ``session_factory``。
+   **只登记已经能用的族** —— 提前登记会让界面出现一个选了也没用的选项
+   （`tests/test_family_wiring.py` 会断言"登记了就必须有工厂"）。
+3. 在配置文件里给该族设备写入 `family` 字段（以及需要时的 `port` / 凭据字段）。
+   老配置没有该字段时一律解析为拓竹（`resolve_family`），因此**老用户不需要迁移**。
+
+界面侧**不需要改动**，因为它拿到的两样东西都是族无关的：
+
+* 会话 —— 全部经 `registry.create_session(info)` 创建（桌面版 / 网页版 / 命令行四处）；
+* 状态 —— 全部经 `device.display_status(session.snapshot())` 转成界面认识的那套字段名
+  （第三方族的 `job_state` / `progress_percent` 会被翻译成 `gcode_state` / `progress`…）。
 
 仍然需要按族处理的差异只有三处，且都在适配器内部：
 **状态机映射**（各家取值完全不同，映射到 `JOB_*`）、**剩余时间来源**

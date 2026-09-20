@@ -11,6 +11,7 @@ import threading
 
 from . import __version__
 from .bambu.ports import DEFAULT_ACCESS_CODE
+from .core import display_status
 
 LOGGER = logging.getLogger("bambu-monitor")
 
@@ -95,7 +96,7 @@ def ui_selftest_report(window) -> str:
     lines.append(f"tile_count={len(tiles)}")
     for index, tile in enumerate(tiles):
         session = tile.session
-        status = session.snapshot()
+        status = display_status(session.snapshot())
         lines.append(
             f"[{index}] name={session.info.display_name()} ip={session.info.ip} "
             f"model={session.info.model.label} backend={session.video_backend}"

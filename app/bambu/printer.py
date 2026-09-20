@@ -43,7 +43,6 @@ class PrinterSession:
     本类不依赖 GUI：界面通过 ``snapshot()`` 轮询状态，通过
     ``latest_frame()`` 取最新一帧，因此不会因为高频信号导致队列堆积。
     """
-
     #: 受「固件要求 MQTT 命令签名」影响的命令（归一化名）。
     #:
     #: 依据：官方 MQTT 签名机制的覆盖范围是**顶层带 ``print`` 的报文**
@@ -791,3 +790,13 @@ class PrinterSession:
         if status.mqtt_online or status.camera_online:
             return "部分在线"
         return "离线"
+
+
+def create_session(info: PrinterInfo, **options: Any) -> PrinterSession:
+    """拓竹族的会话工厂（由 `app/core/registry.py` 登记，见 `core.create_session`）。
+
+    单独留一个函数而不是直接登记 ``PrinterSession``：各族都提供同名的
+    ``create_session(info, **options)``，第三方族照抄这个形状即可，
+    调用方（桌面版 / 网页版 / 命令行）不需要知道任何族特有的参数。
+    """
+    return PrinterSession(info, **options)

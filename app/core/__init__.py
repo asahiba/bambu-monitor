@@ -1,16 +1,26 @@
 """设备无关内核。
 
-这个包里的东西**不允许**依赖任何厂商模块（`app.bambu.*`、未来的 `app.adapters.*`），
+这个包里的东西**不允许**在导入期依赖任何厂商模块（`app.bambu.*`、`app.adapters.*`），
 也不允许依赖 Qt。它是界面、网页、命令行共同依赖的契约层：
 
 * ``capabilities.DeviceCapabilities`` —— 设备「能做什么」
 * 本文件里的 ``DeviceSession`` —— 会话必须提供什么（协议，非基类）
+* ``registry`` —— 设备族表 + **全程序唯一的建会话入口** ``create_session()``
+* ``device.display_status()`` —— 把任一族的状态翻译成界面认识的那套字段名
+
+> ⚠️ 唯一的例外是 ``registry`` 里的两个会话工厂：它们**在函数体内**导入
+> `app.bambu.printer` / `app.adapters.moonraker`（延迟导入），因为"哪一族用哪个
+> 实现"这个知识只能放在注册表里。导入期依然不拉起 paho / OpenCV / 适配器。
 
 ## 为什么要有这一层
 
 现在整个项目只支持拓竹，界面与网页直接依赖 `PrinterSession` 的具体实现。
 要接入其它设备族（Klipper/Moonraker、OctoPrint、Snapmaker…）时，
 只要新适配器满足 ``DeviceSession``，界面与网页**不需要改动**。
+
+> 这句话原本只是愿望：界面还额外依赖 `PrinterStatus` 的字段名，
+> 所以接入 Moonraker 时又补了 ``device.display_status()`` 这层翻译。
+> 现在两件事都齐了：**会话**满足 ``DeviceSession``，**状态**过 ``display_status()``。
 
 ## 关于 ``DeviceSession`` 的形态
 
@@ -41,7 +51,9 @@ from .device import (
     JOB_UNKNOWN,
     MAPPABLE_FIELDS,
     DeviceStatus,
+    DisplayStatus,
     camera_status_text,
+    display_status,
 )
 from .registry import (  # noqa: F401  （对外转出）
     FAMILY_BAMBU,
@@ -49,7 +61,16 @@ from .registry import (  # noqa: F401  （对外转出）
     FAMILY_OCTOPRINT,
     CredentialPolicy,
     FamilyDescriptor,
+    create_session,
+    credential_label,
+    credential_of,
+    default_port,
+    display_model,
+    has_credential,
+    is_registered,
+    resolve_family,
 )
+from .registry import all_families as all_families  # noqa: F401  （对外转出）
 
 __all__ = [
     "CAMERA_STATE_TEXT",
@@ -58,11 +79,13 @@ __all__ = [
     "DeviceSession",
     "DeviceSnapshot",
     "DeviceStatus",
+    "DisplayStatus",
     "FAMILY_BAMBU",
     "FAMILY_MOONRAKER",
     "FAMILY_OCTOPRINT",
     "FamilyDescriptor",
     "PollingDeviceSession",
+    "all_families",
     "JOB_ACTIVE_STATES",
     "JOB_FAILED",
     "JOB_FINISHED",
@@ -75,7 +98,16 @@ __all__ = [
     "JOB_UNKNOWN",
     "MAPPABLE_FIELDS",
     "camera_status_text",
+    "create_session",
+    "credential_label",
+    "credential_of",
+    "default_port",
+    "display_model",
+    "display_status",
+    "has_credential",
+    "is_registered",
     "registry",
+    "resolve_family",
 ]
 
 

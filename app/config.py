@@ -39,6 +39,11 @@ LOGGER = logging.getLogger("bambu-monitor.config")
 #: 导出文件的格式版本。1（或没有该字段）= 老格式；2 = 带 ``format``/``portable`` 标记
 EXPORT_FORMAT = 2
 
+#: 设备凭据字段 —— **凡是凭据都要走同一套加密与"解不开就逐个点名"的流程**。
+#: `access_code` 是拓竹的访问代码，`api_key` 是第三方族（Moonraker 等）的 API Key。
+#: 新增凭据字段时只改这一处，导出/导入/加密三条路径都不会漏。
+CREDENTIAL_FIELDS: tuple[str, ...] = ("access_code", "api_key")
+
 
 def _new_token() -> str:
     return secret.token_hex(8)
@@ -125,6 +130,12 @@ def _parse(data: dict[str, Any]) -> "AppConfig":
                 # 以前只有 to_json() 写出 discovered、_parse() 从不读回，
                 # 「导出再导入」会把它悄悄变成 False（往返不保真）。
                 discovered=bool(item.get("discovered", False)),
+                # 设备族：**空字符串 = 拓竹**（老配置里没有这个字段）
+                family=str(item.get("family", "") or ""),
+                port=_coerce_int(item, "port", 0, 0, 65535),
+                # 非拓竹族的凭据，与访问代码同样按本机方式加密保存
+                api_key=secret.decrypt_text(str(item.get("api_key", ""))),
+                camera_url=str(item.get("camera_url", "") or ""),
             )
         )
     web_token = str(data.get("web_token", "") or "") or secret.token_hex(8)
@@ -249,8 +260,10 @@ class AppConfig:
         for printer in self.printers:
             item = asdict(printer)
             item["model"] = printer.model.value
-            code = printer.access_code or ""
-            item["access_code"] = cipher.encrypt(code) if cipher else secret.encrypt_text(code)
+            # 两种凭据（拓竹的访问代码、第三方族的 API Key）走同一套加密
+            for key in CREDENTIAL_FIELDS:
+                value = str(getattr(printer, key, "") or "")
+                item[key] = cipher.encrypt(value) if cipher else secret.encrypt_text(value)
             data["printers"].append(item)
         return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -428,9 +441,9 @@ def _portable_salt(blob: str) -> bytes | None:
 
 
 def _decrypt_portable_printers(data: dict, passphrase: str) -> tuple[dict, list[str], int]:
-    """把 ``data`` 里口令加密的访问代码解开。
+    """把 ``data`` 里口令加密的凭据解开（访问代码与 API Key 都算）。
 
-    :returns: ``(新的 data, 解不开的设备名, 口令加密的设备总数)``
+    :returns: ``(新的 data, 解不开的设备名, 口令加密的凭据总数)``
 
     一份文件只派生一次密钥（同一把盐），所以先拿第一条凭据的盐建 cipher；
     盐不一致说明文件被拼过，那条会解不开并被告知。
@@ -440,22 +453,28 @@ def _decrypt_portable_printers(data: dict, passphrase: str) -> tuple[dict, list[
     if not isinstance(printers, list):
         return result, [], 0
     blobs = [
-        (item, str(item.get("access_code", "")))
+        (item, key, str(item.get(key, "")))
         for item in printers
-        if isinstance(item, dict) and secret.is_portable(str(item.get("access_code", "")))
+        if isinstance(item, dict)
+        for key in CREDENTIAL_FIELDS
+        if secret.is_portable(str(item.get(key, "")))
     ]
     if not blobs:
         return result, [], 0
-    salt = _portable_salt(blobs[0][1])
+    salt = _portable_salt(blobs[0][2])
     if salt is None:
-        return result, [str(item.get("name") or item.get("ip") or "?") for item, _ in blobs], len(blobs)
+        return (
+            result,
+            [str(item.get("name") or item.get("ip") or "?") for item, _key, _blob in blobs],
+            len(blobs),
+        )
     cipher = secret.PortableCipher(passphrase, salt)
     failed: list[str] = []
-    for item, blob in blobs:
+    for item, key, blob in blobs:
         try:
-            item["access_code"] = cipher.decrypt(blob)
+            item[key] = cipher.decrypt(blob)
         except ValueError:
-            item["access_code"] = ""
+            item[key] = ""
             failed.append(str(item.get("name") or item.get("ip") or "?"))
     return result, failed, len(blobs)
 
@@ -469,9 +488,11 @@ def _unreadable_local_codes(data: dict) -> list[str]:
     for item in printers:
         if not isinstance(item, dict):
             continue
-        raw = str(item.get("access_code", ""))
-        if raw and secret.is_encrypted(raw) and not secret.decrypt_text(raw):
-            names.append(str(item.get("name") or item.get("ip") or "?"))
+        for key in CREDENTIAL_FIELDS:
+            raw = str(item.get(key, ""))
+            if raw and secret.is_encrypted(raw) and not secret.decrypt_text(raw):
+                names.append(str(item.get("name") or item.get("ip") or "?"))
+                break
     return names
 
 

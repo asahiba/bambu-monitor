@@ -439,6 +439,11 @@ def test_api_printers_字段与钳制(make_server):
 
     for key in ("total", "camera_online", "mqtt_online", "printing", "web_fps", "printers"):
         assert key in data, key
+    # 设备族表：网页端据此渲染「设备族」下拉与凭据字段的标签/必填性
+    assert isinstance(data.get("families"), list) and data["families"], (
+        "缺 families 时网页端只能按拓竹渲染表单，第三方设备根本加不进去"
+    )
+    assert {item["family"] for item in data["families"]} >= {"bambu", "moonraker"}
     assert data["total"] == 2
     assert data["web_fps"] == 6.0
     assert data["camera_online"] == 1
@@ -448,6 +453,12 @@ def test_api_printers_字段与钳制(make_server):
 
     first = data["printers"][0]
     assert first["index"] == 0
+    # 设备族要**逐台**回传：网页端的「编辑」表单据此决定凭据写进哪个字段
+    # （靠 model 猜会写错字段，凭据就被静默丢掉了）
+    assert first["family"] == "bambu"
+    assert first["family_label"]
+    assert first["credential_label"] == "访问代码"
+    assert first["port"] == 8883, "拓竹族的默认端口是 MQTT 8883"
     assert first["progress"] == 100, "progress=250 必须被夹到 100"
     assert first["span"] == 3, "tile_span=9 必须被夹到 3"
     assert isinstance(first["ams"], list) and len(first["ams"]) == 1

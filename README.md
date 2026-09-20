@@ -335,6 +335,27 @@ python -m app.headless --import-config ./bambu.json --config-passphrase '你的�
 
 更详细的说明见 `docs/PROTOCOL.md`。
 
+### 其它品牌（Klipper / Moonraker 生态）
+
+从 v1.1.0 起也可以监控跑 **Moonraker** 的设备：**Voron、RatRig/RatOS、刷 Klipper 的
+Creality / Elegoo / Anycubic，以及出厂即 Klipper + Moonraker 的 Snapmaker U1**。
+
+添加时把「设备族」选成 *Klipper / Moonraker*，填 IP（和端口，默认 7125；
+U1 出厂配置前面挂了 nginx，**80 也能通**）即可；内网 Moonraker 默认免鉴权，
+提示未授权时才需要填 API Key（从 Moonraker 的 `/access/api_key` 取）。
+命令行同样支持（Docker / NAS 用户只有命令行）：
+
+```bash
+python -m app.headless --add-printer "moonraker@Voron 192.168.1.90 abc123 7125"
+```
+
+| 能力 | 说明 |
+| --- | --- |
+| 遥测 | `POST /printer/objects/query`（进度 / 温度 / 层数 / 文件名 / 状态） |
+| 控制 | 暂停 / 继续 / 停止走 HTTP；**急停与灯控、速度档位走 WebSocket**（Moonraker 的限制） |
+| 画面 | 摄像头快照轮询（自动发现 `server/webcams/list`，也可手填 URL）；U1 需要周期性保活，软件已内置 |
+| 没有的 | HMS 错误码体系、AMS 多色（Klipper 没有这些概念），剩余时间不显示（Moonraker 无原生字段，宁可不显示也不估算错的） |
+
 ## 5. 常见问题
 
 **搜不到打印机 / 每次都只搜到一部分？**

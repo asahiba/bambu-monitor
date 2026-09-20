@@ -123,6 +123,85 @@ def is_registered(family: str) -> bool:
     return family in _REGISTRY
 
 
+# --------------------------------------------------------------------- 建会话
+
+def create_session(info: Any, **options: Any) -> Any:
+    """**按设备族**为一台设备建会话 —— 全程序唯一的建会话入口。
+
+    以前每处（桌面版、网页版、命令行）都直接写 ``PrinterSession(info)``，
+    于是配置里就算标了第三方族也仍然按拓竹处理（去连 8883 端口，必然失败）。
+    现在统一走这里：族 → 工厂 → 会话。
+
+    :raises RuntimeError: 该族还没有会话实现（只登记了探测能力）
+    """
+    descriptor = resolve_family(info)
+    factory = descriptor.session_factory
+    if factory is None:
+        raise RuntimeError(
+            f"设备族「{descriptor.label}」还没有实现监控会话，暂时无法连接。"
+        )
+    return factory(info, **options)
+
+
+def credential_of(info: Any) -> str:
+    """这台设备实际用的凭据值（拓竹是访问代码，第三方族是 API Key）。"""
+    family = resolve_family(info)
+    if family.credential.key == "access_code":
+        return str(getattr(info, "access_code", "") or "")
+    return str(getattr(info, family.credential.key, "") or "") or str(
+        getattr(info, "access_code", "") or ""
+    )
+
+
+def credential_label(info: Any) -> str:
+    """凭据在界面上的名字（拓竹「访问代码」/ Moonraker「API Key」）。
+
+    界面文案以前写死「访问代码」，接第三方族时会出现「请填访问代码」而
+    那台设备根本没有这个概念的情况。
+    """
+    return resolve_family(info).credential.label
+
+
+def has_credential(info: Any) -> bool:
+    """是否填了凭据。拓竹必填、Moonraker 内网免鉴权，所以**不能**当"能不能连"的判据。"""
+    return bool(credential_of(info))
+
+
+def default_port(info: Any) -> int:
+    """该设备的服务端口：配置里填了就用，否则用族的默认端口。"""
+    port = int(getattr(info, "port", 0) or 0)
+    if port > 0:
+        return port
+    return int(resolve_family(info).default_port or 0)
+
+
+def display_model(info: Any) -> str:
+    """界面上显示的「机型」：拓竹用识别出的机型名，其它族用族的展示名。"""
+    descriptor = resolve_family(info)
+    if descriptor.family == FAMILY_BAMBU:
+        model = getattr(info, "model", None)
+        return str(getattr(model, "label", "") or "") or "未知机型"
+    return descriptor.label
+
+
+# ------------------------------------------------------------------- 内置族的工厂
+#
+# ⚠️ 工厂里**延迟导入**：registry 会被很轻的调用方导入（只解析配置、只列设备族），
+# 不该连带拉起 paho / OpenCV / 设备族适配器。真实实现由各族自己的模块提供，
+# 第三方族照这个形状提供 ``create_session(info, **options)`` 即可。
+
+def _bambu_factory(info: Any, **options: Any) -> Any:
+    from ..bambu.printer import create_session as build
+
+    return build(info, **options)
+
+
+def _moonraker_factory(info: Any, **options: Any) -> Any:
+    from ..adapters.moonraker import create_session as build
+
+    return build(info, **options)
+
+
 def _register_builtins() -> None:
     """登记内置设备族。
 
@@ -149,6 +228,7 @@ def _register_builtins() -> None:
                 "网段单播扫描",
                 "手动填写 IP",
             ),
+            session_factory=_bambu_factory,
             notes=(
                 "新机型（H2C/H2S/X2D/P2S/A2L）的 fun 字段会要求 MQTT 命令签名，"
                 "未开 Developer Mode 时控制会被静默忽略（见 docs/FIELD_NOTES.md）"
@@ -178,6 +258,7 @@ def _register_builtins() -> None:
                 "端口探测 80 / 7125",
                 "手动填写 IP",
             ),
+            session_factory=_moonraker_factory,
             notes=(
                 "急停与 /printer/control/* 是 WebSocket-only，HTTP 发不通，"
                 "必须常驻一条 WS 连接；U1 的摄像头也靠该连接周期性保活，"

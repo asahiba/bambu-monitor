@@ -7,16 +7,16 @@
 
 ## 〇、当前测试保护情况
 
-修复过程中建立了 pytest 回归套件（`tests/`，38 个文件）：
+修复过程中建立了 pytest 回归套件（`tests/`，41 个文件）：
 
 ```
-test.bat                        →  904 passed, 7 skipped    （约 2 分钟，完全离线）
+test.bat                        →  969 passed, 7 skipped    （约 2 分钟，完全离线）
 set BAMBU_RUN_SLOW=1 && test.bat -m slow
-                                →  7 passed                 （内置模拟器端到端，约 5 秒）
+                                →  7 passed                 （内置模拟器端到端，约 6 秒）
 ```
 
 > 上面是 Windows 桌面环境（装了 PySide6 + OpenCV）的数字；CI 的 Linux/无 Qt
-> 环境是 868 passed / 21 skipped（界面用例跳过）。
+> 环境会跳掉一批界面用例（跳过而不是失败）。
 
 覆盖范围：机型识别与报文解析、配置读写与钳制、DPAPI 凭据、`build_auth_packet` 布局、
 网页服务全部路由与鉴权、`PrinterSession` 通道选择与控制、HMS 文案层与数据文件降级、
@@ -264,7 +264,7 @@ OpenCV 把还原出的 65 帧**全部解出**。也就是说除了「WebView 里
 | 15 | ~~五个对话框（诊断/布局/设置/HMS/网页）无冒烟覆盖（`tools/dialog_smoke.py` 只构造添加与搜索两个）~~ **已修**：`tests/test_ui_smoke.py::test_dialogs_construct_and_close` 现在把六个对话框（含诊断/布局/设置/HMS/网页）在 offscreen 下全部构造并关闭，另外逐条调用工具栏/右键菜单槽函数 | `tests/test_ui_smoke.py` |
 | 16 | ~~`app/web/page.py` 是近 500 行的单文件内嵌 HTML+CSS+JS，无前端构建、无语法检查、无测试~~ **已修**：`tests/test_contracts.py` 用 `esprima` 真正解析内嵌 JS（语法错直接失败），CI 也装上 esprima；此外还有 PWA 清单、令牌鉴权、多路复用流等契约断言。仍然**没有前端构建**（有意为之：单文件内嵌是「不装 Node 也能跑」的取舍） | `app/web/page.py`、`tests/test_contracts.py` |
 | 17 | ~~`app/ui/tile.py:134-136` 的 `shutdown()` 只 `stop()` 解码线程不 join；`add_dialog.py:199`、`diagnose_dialog.py:200` 的 `QThread.wait()` 超时后未处理~~ **已修**：三处都补齐。后两处原来会让**整个进程 fail-fast 消失**（运行中的 QThread 被析构 = 0xC0000409，用户看到的是「点开诊断/点测试连接后随手关掉 → 程序没了」）——现在探测与诊断都支持取消（`probe.py`/`camera.py` 的 `should_stop`），并新增 `app/ui/qt_threads.py` 在进程退出前兜底等待；回归测试见 `tests/test_ui_thread_shutdown.py`（用子进程断言退出码，因为崩溃会直接带走 pytest） | `app/ui/tile.py`、`app/ui/add_dialog.py`、`app/ui/diagnose_dialog.py`、`app/ui/qt_threads.py` |
-| 18 | **Moonraker 适配器已写完，但产品里没有任何入口能用到它**（代码本身是对的，缺的是"接上")：`app/adapters/moonraker/`（`adapter.py` 488 行 + `ws.py` 278 行 + `fake.py` 503 行）已经实现了 Klipper 生态的遥测（`POST /printer/objects/query`）、控制（HTTP 的 pause/resume/cancel；WebSocket-only 的 `/printer/control/*`、急停、摄像头保活）、摄像头自动发现与非 JPEG 拒绝，`parse_status()` 是纯函数、34 条用例覆盖（`tests/test_moonraker.py`）。但：① `app/core/registry.py` 里 `FAMILY_MOONRAKER` 的 `session_factory` 是 None（registry.py:159-187）；② **全仓库只有测试在调** `registry.all_families()` / `get()` / `resolve_family()` —— 界面「添加设备」没有设备族选项、`PrinterInfo` 也还没有 `family`/`port`/`api_key` 字段。所以现在的状态是"代码就绪、线路未接"：配置里即使写 `family: "moonraker"`，会话仍会按拓竹处理（去连 8883）。接入前**不要**把它做成界面上的可选项（`app/adapters/__init__.py` 的约定：提前登记＝给出一个选了也没用的选项）。要做的是：`PrinterInfo` 加 `family`/`port`/`api_key`（老配置缺省 bambu，`resolve_family` 已经这样兜底）→ 建会话处改用 `resolve_family(info).session_factory` → 再让添加对话框列出 `all_families()` | `app/adapters/moonraker/`、`app/core/registry.py:159`、`app/bambu/models.py` |
+| 18 | ~~**Moonraker 适配器已写完，但产品里没有任何入口能用到它**（代码本身是对的，缺的是"接上"）~~ **已修（v1.1.0）**：① 两个内置族都登记了 `session_factory`，并新增全程序唯一的建会话入口 `app/core/registry.py::create_session()` —— 桌面版 / 网页版 / 命令行里原先直接 `PrinterSession(info)` 的四处全部改走它；② `PrinterInfo` 补上 `family` / `port` / `api_key` / `camera_url`（老配置没有 `family` 即拓竹，免迁移；API Key 与访问代码同一套加密落盘，带口令导出也能跨机导入）；③ 添加/编辑表单（桌面版 + 网页/安卓）与命令行 `--add-printer "moonraker@名称 IP 凭据 [端口]"` 都能选族，凭据标签/必填性/端口都来自注册表，前端不写死任何族特有文案；④ 界面还差最后一层 —— 第三方族的状态字段名与拓竹不同，为此加了 `app/core/device.py::display_status()`（对拓竹逐字段无损透传）。回归用例 `tests/test_family_wiring.py`(25 条)。**仍未验证**：真实 Voron / U1 上的表现（只有假 Moonraker 服务器端到端） | `app/core/registry.py`、`app/core/device.py`、`app/bambu/models.py`、`app/config.py`、`app/web/**`、`app/ui/**`、`app/headless.py` |
 
 ---
 

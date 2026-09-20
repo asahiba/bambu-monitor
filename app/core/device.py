@@ -19,8 +19,9 @@
 * ``DeviceStatus`` 只放**任何 3D 打印机都有的通用概念**，字段名不绑定任何厂商。
 * 各设备族的适配器负责把设备私有格式**先转成通用字段字典**，再调用
   ``apply_mapped()`` 合并进来 —— 这是新增设备族的**唯一写状态入口**。
-* 拓竹的 ``PrinterStatus`` 继承本类并保留原有全部字段（老配置、老测试、老调用方
-  都依赖那些字段名），只额外提供指向通用名的别名属性。
+* 拓竹的 ``PrinterStatus`` **保留原有全部字段名**（老配置、老测试、老调用方
+  都依赖那些字段名），它不继承本类；两者的差异由 :func:`display_status`
+  在"界面这一层"抹平 —— 界面代码因此不需要知道自己在看哪一族的状态。
 
 ## 单位与取值范围（务必遵守）
 
@@ -109,6 +110,7 @@ def camera_status_text(
     camera_detail: str = "",
     mqtt_auth_error: bool = False,
     has_access_code: bool = False,
+    credential_label: str = "访问代码",
 ) -> tuple[str, str]:
     """把通道状态翻译成「短标签 + 完整说明」。
 
@@ -118,16 +120,20 @@ def camera_status_text(
 
     现在统一：返回的第一项是**稳定的短标签**（宽度可控，窄处也能完整显示），
     第二项是完整说明，由调用方放到悬浮提示里。
+
+    :param credential_label: 该设备族对凭据的叫法（拓竹「访问代码」、
+        Moonraker「API Key」）。写死「访问代码」会让第三方族上出现
+        「请填访问代码」而它根本没有这个概念。
     """
     detail = camera_detail or ""
     if camera_online and mqtt_online:
         return "在线", detail
     if camera_state == "auth_error" or mqtt_auth_error:
-        return "访问代码错误", detail
+        return f"{credential_label}错误", detail
     if camera_online:
         return "画面正常·遥测断开", detail
     if not has_access_code:
-        return "未配置访问代码", detail
+        return f"未配置{credential_label}", detail
     return CAMERA_STATE_TEXT.get(camera_state, "连接中"), detail
 
 
@@ -234,3 +240,220 @@ class DeviceStatus:
             self.online = True
             self.mqtt_online = True
         return applied
+
+
+# ------------------------------------------------------- 界面的统一只读视图
+
+def _wifi_level_from_dbm(dbm: Optional[float]) -> int:
+    """把 RSSI(dBm) 换算成 0-4 格（阈值与拓竹那条路径保持一致）。"""
+    if dbm is None:
+        return 0
+    if dbm >= -55:
+        return 4
+    if dbm >= -65:
+        return 3
+    if dbm >= -75:
+        return 2
+    if dbm >= -85:
+        return 1
+    return 0
+
+
+def _minutes_text(minutes: int) -> str:
+    """剩余时间文案：与拓竹侧 `PrinterStatus.remaining_text` 完全同款。"""
+    minutes = max(0, int(minutes or 0))
+    if minutes <= 0:
+        return "--"
+    hours, mins = divmod(minutes, 60)
+    if hours:
+        return f"{hours}小时{mins:02d}分"
+    return f"{mins}分钟"
+
+
+class DisplayStatus:
+    """界面用的**只读视图**：把任一族的会话状态翻译成界面认识的那套字段名。
+
+    ## 为什么要有这一层
+
+    界面（`ui/tile.py`、`web/server.py`、`headless.py`）历史上只认拓竹
+    ``PrinterStatus`` 的字段名（``gcode_state`` / ``progress`` / ``subtask_name``…），
+    而第三方族的状态是通用的 ``DeviceStatus``（``job_state`` / ``progress_percent`` /
+    ``job_name``…）。两条路可选：改全部界面代码，或者加一层翻译。
+
+    这里选后者：**界面代码一行不用动**，翻译只有这一处，而且能单独测
+    （`tests/test_display_status.py` 里对拓竹对象断言"逐字段等同原对象"，
+    对通用对象断言"每个字段都有合理取值"）。
+
+    ## 约定
+
+    * 视图是只读的：写状态仍然只走 `DeviceStatus.apply_mapped()`；
+    * 视图里的字段**始终存在**（缺失的用空值/`--` 兜底），避免界面拿到
+      ``AttributeError`` —— 这是"接一个新族就崩界面"的典型原因；
+    * 拓竹对象过这一层是**无损**的（同名优先取原值）。
+    """
+
+    __slots__ = ("_status",)
+
+    def __init__(self, status: Any) -> None:
+        self._status = status
+
+    # ----------------------------------------------------------- 显式映射
+    @property
+    def state_text(self) -> str:
+        text = getattr(self._status, "state_text", "")
+        if text:
+            return str(text)
+        return str(getattr(self._status, "job_state_text", "") or "未知")
+
+    @property
+    def progress(self) -> int:
+        """0..100。通用模型里 -1 = 未知，界面上按 0 显示（与拓竹侧行为一致）。"""
+        value = getattr(self._status, "progress", None)
+        if value is None:
+            value = getattr(self._status, "progress_percent", 0)
+        try:
+            percent = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(100, percent))
+
+    @property
+    def remaining_text(self) -> str:
+        text = getattr(self._status, "remaining_text", "")
+        if text and text != "--":
+            return str(text)
+        return _minutes_text(int(getattr(self._status, "remaining_minutes", 0) or 0))
+
+    @property
+    def finish_time_text(self) -> str:
+        text = getattr(self._status, "finish_time_text", "")
+        if text:
+            return str(text)
+        minutes = int(getattr(self._status, "remaining_minutes", 0) or 0)
+        if minutes <= 0 or not self.is_printing:
+            return "--"
+        from datetime import datetime, timedelta
+
+        eta = datetime.now() + timedelta(minutes=minutes)
+        if eta.date() != datetime.now().date():
+            return eta.strftime("明天 %H:%M")
+        return eta.strftime("%H:%M")
+
+    @property
+    def subtask_name(self) -> str:
+        name = getattr(self._status, "subtask_name", "")
+        if name:
+            return str(name)
+        return str(getattr(self._status, "job_name", "") or "")
+
+    @property
+    def layer_num(self) -> int:
+        value = getattr(self._status, "layer_num", None)
+        if value is None:
+            value = getattr(self._status, "layer_current", 0)
+        return max(0, int(value or 0))
+
+    @property
+    def total_layer_num(self) -> int:
+        value = getattr(self._status, "total_layer_num", None)
+        if value is None:
+            value = getattr(self._status, "layer_total", 0)
+        return max(0, int(value or 0))
+
+    @property
+    def gcode_state(self) -> str:
+        """状态机原始取值。通用族给归一化后的 ``job_state``（界面只用它判"有没有状态"）。"""
+        state = getattr(self._status, "gcode_state", "")
+        if state:
+            return str(state)
+        return str(getattr(self._status, "job_state", "") or "")
+
+    @property
+    def ams_trays(self) -> list:
+        trays = getattr(self._status, "ams_trays", None)
+        return list(trays) if isinstance(trays, list) else []
+
+    @property
+    def vt_tray(self) -> Any:
+        return getattr(self._status, "vt_tray", None)
+
+    @property
+    def active_tray(self) -> Any:
+        return getattr(self._status, "active_tray", None)
+
+    @property
+    def hms_items(self) -> list:
+        items = getattr(self._status, "hms_items", None)
+        return list(items) if isinstance(items, list) else []
+
+    @property
+    def print_error(self) -> int:
+        value = getattr(self._status, "print_error", None)
+        if value is None:
+            value = getattr(self._status, "job_error_code", 0)
+        return int(value or 0)
+
+    @property
+    def print_error_text(self) -> str:
+        return str(getattr(self._status, "print_error_text", "") or "")
+
+    @property
+    def lights(self) -> dict:
+        lights = getattr(self._status, "lights", None)
+        return dict(lights) if isinstance(lights, dict) else {}
+
+    @property
+    def wifi_signal(self) -> str:
+        signal = getattr(self._status, "wifi_signal", "")
+        if signal:
+            return str(signal)
+        dbm = getattr(self._status, "wifi_rssi_dbm", None)
+        if dbm is None:
+            return ""
+        return f"{float(dbm):.0f}dBm"
+
+    @property
+    def wifi_level(self) -> int:
+        level = getattr(self._status, "wifi_level", None)
+        if isinstance(level, int) and level > 0:
+            return level
+        signal = str(getattr(self._status, "wifi_signal", "") or "").lower().replace("dbm", "")
+        try:
+            dbm: Optional[float] = float(signal.strip())
+        except ValueError:
+            dbm = getattr(self._status, "wifi_rssi_dbm", None)
+        return _wifi_level_from_dbm(dbm)
+
+    @property
+    def light_on(self) -> Optional[bool]:
+        value = getattr(self._status, "light_on", None)
+        return value if isinstance(value, bool) else None
+
+    @property
+    def last_message_ts(self) -> float:
+        return float(getattr(self._status, "last_message_ts", 0.0) or 0.0)
+
+    @property
+    def last_error(self) -> str:
+        return str(getattr(self._status, "last_error", "") or "")
+
+    @property
+    def raw(self) -> dict:
+        raw = getattr(self._status, "raw", None)
+        return raw if isinstance(raw, dict) else {}
+
+    # ----------------------------------------------------------- 兜底
+    def __getattr__(self, name: str) -> Any:
+        """其余成员（``nozzle_temper`` / ``mqtt_online`` / ``is_printing``…）原样透传。
+
+        两个模型都有这些字段，没必要逐个转发；真缺失时抛 ``AttributeError``
+        （而不是悄悄给个默认值），否则界面会拿着假数据继续画。
+        """
+        return getattr(self._status, name)
+
+
+def display_status(status: Any) -> DisplayStatus:
+    """把会话状态包成界面视图（已经是视图时原样返回，可反复调用）。"""
+    if isinstance(status, DisplayStatus):
+        return status
+    return DisplayStatus(status)

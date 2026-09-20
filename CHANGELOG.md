@@ -3,6 +3,60 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] — 2026-09-18
+
+> 这一版把**第三方设备族**从「代码就绪」接成「真的能用」：
+> Klipper / Moonraker 生态（Voron、RatRig/RatOS、刷 Klipper 的
+> Creality/Elegoo/Anycubic、以及出厂即 Klipper + Moonraker 的 Snapmaker U1）
+> 现在能在界面里添加、监控、控制了。
+> 之前那套适配器与设备族注册表**写得完整但没有任何入口** ——
+> 配置里就算写了 `family: "moonraker"`，会话仍会按拓竹处理（去连 8883，必然失败）。
+
+### 新增
+
+- **可以添加 Klipper / Moonraker 设备了（四个界面都支持）**：添加/编辑表单多了
+  「设备族」选项，凭据字段的**标签、提示与是否必填都来自设备族注册表**
+  （拓竹＝访问代码，Moonraker＝API Key 且内网免鉴权时可留空），并支持
+  **端口**（没填就用该族默认端口：拓竹 8883、Moonraker 7125）与**摄像头 URL**
+  （留空则尝试自动发现）。桌面版「测试连接」对第三方族会去问
+  `GET /server/info` 并显示 Klipper/Moonraker 版本。
+- **新增全程序唯一的建会话入口** `app/core/registry.py::create_session()`：
+  桌面版、网页版、命令行原先各自直接 `PrinterSession(info)`，所以「配置里的设备族」
+  形同虚设。现在按族派发到各族的 ``session_factory``。
+  命令行也补齐了：`--add-printer "moonraker@Voron 192.168.1.90 abc123 7125"`
+  （Docker / NAS 用户只有命令行可用）。
+- **界面状态层加了族无关的翻译层** `app/core/device.py::display_status()`：
+  第三方族的状态是通用模型（`job_state` / `progress_percent` / `job_name`…），
+  而界面历史上只认拓竹字段名（`gcode_state` / `progress` / `subtask_name`…）。
+  有了这层，**界面代码一行不用改**就能显示第三方设备；对拓竹对象是逐字段无损透传
+  （`tests/test_family_wiring.py` 里有这条断言）。
+- `PrinterInfo` 新增 `family` / `port` / `api_key` / `camera_url` 字段。
+  老配置没有 `family` 字段时**一律按拓竹处理，不需要任何迁移**。
+  API Key 与访问代码走同一套加密（本机 DPAPI/Fernet，或导出时的口令加密），
+  **不会明文落盘**。
+
+### 修复
+
+- 编辑设备时**保存会把第三方字段清空**：`edit_printer()` 原来只写回
+  `ip/name/serial/access_code/model/stream_mode`。现在 `family/port/api_key/camera_url`
+  一并写回；**切换设备族时会重建会话**（会话实现不同，只 `restart()` 会用旧实现连新设备）。
+- `WebHost.add_printer` 里换族不再只 `restart()`，改为换掉会话实现；
+  凭据按族写进对应字段，必填族缺凭据时**当场报错**（而不是加进去后一直连不上）。
+
+### 已知限制
+
+- **第三方设备不会被「自动搜索」发现**：拓竹靠 SSDP / 2021 广播，而 Moonraker 的
+  mDNS（`_moonraker._tcp` / `_snapmaker._tcp`）在设备端**默认不开**，
+  所以请手动填 IP（表单里的「设备族」选 Klipper / Moonraker）。
+  注册表里已经记下了这几条发现方式，将来接上 mDNS 就能自动搜到。
+- **Moonraker 的剩余时间不显示**：Moonraker 没有原生剩余时间字段，本程序宁可不显示
+  也不估算错的倒计时（`docs/FIELD_NOTES.md` 里有调研结论）。
+- **U1 之外的第三方设备画面**：Moonraker 只提供快照/MJPEG，本程序按帧轮询快照；
+  U1 的原厂固件需要手填摄像头 URL（它没有标准的 MJPEG 端点）。
+- **没有真机验证**：本版只用假 Moonraker 服务器（`app/adapters/moonraker/fake.py`）
+  做了端到端验证（遥测 → 状态 → 界面视图 → 控制指令），**没有在真实 Voron/U1 上跑过**。
+  第一次连真机时请先用桌面版「测试连接」。
+
 ## [1.0.6] — 2026-09-18
 
 > 这一版把上一版留下的那条「安卓版 X1/X2D 这类机型看不到画面」真正修掉了：

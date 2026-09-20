@@ -448,6 +448,17 @@ class PrinterInfo:
     #: 画面占比：1 = 普通（1 格），2 = 重点画面（占 2×2 格）
     tile_span: int = 1
     discovered: bool = False
+    #: 设备族 id（见 `app/core/registry.py`）。**空字符串 = 拓竹**：
+    #: 历史上写出的所有配置都没有这个字段，`resolve_family()` 据此保证老配置免迁移。
+    family: str = ""
+    #: 服务端口。0 = 用该族的默认端口（拓竹是 8883，Moonraker 是 80）。
+    port: int = 0
+    #: 非拓竹族的凭据（Moonraker 的 API Key）。与 ``access_code`` 一样按本机方式
+    #: 加密保存；留空表示不需要（内网 Moonraker 默认免鉴权）。
+    api_key: str = ""
+    #: 第三方族的摄像头地址（留空则尝试自动发现）。U1 这类设备的摄像头端点
+    #: 不是标准 MJPEG，需要用户手填 —— 见 `docs/FIELD_NOTES.md`。
+    camera_url: str = ""
 
     def display_name(self) -> str:
         if self.name:

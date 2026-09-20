@@ -23,7 +23,14 @@ from urllib.parse import parse_qs, urlparse
 
 from ..bambu.discovery import local_interfaces
 from ..bambu.printer import PrinterSession
-from ..core.device import camera_status_text
+from ..core.device import camera_status_text, display_status
+from ..core.registry import (
+    credential_label,
+    default_port,
+    display_model,
+    has_credential,
+    resolve_family,
+)
 from .icons import icon_bytes
 from .page import INDEX_HTML
 from .service_worker import SERVICE_WORKER_JS
@@ -126,6 +133,46 @@ def _warn_shrink_unavailable() -> None:
         "服务端部署请安装 requirements-server.txt",
         PASSTHROUGH_BYTES,
     )
+
+
+def _as_port(value: object) -> int:
+    """请求体里的端口：非法/缺失一律当 0（= 用该族的默认端口）。"""
+    try:
+        port = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return port if 0 <= port <= 65535 else 0
+
+
+def _families_payload() -> list[dict]:
+    """已注册的设备族（供网页端渲染「设备族」下拉与凭据字段标签）。
+
+    网页与安卓端的添加表单以前只认拓竹：标签写死「访问代码」、也没有端口，
+    于是加了 Moonraker 设备后根本没有入口能填对。这里把注册表里的信息
+    原样交给前端，**前端不再自己写死任何族特有的文案**。
+    """
+    from ..core.registry import all_families
+
+    items = []
+    for descriptor in all_families():
+        policy = descriptor.credential
+        items.append(
+            {
+                "family": descriptor.family,
+                "label": descriptor.label,
+                "credential": {
+                    "key": policy.key,
+                    "label": policy.label,
+                    "required": policy.required,
+                    "secret": policy.secret,
+                    "hint": policy.hint,
+                },
+                "default_port": descriptor.default_port,
+                "candidate_ports": list(descriptor.candidate_ports),
+                "discoveries": list(descriptor.discoveries),
+            }
+        )
+    return items
 
 
 def _video_mode_of(session: PrinterSession) -> str:
@@ -495,7 +542,9 @@ class _Handler(BaseHTTPRequestHandler):
         sessions = self._sessions()
         items = []
         for session in sessions:
-            status = session.snapshot()
+            # 界面视图：第三方族的状态字段名与拓竹不同（job_state/progress_percent…），
+            # 这里统一翻译成界面认识的那套（详见 app/core/device.py::display_status）
+            status = display_status(session.snapshot())
             info = session.info
             problems = []
             if status.print_error:
@@ -511,7 +560,8 @@ class _Handler(BaseHTTPRequestHandler):
                 camera_state=session.last_camera_state,
                 camera_detail=session.last_camera_detail,
                 mqtt_auth_error=session.mqtt_auth_error,
-                has_access_code=bool(info.access_code),
+                has_access_code=has_credential(info),
+                credential_label=credential_label(info),
             )
 
             def tray_payload(tray) -> dict:
@@ -534,7 +584,13 @@ class _Handler(BaseHTTPRequestHandler):
                     "index": len(items),
                     "name": info.display_name(),
                     "ip": info.ip,
-                    "model": info.model.label,
+                    "model": display_model(info),
+                    # 设备族：**逐台回传**，这样网页端不需要靠 model 猜自己看的是哪一族
+                    # （猜错的后果是「编辑」表单把凭据写进错的字段，直接丢掉）
+                    "family": resolve_family(info).family,
+                    "family_label": resolve_family(info).label,
+                    "credential_label": credential_label(info),
+                    "port": int(default_port(info) or 0),
                     "span": max(1, min(3, int(info.tile_span or 1))),
                     "backend": session.video_backend,
                     "fps": round(session.camera_fps, 1),
@@ -613,6 +669,9 @@ class _Handler(BaseHTTPRequestHandler):
             "mqtt_online": sum(1 for item in items if item["mqtt_online"]),
             "printing": sum(1 for item in items if item["printing"]),
             "web_fps": self.app.fps,
+            # 已注册的设备族：网页端的添加/编辑表单据此渲染「设备族」下拉、
+            # 凭据字段的标签与必填性、以及端口提示（前端不写死任何族特有文案）
+            "families": _families_payload(),
             "printers": items,
         }
 
@@ -656,7 +715,7 @@ class _Handler(BaseHTTPRequestHandler):
             return ok, "已发送停止指令" if ok else "发送失败"
         if action in ("light_on", "light_off", "light_toggle"):
             if action == "light_toggle":
-                target = not bool(session.snapshot().light_on)
+                target = not bool(display_status(session.snapshot()).light_on)
             else:
                 target = action == "light_on"
             ok = session.set_light(target)
@@ -866,6 +925,12 @@ class _Handler(BaseHTTPRequestHandler):
                 # 序列号决定遥测订阅主题 device/<序列号>/report；
                 # 「自动搜索」的结果里带着它，前端必须一起回传。
                 serial=str(body.get("serial", "") or ""),
+                # 设备族（空 = 拓竹）。第三方族用 api_key + port，
+                # 前端的标签与必填性来自 /api/families（与桌面版同一份注册表）。
+                family=str(body.get("family", "") or ""),
+                port=_as_port(body.get("port")),
+                api_key=str(body.get("api_key", "") or ""),
+                camera_url=str(body.get("camera_url", "") or ""),
             )
         except Exception as exc:  # noqa: BLE001 - 添加失败要让界面看到原因
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
@@ -925,6 +990,8 @@ class _Handler(BaseHTTPRequestHandler):
                 action=action,
                 name=str(body.get("name", "") or ""),
                 access_code=str(body.get("access_code", "") or ""),
+                api_key=str(body.get("api_key", "") or ""),
+                port=_as_port(body.get("port")),
             )
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}

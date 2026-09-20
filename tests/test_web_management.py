@@ -70,12 +70,28 @@ def web_server(isolated_config_dir):
             {"ip": "192.168.1.77", "serial": "20P", "name": "新机", "model": "X2D"},
         ]
 
-    def add_printer(name="", ip="", access_code="", model_label="", serial=""):
-        calls.append(("add", name, ip, access_code, model_label, serial))
+    def add_printer(
+        name="",
+        ip="",
+        access_code="",
+        model_label="",
+        serial="",
+        family="",
+        port=0,
+        api_key="",
+        camera_url="",
+    ):
+        # ⚠️ 这里必须与 `WebHost.add_printer` 的签名**逐项一致**：
+        # 服务端是按关键字调用它的，签名漂了就会变成 400（踩过一次）
+        calls.append(
+            ("add", name, ip, access_code, model_label, serial, family, port, api_key, camera_url)
+        )
         return {"ok": True, "detail": "已添加"}
 
-    def manage_printer(index=-1, action="", name="", access_code=""):
-        calls.append(("manage", index, action, name, access_code))
+    def manage_printer(
+        index=-1, action="", name="", access_code="", api_key="", port=0
+    ):
+        calls.append(("manage", index, action, name, access_code, api_key, port))
         if action == "boom":
             return {"ok": False, "detail": "未知操作"}
         return {"ok": True, "detail": f"{action} 完成"}
@@ -173,7 +189,52 @@ def test_添加设备会带上序列号传给宿主(web_server):
         },
     )
     assert status == 200 and data["ok"] is True
-    assert ("add", "新机", "192.168.1.77", "12345678", "X2D", "20PABC") in calls
+    assert ("add", "新机", "192.168.1.77", "12345678", "X2D", "20PABC", "", 0, "", "") in calls
+
+
+def test_添加设备会带上设备族与第三方凭据(web_server):
+    """契约：`family` / `port` / `api_key` / `camera_url` 必须透传给宿主。
+
+    Moonraker 这类第三方族**没有"访问代码"**：凭据叫 API Key、端口也不是 8883
+    （默认 80）。这四个字段漏一个，网页/安卓上就加不对第三方设备。
+    """
+    base, calls, _sessions = web_server
+    status, data = _post(
+        base,
+        "/api/add_printer",
+        {
+            "name": "Voron",
+            "ip": "192.168.1.90",
+            "family": "moonraker",
+            "port": 7125,
+            "api_key": "abc123",
+            "camera_url": "http://192.168.1.90/webcam/?action=snapshot",
+        },
+    )
+    assert status == 200 and data["ok"] is True
+    assert (
+        "add",
+        "Voron",
+        "192.168.1.90",
+        "",
+        "",
+        "",
+        "moonraker",
+        7125,
+        "abc123",
+        "http://192.168.1.90/webcam/?action=snapshot",
+    ) in calls
+
+
+def test_端口非法时按默认端口处理(web_server):
+    """契约：端口写坏了（字母、越界）不能变成 500，按"用族默认端口"处理。"""
+    base, calls, _sessions = web_server
+    for bad in ("http", -1, 99999, None, ""):
+        status, data = _post(
+            base, "/api/add_printer", {"ip": "192.168.1.91", "port": bad, "access_code": "1"}
+        )
+        assert status == 200 and data["ok"] is True, f"port={bad!r} 应该被当成 0"
+    assert all(call[7] == 0 for call in calls if call[0] == "add")
 
 
 def test_添加设备的非法JSON返回400(web_server):
@@ -201,7 +262,7 @@ def test_设备管理三个动作都被转发(web_server, action):
     base, calls, _sessions = web_server
     status, data = _post(base, "/api/printers", {"index": 0, "action": action})
     assert status == 200 and data["ok"] is True
-    assert ("manage", 0, action, "", "") in calls
+    assert ("manage", 0, action, "", "", "", 0) in calls
 
 
 def test_设备管理未知动作返回400(web_server):

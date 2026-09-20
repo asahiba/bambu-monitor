@@ -328,6 +328,11 @@ A2L 的 MQTT 报文里：
 
 ## 2. 第三方设备：Snapmaker U1（调研结论）
 
+> **接入状态（v1.1.0）**：Moonraker 族**已经接进产品**了 —— 界面（桌面 + 网页/安卓）
+> 与命令行都能添加并监控，凭据字段叫 API Key、端口默认 7125（U1 上 80 也通）。
+> 详见 `CHANGELOG.md` 的 1.1.0 与 `docs/ARCHITECTURE.md` §2.0.1。
+> ⚠️ **只用假服务器（`app/adapters/moonraker/fake.py`）验证过，没有真实 U1/Voron 真机**。
+
 **U1 = 改版 Klipper + 改版 Moonraker，原厂固件即可集成，无需改装。**
 协议是标准 Moonraker HTTP + WebSocket JSON-RPC（JSON-RPC 2.0）。
 **不需要 aiortc、不需要 ffmpeg、不需要 MQTT 证书** —— 接入难度显著低于拓竹。

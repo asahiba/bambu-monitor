@@ -195,7 +195,10 @@ INDEX_HTML = r"""<!doctype html>
 "use strict";
 const state = {tiles: new Map(), token: "", live: false, liveFails: 0, fallback: false,
                // H.264（WebCodecs）解码器：画面序号 -> {canvas, decoder, …}
-               decoders: new Map()};
+               decoders: new Map(),
+               // 服务端下发的设备族表（`GET /api/printers` 的 `families`）：
+               // 添加/编辑表单的下拉、凭据标签与端口提示全部按它渲染
+               families: []};
 const wall = document.getElementById('wall');
 const MAGIC_A = 0x42, MAGIC_B = 0x4D, HEADER = 9, KIND_FRAME = 1, KIND_STATUS = 2,
       KIND_H264 = 3;
@@ -400,6 +403,8 @@ function applyStatus(data){
   const printers = data.printers || [];
   // 记下来给右键菜单用（菜单要知道当前是哪台设备）
   state.lastPrinters = printers;
+  // 顺带刷新设备族表：添加表单据此渲染（服务端注册表改了不必重载页面）
+  cacheFamilies(data);
   printers.forEach((info, index) => {
     const tile = ensureTile(index);
     tile.status = info;
@@ -926,35 +931,200 @@ function escapeHtml(text){
     ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 
+/* ---------------------------------------------------------------- 设备族
+   设备族（拓竹 / Klipper-Moonraker / …）由服务端下发：`GET /api/printers` 顶层的
+   `families` 里带着每个族的展示名、凭据策略（字段名 / 标签 / 提示 / 是否必填）、
+   默认端口与候选端口。表单据此**动态渲染**，前端不写死任何族独有的文案 ——
+   以后服务端登记新族（见 app/core/registry.py），网页与安卓端不用改一行代码。
+
+   唯一写死的是族的 **id**：服务端约定「family 为空 = 拓竹」，前端需要用它决定
+   下拉的默认项，以及「只有第三方族才需要端口 / 摄像头 URL」。 */
+const FAMILY_BAMBU = 'bambu';
+
+/** 记住最近一次下发的设备族表（切对话框、切族时不重复请求）。 */
+function cacheFamilies(data){
+  const list = data && data.families;
+  // 只覆盖非空值：别的接口没有 families 键，不能把已有的表清掉
+  if (Array.isArray(list) && list.length) state.families = list;
+}
+
+/** 取一个族的描述；表里没有就返回 null（老服务端可能根本不带这张表）。 */
+function familyOf(id){
+  return (state.families || []).find(item => item.family === (id || '')) || null;
+}
+
+/** 默认族：拓竹。表里万一没有拓竹，就退回第一项，再不行用空串（服务端把空当拓竹）。 */
+function defaultFamilyId(){
+  const list = state.families || [];
+  const bambu = list.find(item => item.family === FAMILY_BAMBU);
+  return (bambu || list[0] || {family: ''}).family;
+}
+
+/** 是不是第三方族：拓竹族的端口与画面地址由服务端自动发现，表单不用管这两个。 */
+function isThirdPartyFamily(id){ return (id || '') !== FAMILY_BAMBU; }
+
+/** 凭据策略（该族凭据填在哪个字段、叫什么、是否必填、去哪儿拿）。
+    老服务端没有 families 时给一份中性兜底：服务端本身仍把空 family 当拓竹。 */
+function credentialPolicy(id){
+  const descriptor = familyOf(id);
+  const policy = descriptor && descriptor.credential;
+  if (policy && (policy.label || policy.key)) return policy;
+  return {key: 'access_code', label: '凭据', required: false, hint: ''};
+}
+
+/** 打开表单前保证拿到设备族表：`/api/printers` 是唯一来源（服务端注册表原样透出）。 */
+async function ensureFamilies(){
+  if ((state.families || []).length) return state.families;
+  try{
+    const response = await fetch(api('/api/printers'), {cache:'no-store'});
+    if (response.status === 401){ showLogin(true); return state.families || []; }
+    cacheFamilies(await response.json());
+  }catch(err){ /* 读不到就按老服务端的样子渲染（只能当拓竹），别把添加流程堵死 */ }
+  return state.families || [];
+}
+
+/** 「设备族」下拉的选项：值是族 id，文字是服务端给的展示名。 */
+function familyOptionsHtml(selected){
+  return (state.families || []).map(item =>
+    '<option value="' + escapeHtml(item.family) + '"' + (item.family === selected ? ' selected' : '') +
+    '>' + escapeHtml(item.label || item.family) + '</option>').join('');
+}
+
+/** 端口提示里的族信息片段：默认端口与候选端口都来自族数据，
+    前端不写死 8883 / 7125 这类数字 —— 服务端加族时提示自动跟着变。 */
+function portFamilyDetail(id){
+  const descriptor = familyOf(id) || {};
+  const parts = [];
+  if (descriptor.default_port) parts.push('默认 ' + descriptor.default_port);
+  const candidates = descriptor.candidate_ports || [];
+  if (candidates.length) parts.push('候选 ' + candidates.join(' / '));
+  return parts.join('；');
+}
+
+/** 这台设备属于哪个族：服务端在**逐台**载荷里回了 `family`（bambu / moonraker …），
+    直接用它。以前是靠 `model` 反查族的展示名（第三方族的 model 就是族名），
+    那条路已经删掉：拓竹的机型名万一撞上某个族的展示名就会判错族，
+    而判错族的后果是凭据被写进错字段（服务端把它当"没填"直接丢掉）。
+    万一拿不到 `family`（理论上不会：页面与接口来自同一个进程），
+    按服务端的约定退回默认族 —— 即「family 为空 = 拓竹」。 */
+function itemFamilyId(item){
+  return (item && item.family) || defaultFamilyId();
+}
+
+/** 编辑表单的凭据标签：优先用服务端逐台回传的 `credential_label`（该族对凭据的叫法），
+    拿不到时才用 families 表里的 `credential.label`，最后才退化成中性「凭据」——
+    三处都不写死「访问代码 / API Key」这类族特有文案。 */
+function itemCredentialLabel(item, family){
+  return (item && item.credential_label) || credentialPolicy(family).label;
+}
+
+/* 切换族时凭据**按族各自保留**：拓竹的访问代码与第三方族的 API Key 语义完全不同，
+   共用一个值很容易切来切去把 A 的凭据提交给 B（必然连不上），所以每族存一份草稿。 */
+const addCredDrafts = {};
+let addCredFamilyId = '';
+
+/** 把当前选中的族应用到「添加」表单：凭据的标签 / 占位提示 / 必填标记，
+    以及端口与摄像头 URL 的可见性。
+
+    端口与摄像头 URL 只对第三方族有意义，拓竹族时**整块隐藏**而不是禁用，理由：
+      * 默认族就是拓竹，隐藏后表单长度与改造前一致，老用户的操作路径零变化；
+      * 安卓/平板窄屏上，两个永远不能填的灰框白占两行，还没法用一句通用文案说清原因；
+      * 用的是同一份 DOM，切到第三方族立刻展开，已填的值**不清空**（切回来不丢，
+        与凭据按族存草稿的策略一致）。 */
+function applyAddFamily(){
+  const family = document.getElementById('add-family').value;
+  const policy = credentialPolicy(family);
+  // 标签与「是否必填」都跟着族走：拓竹必填、Moonraker 内网可留空
+  document.getElementById('add-cred-label').textContent =
+    policy.label + (policy.required ? '（必填）' : '（可留空）');
+  // 占位提示同样来自族数据：每个族「去哪儿拿凭据」的说法不一样
+  document.getElementById('add-cred').placeholder = policy.hint || policy.label;
+  const detail = portFamilyDetail(family);
+  document.getElementById('add-port-hint').textContent =
+    '0 或留空 = 用该族默认端口' + (detail ? ('（' + detail + '）') : '');
+  const defaultPort = (familyOf(family) || {}).default_port;
+  document.getElementById('add-port').placeholder = defaultPort ? String(defaultPort) : '0';
+  document.getElementById('add-thirdparty').style.display =
+    isThirdPartyFamily(family) ? '' : 'none';
+}
+
 /* ---------------------------------------------------------------- 手动添加 */
-function openAdd(){
+async function openAdd(){
+  // 设备族表必须先拿到，否则下拉是空的：/api/printers 是唯一来源
+  modalCard.innerHTML = '<h2>添加打印机</h2><div class="hint">正在读取设备族…</div>';
+  modal.style.display = 'flex';
+  await ensureFamilies();
+  const selected = defaultFamilyId();
   modalCard.innerHTML =
     '<h2>添加打印机</h2>' +
-    '<div class="hint">填 IP 与访问代码即可显示画面。<b>序列号建议一并填写</b>：' +
-    '进度、温度这些遥测数据靠它订阅，缺了会出现「有画面但没有进度/温度」。' +
-    '在打印机屏幕上：设置 → 设备信息。</div>' +
+    '<div class="hint">先选设备族，再填 IP 与凭据就能显示画面。' +
+    '<b>序列号建议一并填写</b>：进度、温度这些遥测数据靠它订阅，' +
+    '缺了会出现「有画面但没有进度/温度」。在打印机屏幕上：设置 → 设备信息。</div>' +
+    '<label>设备族</label><select id="add-family">' + familyOptionsHtml(selected) + '</select>' +
     '<label>名称（可留空）</label><input id="add-name" placeholder="例如 车间 X2D">' +
     '<label>IP 地址</label><input id="add-ip" placeholder="192.168.1.50" inputmode="decimal">' +
-    '<label>访问代码</label><input id="add-code" placeholder="8 位访问代码" autocomplete="off">' +
+    // 凭据的标签/占位/必填标记由 applyAddFamily() 按所选族写入，这里只写中性占位文案
+    '<label id="add-cred-label">凭据</label><input id="add-cred" autocomplete="off">' +
     '<label>序列号（建议填写，用于遥测）</label>' +
     '<input id="add-serial" placeholder="例如 01P00A123456789" autocomplete="off">' +
     '<label>机型（可留空，自动识别）</label><input id="add-model" placeholder="例如 X2D">' +
+    // 端口与摄像头 URL 只对第三方族有意义 → 放进可整块隐藏的容器（见 applyAddFamily）
+    '<div id="add-thirdparty">' +
+      '<label>端口（可留空）</label>' +
+      '<input id="add-port" type="number" min="0" max="65535" inputmode="numeric" placeholder="0">' +
+      '<div class="hint" id="add-port-hint"></div>' +
+      '<label>摄像头 URL（可留空）</label>' +
+      '<input id="add-camera" placeholder="留空 = 自动发现" autocomplete="off">' +
+    '</div>' +
     '<div class="status" id="add-status"></div>' +
     '<div class="actions"><button id="add-cancel">取消</button>' +
     '<button id="add-ok" class="primary">添加</button></div>';
   modal.style.display = 'flex';
+  // 把上次填过的凭据放回来（addCredDrafts 按族存，关掉对话框再打开也不丢）
+  addCredFamilyId = selected;
+  document.getElementById('add-cred').value = addCredDrafts[addCredFamilyId] || '';
+  applyAddFamily();
+  document.getElementById('add-family').addEventListener('change', event => {
+    // 先把当前输入存回旧族，再取新族的草稿 —— 来回切都不会丢
+    addCredDrafts[addCredFamilyId] = document.getElementById('add-cred').value;
+    addCredFamilyId = event.target.value;
+    document.getElementById('add-cred').value = addCredDrafts[addCredFamilyId] || '';
+    applyAddFamily();
+  });
   document.getElementById('add-cancel').addEventListener('click', closeModal);
   document.getElementById('add-ok').addEventListener('click', async () => {
     const status = document.getElementById('add-status');
     const ip = document.getElementById('add-ip').value.trim();
     if (!ip){ status.textContent = '请填写 IP 地址'; return; }
+    const family = document.getElementById('add-family').value;
+    const policy = credentialPolicy(family);
+    const credential = document.getElementById('add-cred').value.trim();
+    // 族要求必填时先在页面上拦住：发出去必然被服务端拒绝，
+    // 用户只会看到一句「添加失败」，还得自己猜是哪里没填
+    if (policy.required && !credential){
+      status.textContent = '请填写' + policy.label + '（该设备族要求必填）';
+      return;
+    }
+    // 端口与摄像头 URL 只对第三方族有意义：拓竹族一律传 0 / 空，
+    // 免得隐藏起来的输入框里残留着上次的值、被服务端当成用户意图
+    const thirdParty = isThirdPartyFamily(family);
+    const port = parseInt(document.getElementById('add-port').value, 10);
     status.textContent = '正在添加…';
     const result = await postJson('/api/add_printer', {
       name: document.getElementById('add-name').value.trim(),
       ip: ip,
-      access_code: document.getElementById('add-code').value.trim(),
       serial: document.getElementById('add-serial').value.trim(),
-      model: document.getElementById('add-model').value.trim()
+      model: document.getElementById('add-model').value.trim(),
+      // 设备族：空串在服务端即「拓竹」（老配置没有 family 字段时同理）
+      family: family,
+      // 0 / 非法值 = 用该族默认端口（服务端 _as_port 会把它们归零）
+      port: thirdParty && port > 0 ? port : 0,
+      camera_url: thirdParty ? document.getElementById('add-camera').value.trim() : '',
+      // 凭据放进**该族对应的字段**：拓竹 access_code、第三方族 api_key。
+      // 两个键都写出来（另一个给空串）是为了让服务端契约在这里一眼可见；
+      // 空串服务端按「没填」处理，不会覆盖已有值。
+      access_code: policy.key === 'access_code' ? credential : '',
+      api_key: policy.key === 'api_key' ? credential : ''
     });
     if (result.ok){
       toast((result.detail || '已添加') + warnSuffix(result));
@@ -970,7 +1140,7 @@ function openAdd(){
 async function openManage(){
   modalCard.innerHTML =
     '<h2>管理打印机</h2>' +
-    '<div class="hint">可修改名称与访问代码、重连、删除。删除会同时从配置里移除。</div>' +
+    '<div class="hint">可修改名称、凭据与端口，也可以重连、删除。删除会同时从配置里移除。</div>' +
     '<div id="mng-list" class="list"><div class="empty">加载中…</div></div>' +
     '<div class="actions"><button id="mng-close">关闭</button></div>';
   modal.style.display = 'flex';
@@ -990,6 +1160,8 @@ async function refreshManageList(){
     return;
   }
   const printers = data.printers || [];
+  // 这份响应里也带着设备族表：存下来，接着打开「编辑」时标签才是对的
+  cacheFamilies(data);
   if (!printers.length){
     list.innerHTML = '<div class="empty">还没有打印机，用「🔍 自动搜索」或「＋ 添加」加一台。</div>';
     return;
@@ -1030,25 +1202,54 @@ async function refreshManageList(){
   });
 }
 
-function openEdit(item){
+async function openEdit(item){
+  // 凭据标签要按族来写，但直接进编辑页时族表可能还没读过
+  if (!(state.families || []).length) await ensureFamilies();
+  // 设备族**不在这里改**：服务端 update 不接受 family（换族必须走「添加」那条路，
+  // 会话实现会跟着换），所以这里不给族下拉，免得看起来像能把拓竹改成 Moonraker；
+  // 只按该设备**实际的族**（逐台载荷里的 `family`）渲染凭据标签与端口提示。
+  const family = itemFamilyId(item);
+  const policy = credentialPolicy(family);
+  // 端口：服务端逐台回的 `port` 已经是「设备实际用的端口，没有就用族默认端口」，
+  // 直接拿它当占位提示，用户改之前就知道现在连的是哪个端口
+  const currentPort = parseInt(item.port, 10) || (familyOf(family) || {}).default_port || 0;
+  const candidates = (familyOf(family) || {}).candidate_ports || [];
   modalCard.innerHTML =
     '<h2>编辑 ' + escapeHtml(item.name) + '</h2>' +
-    '<div class="hint">IP 与机型由设备决定，不能在这里改。修改后需要重连生效。</div>' +
+    '<div class="hint">IP、机型与设备族由设备本身决定，不能在这里改。修改后需要重连生效。</div>' +
     '<label>名称</label><input id="ed-name" value="' + escapeHtml(item.name) + '">' +
-    '<label>访问代码（留空表示不改）</label>' +
-    '<input id="ed-code" placeholder="' + (item.has_code ? '已保存 ' + item.code_len + ' 位' : '未填写') +
+    '<label id="ed-cred-label">凭据（留空表示不改）</label>' +
+    '<input id="ed-cred" placeholder="' + (item.has_code ? '已保存 ' + item.code_len + ' 位' : '未填写') +
     '" autocomplete="off">' +
+    '<label>端口（留空表示不改）</label>' +
+    '<input id="ed-port" type="number" min="0" max="65535" inputmode="numeric" placeholder="' +
+    (currentPort ? String(currentPort) : '0') + '">' +
+    '<div class="hint" id="ed-port-hint"></div>' +
     '<div class="status" id="ed-status"></div>' +
     '<div class="actions"><button id="ed-back">返回</button>' +
     '<button id="ed-ok" class="primary">保存</button></div>';
+  // 标签来自服务端数据（逐台的 credential_label，兜底用 families 表），前端不写死
+  document.getElementById('ed-cred-label').textContent =
+    itemCredentialLabel(item, family) + '（留空表示不改）';
+  document.getElementById('ed-port-hint').textContent =
+    '留空或 0 = 不改端口' + (currentPort ? ('，当前 ' + currentPort) : '') +
+    (candidates.length ? ('；该族可选 ' + candidates.join(' / ')) : '');
   document.getElementById('ed-back').addEventListener('click', openManage);
   document.getElementById('ed-ok').addEventListener('click', async () => {
     const status = document.getElementById('ed-status');
+    const credential = document.getElementById('ed-cred').value.trim();
+    // 0 / 留空 = 不改端口（服务端只在 port > 0 时写入）
+    const port = parseInt(document.getElementById('ed-port').value, 10) || 0;
     status.textContent = '正在保存…';
     const result = await postJson('/api/printers', {
       index: item.index, action: 'update',
       name: document.getElementById('ed-name').value.trim(),
-      access_code: document.getElementById('ed-code').value.trim()
+      // 凭据只放进**该设备所属族对应的那一个字段**（拓竹 access_code / 第三方族 api_key）：
+      // 服务端 manage_printer 是按设备实际的族挑字段的（另一个键原样忽略），
+      // 所以另一个字段传空串是安全的 —— 也免得同一次请求里两个字段都被写上值。
+      access_code: policy.key === 'access_code' ? credential : '',
+      api_key: policy.key === 'api_key' ? credential : '',
+      port: port > 0 ? port : 0
     });
     if (result.ok){
       toast((result.detail || '已保存') + warnSuffix(result));
@@ -1377,7 +1578,7 @@ function tileMenu(index, item){
     const result = await postJson('/api/printers', {index: index, action:'reconnect'});
     toast(result.ok ? '正在重连…' : ('重连失败：' + (result.detail || '')));
   });
-  add('编辑名称 / 访问代码', () => {
+  add('编辑名称 / 凭据', () => {
     openManage().then(() => openEdit(Object.assign({index: index}, item)));
   });
   add('删除这台设备', async () => {

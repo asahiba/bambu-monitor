@@ -9,7 +9,7 @@
 | **Windows** | `dist-onefile/BambuMonitor.exe`（单文件，约 93 MB） | `build-onefile.bat` | 什么都不用装 |
 | **Linux** | `dist-onefile-headless/BambuMonitor-headless`（单文件，约 89 MB） | `bash linux/build-headless-docker.sh` | 什么都不用装 |
 | **Docker** | `dist-docker/bambu-monitor-latest-image.tar.gz`（单文件镜像，约 132 MB） | `build-docker-image.ps1` | 只需 Docker |
-| **安卓** | `dist-android/BambuMonitor-1.0.6-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
+| **安卓** | `dist-android/BambuMonitor-1.1.0-arm64.apk`（约 33 MB） | `android/build-apk.ps1` | Android 7.0+（arm64） |
 
 Linux 另有一个**带 Qt 的变体**（`linux/build-onefile-docker.sh`，约 143 MB），
 能开图形界面；但服务器/NAS 场景请用上面的 headless 变体，原因见第 2 节。
@@ -66,7 +66,7 @@ build-onefile.bat
 **已验证**（在本机实测）：
 
 ```
-BambuMonitor-cli.exe --version    → Bambu Monitor 1.0.6（管道/重定向均可捕获）
+BambuMonitor-cli.exe --version    → Bambu Monitor 1.1.0（管道/重定向均可捕获）
 BambuMonitor-cli.exe --core-test  → 自检结果：全部通过 ✓（约 14 秒）
 BambuMonitor.exe --sim --screenshot shot.png --exit-after 14
                                   → 1280×800 截图，4 路画面 + 中文 + 状态条 + HMS 徽标全部正常

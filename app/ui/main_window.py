@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..bambu.models import PrinterInfo
-from ..bambu.printer import PrinterSession
 from ..config import AppConfig
+from ..core import create_session, resolve_family
 from . import theme
 from .add_dialog import PrinterEditDialog
 from .discover_dialog import DiscoverDialog
@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
         self.setMinimumSize(720, 480)
 
-        self.sessions: list[PrinterSession] = []
+        self.sessions: list = []
         self.tiles: list[CameraTile] = []
         self.single_tile: Optional[CameraTile] = None
         self.web = None
@@ -239,7 +239,7 @@ class MainWindow(QMainWindow):
                 self._persist()
                 return
 
-        session = PrinterSession(info)
+        session = create_session(info)
         self.sessions.append(session)
         tile = CameraTile(session, self)
         tile.request_single_view.connect(self.toggle_single_view)
@@ -273,6 +273,16 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.Yes:
             return
+        self._detach_tile(tile)
+        self._persist()
+
+    def _detach_tile(self, tile: CameraTile) -> None:
+        """把一张卡片连同它的会话从监控墙上摘掉（**不问用户**，调用方负责确认）。
+
+        抽出来是因为「编辑时切换设备族」也要走这一步：会话实现换了就必须重建，
+        但用户刚刚才确认过编辑，不该再弹一次「确定要移除吗」。
+        """
+        session = tile.session
         session.stop()
         tile.shutdown()
         if session.info in self.config.printers:
@@ -285,7 +295,6 @@ class MainWindow(QMainWindow):
         tile.deleteLater()
         self.empty_label.setVisible(not self.tiles)
         self.rebuild_grid()
-        self._persist()
 
     def edit_printer(self, tile: CameraTile) -> None:
         dialog = PrinterEditDialog(self, tile.session.info)
@@ -293,6 +302,14 @@ class MainWindow(QMainWindow):
             return
         info = dialog.result
         old = tile.session.info
+        # 换了设备族＝换了会话实现（拓竹 ↔ Moonraker），不能只 restart：
+        # 那样会用旧的实现去连新的设备（表现是"改了设置就连不上了"）。
+        # 这里摘掉旧卡片再按新配置加回来，代价是这张卡片会移到末尾。
+        if resolve_family(info).family != resolve_family(old).family:
+            self._detach_tile(tile)
+            self.add_printer(info)
+            self._notify("已切换设备族并重新连接")
+            return
         index = self.config.printers.index(old) if old in self.config.printers else -1
         old.ip, old.name, old.serial = info.ip, info.name, info.serial
         old.access_code, old.model, old.stream_mode = (
@@ -300,6 +317,9 @@ class MainWindow(QMainWindow):
             info.model,
             info.stream_mode,
         )
+        # 第三方族的字段也要写回，否则「编辑后保存」会把它们悄悄清空
+        old.family, old.port = info.family, info.port
+        old.api_key, old.camera_url = info.api_key, info.camera_url
         if index >= 0:
             self.config.printers[index] = old
         tile.session.restart()
