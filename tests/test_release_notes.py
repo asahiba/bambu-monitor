@@ -63,6 +63,29 @@ def test_找不到版本时给兜底说明而不是空文件():
     assert "CHANGELOG" in body, "要告诉用户去哪儿看完整说明"
 
 
+def test_发布说明总是带上下载哪个这份页脚():
+    """契约：每个发布页都要有「下载哪个」表与校验方式。
+
+    v1.0.5 发布时这段是**手工调 API 补**上去的 —— 手工步骤一定会漏。
+    现在放进抽取工具：任何版本（含找不到段落时的兜底）都自动带上。
+    """
+    module = _tool()
+    from app import __version__
+
+    for tag in (f"v{__version__}", "v9.9.9"):
+        body, _found = module.build_body(tag)
+        assert "## 下载哪个？" in body, f"{tag} 的发布说明缺「下载哪个」"
+        for name in (
+            "BambuMonitor-windows-x64.exe",
+            "BambuMonitor-linux-headless-x64",
+            "BambuMonitor-docker-image.tar.gz",
+            "BambuMonitor-android-arm64.apk",
+            "SHA256SUMS.txt",
+        ):
+            assert name in body, f"{tag} 的发布说明里没有提到 {name}"
+        assert "不要" in body and "公网" in body, "要提醒用户别把端口暴露到公网"
+
+
 def test_命令行会写出文件并返回0(tmp_path, capsys):
     module = _tool()
     from app import __version__

@@ -28,6 +28,35 @@ CHANGELOG = ROOT / "CHANGELOG.md"
 #: 版本段落的标题形如 `## [1.0.5] — 2026-09-18`（日期与破折号可有可无）
 HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\][^\n]*$", re.M)
 
+#: 每个发布页都要有的「下载哪个」与校验方式。
+#:
+#: 为什么写在这里而不是 CHANGELOG：这是**发布页**的内容（版本段落只讲这一版改了什么），
+#: 而 v1.0.5 发布时这段是我手工调 API 补上去的 —— 手工步骤=下次一定会漏。
+#: 放在抽取工具里，任何版本发布都会自动带上，且由 tests/test_release_notes.py 锚定。
+FOOTER = """---
+
+## 下载哪个？
+
+| 你的环境 | 下载文件 |
+| --- | --- |
+| Windows，想要界面（免安装） | `BambuMonitor-windows-x64.exe` |
+| Windows，只要命令行 / 给脚本调用 | `BambuMonitor-windows-x64-cli.exe` |
+| Linux 桌面（带界面） | `BambuMonitor-linux-gui-x64` |
+| Linux 服务器 / NAS（无界面，跑网页版） | `BambuMonitor-linux-headless-x64` |
+| 群晖 / Unraid 等 Docker 环境 | `BambuMonitor-docker-image.tar.gz` |
+| 安卓手机 / 平板 | `BambuMonitor-android-arm64.apk` |
+
+校验下载是否完整（**建议做**，尤其 exe 可能被杀毒软件改写）：
+
+```bash
+sha256sum -c SHA256SUMS.txt          # Linux / macOS
+certutil -hashfile <文件> SHA256      # Windows
+```
+
+> ⚠️ Windows exe 没有代码签名，被杀毒软件误报是常见现象（不是病毒，源码就在本仓库）。
+> 网页与控制在局域网内走 HTTP，**不要**把端口暴露到公网。
+"""
+
 
 def extract(version: str, changelog: Path | None = None) -> str:
     """返回该版本的段落（含标题），到下一个 `## ` 之前。找不到返回空串。"""
@@ -42,17 +71,17 @@ def extract(version: str, changelog: Path | None = None) -> str:
 
 
 def build_body(tag: str, changelog: Path | None = None) -> tuple[str, bool]:
-    """拼出发布说明正文。返回 ``(正文, 是否取到了版本段落)``。"""
+    """拼出发布说明正文（版本段落 + 固定的「下载哪个」页脚）。返回 ``(正文, 是否取到了版本段落)``。"""
     version = tag.lstrip("v")
     section = extract(version, changelog)
     if not section:
         return (
             f"# {tag}\n\n"
             f"> ⚠️ `CHANGELOG.md` 里没有 `[{version}]` 段落，"
-            "这一版的说明请看仓库根目录的 CHANGELOG（或下方自动生成的变更列表）。\n",
+            "这一版的说明请看仓库根目录的 CHANGELOG（或下方自动生成的变更列表）。\n\n" + FOOTER,
             False,
         )
-    return section + "\n", True
+    return section + "\n\n" + FOOTER, True
 
 
 def main(argv: list[str]) -> int:
