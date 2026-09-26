@@ -536,6 +536,11 @@ def run_headless(argv: list[str] | None = None) -> int:
 
         diagnose_fn=host.diagnose,
         layout_fn=host.set_tile_span,
+        # 画面刷新与多路切换（桌面右键菜单有的，网页端也要有）
+        camera_action_fn=host.camera_action,
+        # 画面顺序 + 全部连接/断开（桌面工具栏与右键菜单里的能力）
+        reorder_fn=host.reorder,
+        sessions_action_fn=host.sessions_action,
         # 网页端要能显示自己的令牌与局域网地址（安卓版没有终端，
         # 启动时这几行它看不到，只能靠界面提供）
         info_fn=host.info,

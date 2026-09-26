@@ -111,6 +111,7 @@ def camera_status_text(
     mqtt_auth_error: bool = False,
     has_access_code: bool = False,
     credential_label: str = "访问代码",
+    credential_required: bool = True,
 ) -> tuple[str, str]:
     """把通道状态翻译成「短标签 + 完整说明」。
 
@@ -124,6 +125,9 @@ def camera_status_text(
     :param credential_label: 该设备族对凭据的叫法（拓竹「访问代码」、
         Moonraker「API Key」）。写死「访问代码」会让第三方族上出现
         「请填访问代码」而它根本没有这个概念。
+    :param credential_required: 该族的凭据**是否必填**。内网 Moonraker 默认免鉴权，
+        没填 API Key 是完全正常的状态 —— 以前这里会说「未配置 API Key」，
+        让人以为必须去填一个本不需要的东西（真机实测就撞上了）。
     """
     detail = camera_detail or ""
     if camera_online and mqtt_online:
@@ -132,7 +136,7 @@ def camera_status_text(
         return f"{credential_label}错误", detail
     if camera_online:
         return "画面正常·遥测断开", detail
-    if not has_access_code:
+    if credential_required and not has_access_code:
         return f"未配置{credential_label}", detail
     return CAMERA_STATE_TEXT.get(camera_state, "连接中"), detail
 
@@ -457,3 +461,59 @@ def display_status(status: Any) -> DisplayStatus:
     if isinstance(status, DisplayStatus):
         return status
     return DisplayStatus(status)
+
+
+# --------------------------------------------------- 多路画面（按族无关的方式取）
+
+def cameras_of(session: Any) -> list[dict[str, Any]]:
+    """这台设备有哪些画面可选。
+
+    拓竹那族只有一路、没有 `cameras()`，返回空列表（界面据此不显示切换入口）；
+    第三方族（Moonraker）给出 ``[{"index","name","location","available","url"}…]``，
+    例如 Voron 的喷嘴 + 舱内两路。
+    """
+    getter = getattr(session, "cameras", None)
+    if not callable(getter):
+        return []
+    try:
+        items = getter()
+    except Exception:  # noqa: BLE001 - 摄像头列表拿不到不该影响画面本身
+        return []
+    if not isinstance(items, list):
+        return []
+    clean: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or "index" not in item:
+            continue
+        try:
+            index = int(item["index"])
+        except (TypeError, ValueError):
+            continue
+        clean.append(
+            {
+                "index": index,
+                "name": str(item.get("name", "") or f"摄像头 {index + 1}"),
+                "location": str(item.get("location", "") or ""),
+                "available": bool(item.get("available", True)),
+                "detail": str(item.get("detail", "") or ""),
+                "url": str(item.get("url", "") or ""),
+                "stream_url": str(item.get("stream_url", "") or ""),
+            }
+        )
+    return clean
+
+
+def camera_frame(session: Any, index: int = 0) -> tuple[int, bytes]:
+    """取某一路画面的最新帧。
+
+    ``index = 0`` 的行为与 ``session.latest_frame()`` 完全一致：拓竹那族（以及任何
+    没有多路能力的会话）根本没有这个参数，所以要容忍 ``TypeError``。
+    """
+    getter = getattr(session, "latest_frame", None)
+    if not callable(getter):
+        return 0, b""
+    try:
+        seq, frame = getter(int(index))
+    except TypeError:
+        seq, frame = getter()
+    return seq or 0, frame or b""

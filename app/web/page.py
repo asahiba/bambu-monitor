@@ -83,6 +83,19 @@ INDEX_HTML = r"""<!doctype html>
   .details td{padding:1px 3px;vertical-align:top;word-break:break-word;overflow-wrap:anywhere}
   .details td.k{width:40%;color:var(--dim)}
   .details td.v{color:var(--text)}
+  /* 画面控制行：摄像头下拉 + 「🔄 刷新画面」。
+     只有多路画面的设备才显示下拉（见 renderCameras）—— 只有一个选项的下拉
+     只是占地方，还会让人以为点错了什么。 */
+  .row3{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dim);flex-wrap:wrap}
+  .row3 select{background:var(--panel);color:var(--text);border:1px solid var(--border);
+    border-radius:4px;padding:2px 6px;font-size:11px;max-width:62%}
+  .row3 button{background:var(--panel);color:var(--text);border:1px solid var(--border);
+    border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer}
+  .row3 button:hover{border-color:var(--accent)}
+  /* 「选中的这一路现在取不到画面」的原因（例如 502 / 连接被拒）：直接盖在画面上。
+     触屏看不到 tooltip，只挂在选项标题里等于没提示。 */
+  .camnote{position:absolute;inset:0 0 auto 0;background:rgba(0,0,0,.78);color:var(--warn);
+    font-size:11px;line-height:1.5;padding:6px 8px;white-space:pre-line;text-align:left}
   .row4{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
   .row4 .grow{flex:1}
   .row4 button{background:var(--panel);color:var(--text);border:1px solid var(--border);
@@ -281,6 +294,42 @@ document.getElementById('token-ok').addEventListener('click', () => {
 });
 
 /* ---------------------------------------------------------------- 画面 */
+
+/* 取一张静态画面的地址（`<img>` 走的就是这条通路；实时模式用的是内存里的 blob）。
+   `cam` 指明看哪一路（多摄像头机器，例如 Voron 的喷嘴 + 舱内），
+   `t` 是防缓存的时间戳 —— 切换或刷新后**必须**换一个新的 t：
+   地址一模一样时浏览器会认为源没变、继续显示旧画面，用户就会以为按钮没生效。
+
+   ⚠️ 时间戳只取 Date.now() 不够：连点两下（或同一毫秒内先切换再刷新）会得到
+   同一个值，等于这次刷新被浏览器吞掉了。所以用一个只增不减的计数兜底。 */
+let frameStamp = 0;
+function frameUrl(index, camera){
+  const cam = Math.max(0, parseInt(camera, 10) || 0);
+  frameStamp = Math.max(Date.now(), frameStamp + 1);
+  return api('/stream/' + index + '?cam=' + cam) + '&t=' + frameStamp;
+}
+
+/* 切换摄像头 / 刷新画面之后立刻重新取一帧，不用等下一轮轮询。
+   实时模式（/api/live 单连接多路复用）下不能改 `<img src>`：画面是服务端在
+   同一条连接上推过来的，切换后它下一轮就推新那一路；这时若去改 src，等于又
+   另开一条 MJPEG 长连接，把"同域最多 6 条连接"的坑重新踩回来。
+   所以这里只把旧画面盖住，等服务端把新那一路推过来。 */
+function reloadFrame(index){
+  const tile = state.tiles.get(index);
+  if (!tile) return;
+  if (state.live && !state.fallback){
+    // 旧画面先留着（不藏），只在上面盖一句提示：切换通常几百毫秒，
+    // 把画面整个藏掉反而像是断了
+    tile.nosignal.textContent = '正在切换画面…';
+    tile.nosignal.style.display = 'flex';
+    return;
+  }
+  tile.nosignal.textContent = '正在取画面…';
+  tile.nosignal.style.display = 'flex';
+  tile.img.style.visibility = 'visible';
+  tile.img.src = frameUrl(index, tile.camera);
+}
+
 function ensureTile(index){
   let tile = state.tiles.get(index);
   if (tile) return tile;
@@ -291,6 +340,7 @@ function ensureTile(index){
       <img alt="">
       <div class="nosignal">等待画面…</div>
       <div class="novideo" style="display:none"></div>
+      <div class="camnote" style="display:none"></div>
       <div class="overlay"></div>
       <div class="status"><span class="dot"></span><span class="status-text">连接中</span></div>
     </div>
@@ -307,6 +357,11 @@ function ensureTile(index){
         <span class="layer"></span><span class="err"></span>
       </div>
       <div class="filament"></div>
+      <div class="row3">
+        <select class="cam-select" id="cam-select-${index}" title="切换看哪一路画面"
+                style="display:none"></select>
+        <button class="cam-refresh" id="cam-refresh-${index}" title="重新识别画面通道并立刻取一帧">🔄 刷新画面</button>
+      </div>
       <div class="row4">
         <span class="ctrl-hint" style="display:none"></span>
         <span class="wifi"></span>
@@ -326,6 +381,8 @@ function ensureTile(index){
   const nosignal = element.querySelector('.nosignal');
   img.addEventListener('load', () => {
     nosignal.style.display = 'none';
+    // 切换画面时曾把整张图藏起来（见 reloadFrame）：新的一帧到了要显回来
+    img.style.visibility = 'visible';
     const previous = img.dataset.previous;
     if (previous){ URL.revokeObjectURL(previous); img.dataset.previous = ''; }
   });
@@ -333,7 +390,9 @@ function ensureTile(index){
     nosignal.style.display = 'flex';
     nosignal.textContent = '画面断开，正在重试…';
     if (state.fallback){
-      setTimeout(() => { img.src = api('/stream/' + index) + '&t=' + Date.now(); }, 3000);
+      // 重试也要带上当前选中的那一路，否则多路机器会悄悄跳回第 0 路
+      const cam = (state.tiles.get(index) || {}).camera || 0;
+      setTimeout(() => { img.src = frameUrl(index, cam); }, 3000);
     }
   });
   element.addEventListener('click', () => {
@@ -355,10 +414,23 @@ function ensureTile(index){
   });
   const hmsBadge = element.querySelector('.hms');
   hmsBadge.addEventListener('click', event => { event.stopPropagation(); showHms(index); });
+  // 摄像头下拉与「🔄 刷新画面」：都是画面操作，点击/切换同样不能冒泡到
+  // 「点整卡切换全屏」那个监听（否则用户一拉下拉，整张卡就全屏了）。
+  const camSelect = element.querySelector('.cam-select');
+  camSelect.addEventListener('click', event => event.stopPropagation());
+  camSelect.addEventListener('change', event => {
+    event.stopPropagation();
+    sendCameraAction(index, 'select', parseInt(camSelect.value, 10) || 0);
+  });
+  const camRefresh = element.querySelector('.cam-refresh');
+  camRefresh.addEventListener('click', event => {
+    event.stopPropagation();
+    sendCameraAction(index, 'refresh');
+  });
   // 「详情」默认收起，点 summary 展开时这次点击**不能**冒泡到上面那个
   // 「点整卡切换全屏」的监听 —— 否则用户想看读数，画面却直接全屏了。
   element.querySelector('.details').addEventListener('click', event => event.stopPropagation());
-  tile = {element, img, nosignal, status: {}};
+  tile = {element, img, nosignal, status: {}, camera: 0};
   state.tiles.set(index, tile);
   wall.appendChild(element);
   return tile;
@@ -390,6 +462,24 @@ async function sendCommand(index, action, value){
   }catch(err){
     toast('指令发送失败（网络异常）');
   }
+}
+
+/* 画面的两条操作：`select` 换看第 N 路（服务端会写进配置，重启后还记得），
+   `refresh` 让设备重新识别画面通道并丢掉缓存帧（「🔄 刷新画面」）。
+
+   为什么成功和失败都要把 detail 说出来：刷新失败的原因（那一路返回 502、
+   连接被拒、没有摄像头）是用户手上**唯一**的线索 —— 只弹一句「失败」等于没说。
+   刷新后立刻换一个地址再取一帧，用户马上能看到变化，而不是等下一轮轮询。 */
+async function sendCameraAction(index, action, camera){
+  const payload = {index: index, action: action};
+  if (action === 'select') payload.camera = camera;
+  const data = await postJson('/api/camera', payload);
+  toast(data.detail || (data.ok ? '已刷新画面' : '画面操作失败'));
+  const tile = state.tiles.get(index);
+  if (!data.ok || !tile) return;
+  // 服务端回的是**它认下来的**那一路：以它为准，静态帧地址才不会和实际显示的对不上
+  if (typeof data.camera === 'number') tile.camera = data.camera;
+  reloadFrame(index);
 }
 
 function showHms(index){
@@ -462,6 +552,60 @@ function renderDetails(element, info){
   box.style.display = '';
 }
 
+/* ------------------------------------------------- 摄像头（多路画面）
+   多摄像头是 Voron 这类机器的常态（喷嘴 + 舱内两路），服务端把可选清单放在每台设备的
+   `cameras` 里，当前显示的是哪一路放在 `camera` 里（`GET /api/printers`）。
+
+   为什么只有一路时**不显示**下拉：拓竹那族是空列表、单摄像头机器只有一条 ——
+   永远只有一个选项的下拉既不解决问题，还要占掉状态条上宝贵的一行。
+   只有真有多路时才让用户选，此时这个控件才是"能解决问题"的入口。
+
+   为什么用 createElement + textContent，而不是把选项拼成一段 HTML：画面名与 detail 都是
+   设备/配置里的数据（crowsnest 里那一路的名字由用户自己填），拼字符串等于把
+   设备返回的内容当代码渲染 —— 与 renderDetails 是同一条硬要求。 */
+function renderCameras(element, info){
+  const select = element.querySelector('.cam-select');
+  const note = element.querySelector('.camnote');
+  const cameras = Array.isArray(info.cameras) ? info.cameras : [];
+  const current = typeof info.camera === 'number' ? info.camera : 0;
+
+  if (cameras.length <= 1){
+    select.style.display = 'none';
+  } else {
+    // 清单没变就不重建：applyStatus 每次刷新都会走到这里，
+    // 无脑重建会让正在拉开的原生下拉被合上（用户根本选不中）。
+    const signature = JSON.stringify(cameras.map(c => [c.index, c.name, c.available, c.detail]));
+    if (select.dataset.signature !== signature){
+      select.dataset.signature = signature;
+      select.textContent = '';
+      cameras.forEach(camera => {
+        const option = document.createElement('option');
+        option.value = String(camera.index);
+        // 名字来自设备，用 textContent 写；取不到画面的那一路**仍然可以选**
+        // （用户就是要在它坏掉时切过去看原因），只在名字后面标注「不可用」
+        option.textContent = camera.available === false
+          ? ((camera.name || ('摄像头 ' + (camera.index + 1))) + '（不可用）')
+          : (camera.name || ('摄像头 ' + (camera.index + 1)));
+        select.appendChild(option);
+      });
+    }
+    select.style.display = '';
+    // 选中项以**服务端**为准：切换成功后服务端回的也是同一个序号，
+    // 所以这里不会跟用户的操作打架（却能纠正"配置里存的那一路已经消失了"的情况）
+    if (select.value !== String(current)) select.value = String(current);
+  }
+
+  // 选中的这一路取不到画面时，把 detail 里的原因**写画面上**（触屏看不到 tooltip，
+  // 只挂在选项标题里等于没提示）。原因也是设备数据，同样走 textContent。
+  const selected = cameras.filter(c => c.index === current)[0];
+  if (selected && selected.available === false && selected.detail){
+    note.textContent = (selected.name || ('摄像头 ' + (current + 1))) + '：' + selected.detail;
+    note.style.display = '';
+  } else {
+    note.style.display = 'none';
+  }
+}
+
 function applyStatus(data){
   const printers = data.printers || [];
   // 记下来给右键菜单用（菜单要知道当前是哪台设备）
@@ -528,6 +672,11 @@ function applyStatus(data){
 
     // 设备详情（第三方族的额外读数）：默认收起，展开状态跨刷新保留
     renderDetails(element, info);
+
+    // 多路画面：下拉（多路时才显示）+ 选中那一路取不到画面时的原因
+    renderCameras(element, info);
+    // 静态帧地址要带哪一路：以服务端说的当前那一路为准（切换后下一轮刷新会同步过来）
+    tile.camera = typeof info.camera === 'number' ? info.camera : 0;
 
     // HMS
     const hmsBadge = element.querySelector('.hms');
@@ -835,7 +984,8 @@ async function startLive(){
       state.live = false;
       document.getElementById('mode').textContent = '兼容模式（逐路 MJPEG）';
       for (const [index, tile] of state.tiles){
-        tile.img.src = api('/stream/' + index) + '&t=' + Date.now();
+        // 逐路 MJPEG 也要带上当前选中的那一路（frameUrl 里就是 cam + 防缓存时间戳）
+        tile.img.src = frameUrl(index, tile.camera);
         tile.img.style.visibility = 'visible';
       }
       setInterval(pollStatus, 1500);

@@ -410,6 +410,8 @@ class MoonrakerAdapter(PollingDeviceSession):
         #: 可选钩子：每次轮询后调用一次，用于自定义保活逻辑
         self._on_keepalive = on_keepalive
         #: 用户手填的摄像头地址（留空则自动发现）。见 ``self._cameras``。
+        #: 单独留一份原始值：刷新摄像头时要用它把主画面复位。
+        self._user_camera_url = camera_url
         self._camera_url = camera_url
         self._camera_probed = bool(camera_url)
         #: 这台机器的**全部**摄像头（真机实测：Voron 上 crowsnest 可能配了多路）。
@@ -685,6 +687,21 @@ class MoonrakerAdapter(PollingDeviceSession):
             has_camera=True, video_channel="http_snapshot"
         )
         self.video_backend = "快照"
+
+    def refresh_cameras(self) -> list[dict[str, Any]]:
+        """重新发现摄像头并丢掉缓存帧（界面上「刷新视频流」按钮用这个）。
+
+        场景：刚把摄像头插上 / 刚在 crowsnest 里加了一路 / 之前那路 502 现在起来了。
+        只清空缓存不重建会话 —— 用户点一下就要立刻看到结果，不该等下一次轮询或重连。
+        """
+        self._camera_probed = False
+        self._cameras = []
+        self._extra_frames = {}
+        self._camera_base = ""
+        self._camera_url = self._user_camera_url
+        self._discover_cameras()
+        LOGGER.info("重新发现摄像头：%d 路（%s）", len(self._cameras), self.info.ip)
+        return self.cameras()
 
     def cameras(self) -> list[dict[str, Any]]:
         """这台机器的摄像头清单（给界面做「选哪一路 / 同时看几路」）。

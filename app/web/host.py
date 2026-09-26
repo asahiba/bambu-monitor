@@ -22,6 +22,8 @@ import os
 import threading
 from typing import Any, Callable, Optional
 
+from ..core.device import cameras_of
+
 LOGGER = logging.getLogger("bambu-monitor.webhost")
 
 #: 可在网页上修改的设置项及其取值范围（与 AppConfig 的钳制保持一致）
@@ -332,6 +334,126 @@ class WebHost:
         if warning:
             result["warning"] = warning
         return result
+
+    # ------------------------------------------------------------------ 画面
+    def camera_action(self, index: int = -1, action: str = "refresh", camera: int = 0) -> dict:
+        """画面的「刷新」与「切换哪一路」。
+
+        桌面版右键菜单一直有「重新连接」，而网页端过去连"刷新一下画面"都做不到：
+        摄像头刚插上、或者之前 502 的那一路刚起来时，用户没有任何办法让它重新试。
+
+        * ``refresh`` —— 让会话重新发现摄像头并丢掉缓存帧（不重建会话，立刻生效）；
+        * ``select``  —— 改看第 ``camera`` 路（多摄像头机器，例如 Voron 的喷嘴 + 舱内），
+          写进配置，重启后还记得。
+
+        ⚠️ 只碰画面，不下发任何会动机器的指令。
+        """
+        sessions = self._sessions()
+        if not 0 <= index < len(sessions):
+            return {"ok": False, "detail": f"没有第 {index + 1} 台设备（当前共 {len(sessions)} 台）"}
+        session = sessions[index]
+        if action == "select":
+            info = getattr(session, "info", None)
+            if info is None:
+                return {"ok": False, "detail": "这台设备没有可切换的画面"}
+            info.camera_index = max(0, int(camera))
+            for item in self.config.printers:
+                if item.ip == info.ip:
+                    item.camera_index = info.camera_index
+                    break
+            self.config.save()
+            self._notify_change()
+            return {
+                "ok": True,
+                "detail": f"已切换到第 {info.camera_index + 1} 路画面",
+                "cameras": cameras_of(session),
+                "camera": info.camera_index,
+            }
+        if action == "refresh":
+            refresher = getattr(session, "refresh_cameras", None)
+            if callable(refresher):
+                try:
+                    refresher()
+                except Exception as exc:  # noqa: BLE001 - 刷新失败要说清原因
+                    LOGGER.warning("刷新摄像头失败：%s", exc)
+                    return {"ok": False, "detail": f"刷新失败：{exc}"}
+            self.stats["camera"] = self.stats.get("camera", 0) + 1
+            self._notify_change()
+            cameras = cameras_of(session)
+            return {
+                "ok": True,
+                "detail": f"已重新识别画面通道（{len(cameras)} 路）" if cameras else "已请求重新取帧",
+                "cameras": cameras,
+                "camera": int(getattr(session.info, "camera_index", 0) or 0),
+            }
+        return {"ok": False, "detail": f"未知操作：{action}"}
+
+    # ------------------------------------------------------------------ 整体连接/顺序
+    def sessions_action(self, action: str = "") -> dict:
+        """全部连接 / 全部断开（桌面工具栏那两个按钮）。
+
+        网页端过去只能一台一台点重连 —— 设备一多就很烦，而"全部断开"在排查
+        网络问题、或者不想让程序一直连着一堆机器时是有用的。
+
+        ⚠️ 只增删监控连接本身，**不下发任何控制指令**（打印机照常打印）。
+        """
+        sessions = self._sessions()
+        if action == "connect_all":
+            for session in sessions:
+                try:
+                    session.start()
+                except Exception:  # noqa: BLE001 - 一台起不来不该影响其它台
+                    LOGGER.debug("启动会话失败：%s", getattr(session.info, "ip", "?"), exc_info=True)
+            self._notify_change()
+            return {"ok": True, "detail": f"已连接 {len(sessions)} 台"}
+        if action == "disconnect_all":
+            for session in sessions:
+                try:
+                    session.stop()
+                except Exception:  # noqa: BLE001
+                    LOGGER.debug("停止会话失败：%s", getattr(session.info, "ip", "?"), exc_info=True)
+            self._notify_change()
+            return {"ok": True, "detail": f"已断开 {len(sessions)} 台（打印机本身不受影响）"}
+        return {"ok": False, "detail": f"未知操作：{action}"}
+
+    def reorder(self, index: int = -1, direction: str = "") -> dict:
+        """调整某台设备在监控墙上的位置（上移 / 下移 / 移到最前 / 移到最后）。
+
+        桌面版右键菜单里有这四项，网页端以前只能改大小。顺序要**同时**改两处：
+        当前会话列表（界面立刻变）与配置里的设备顺序（重启后还是这个顺序）。
+        """
+        sessions = self._sessions()
+        if not 0 <= index < len(sessions):
+            return {"ok": False, "detail": f"没有第 {index + 1} 台设备（当前共 {len(sessions)} 台）"}
+        names = {"up": "上移", "down": "下移", "top": "移到最前", "bottom": "移到最后"}
+        if direction not in names:
+            return {"ok": False, "detail": f"未知方向：{direction}"}
+        order = list(sessions)
+        session = order.pop(index)
+        target = {
+            "up": max(0, index - 1),
+            "down": min(len(order), index + 1),
+            "top": 0,
+            "bottom": len(order),
+        }[direction]
+        order.insert(target, session)
+        # 就地改会话列表：宿主（headless / 桌面版）传给服务的都是同一个列表对象
+        sessions[:] = order
+        # 配置里的顺序同步过去（只按会话顺序排，配置里有而没会话的留在后面）。
+        # ⚠️ 排序键里**不能**再调 `list.index()`：`list.sort()` 执行期间列表内部是
+        # 空的，`.index()` 会抛 "is not in list"（真踩过）。所以先把位置算好。
+        original_position = {id(item): position for position, item in enumerate(self.config.printers)}
+        rank = {id(item.info): position for position, item in enumerate(order)}
+        self.config.printers.sort(
+            key=lambda item: (rank.get(id(item), len(rank)), original_position.get(id(item), 0))
+        )
+        self.config.save()
+        self._notify_change()
+        return {
+            "ok": True,
+            "detail": f"「{getattr(session.info, 'display_name', lambda: '?')()}」已{names[direction]}",
+            "order": [getattr(item.info, "ip", "") for item in order],
+        }
 
     # ------------------------------------------------------------------ 通道诊断
     def diagnose(self, index: int = -1) -> dict:

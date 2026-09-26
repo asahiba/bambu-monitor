@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..bambu.discovery import local_interfaces
 from ..bambu.printer import PrinterSession
-from ..core.device import camera_status_text, display_status
+from ..core.device import camera_frame, camera_status_text, cameras_of, display_status
 from ..core.registry import (
     credential_label,
     default_port,
@@ -205,6 +205,14 @@ def _video_mode_of(session: PrinterSession) -> str:
     return "h264" if mode == "h264" else "jpeg"
 
 
+def _selected_camera(session: PrinterSession) -> int:
+    """这台设备当前显示哪一路画面（多摄像头机器才有意义，默认 0）。"""
+    try:
+        return max(0, int(getattr(session.info, "camera_index", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class WebFrameCache(threading.Thread):
     """为网页端准备 JPEG 帧（按需转码 + 多客户端共享）。"""
 
@@ -219,8 +227,9 @@ class WebFrameCache(threading.Thread):
         self._fps = max(0.5, float(fps))
         self._max_width = max(240, int(max_width))
         self._lock = threading.Lock()
-        self._frames: dict[int, tuple[int, bytes]] = {}
-        self._source_seq: dict[int, int] = {}
+        #: 键是 ``(设备序号, 画面序号)``：多摄像头机器上每台设备可能同时被看几路
+        self._frames: dict[tuple[int, int], tuple[int, bytes]] = {}
+        self._source_seq: dict[tuple[int, int], int] = {}
         self._active: dict[int, float] = {}
         self._live_clients = 0
         # ⚠️ 必须叫 _stop_event，不能叫 _stop：threading.Thread 自己有一个
@@ -250,9 +259,9 @@ class WebFrameCache(threading.Thread):
         with self._lock:
             return self._live_clients
 
-    def frame(self, index: int) -> tuple[int, bytes]:
+    def frame(self, index: int, camera: int = 0) -> tuple[int, bytes]:
         with self._lock:
-            return self._frames.get(index, (0, b""))
+            return self._frames.get((index, camera), (0, b""))
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -276,19 +285,24 @@ class WebFrameCache(threading.Thread):
                     watching = self._live_clients > 0
                 if not watching and now - last_seen > CLIENT_TTL:
                     continue
-                seq, jpeg = session.latest_frame()
+                # 每台设备可能有多路画面（Voron 的喷嘴 + 舱内）：缓存里那一路是
+                # 用户**当前选中的**那一路（`info.camera_index`），界面切换后
+                # 下一轮就会换成新的一路。
+                camera = _selected_camera(session)
+                seq, jpeg = camera_frame(session, camera)
                 if not jpeg:
                     continue
-                if self._source_seq.get(index) == seq:
+                key = (index, camera)
+                if self._source_seq.get(key) == seq:
                     continue
-                self._source_seq[index] = seq
+                self._source_seq[key] = seq
                 payload = jpeg
                 if len(jpeg) > PASSTHROUGH_BYTES:
                     shrunk = _shrink_jpeg(jpeg, self._max_width)
                     if shrunk:
                         payload = shrunk
                 with self._lock:
-                    self._frames[index] = (seq, payload)
+                    self._frames[key] = (seq, payload)
                 self.encoded += 1
             elapsed = time.time() - started
             self._stop_event.wait(max(0.02, interval - elapsed))
@@ -348,6 +362,18 @@ class _Handler(BaseHTTPRequestHandler):
     @property
     def layout_fn(self):
         return self.app.layout_fn
+
+    @property
+    def camera_action_fn(self):
+        return self.app.camera_action_fn
+
+    @property
+    def reorder_fn(self):
+        return getattr(self.app, "reorder_fn", None)
+
+    @property
+    def sessions_action_fn(self):
+        return getattr(self.app, "sessions_action_fn", None)
 
     @property
     def info_fn(self):
@@ -581,6 +607,8 @@ class _Handler(BaseHTTPRequestHandler):
                 mqtt_auth_error=session.mqtt_auth_error,
                 has_access_code=has_credential(info),
                 credential_label=credential_label(info),
+                # 凭据不是必填的族（内网 Moonraker 免鉴权）不该显示「未配置 API Key」
+                credential_required=bool(resolve_family(info).credential.required),
             )
 
             def tray_payload(tray) -> dict:
@@ -684,6 +712,10 @@ class _Handler(BaseHTTPRequestHandler):
                     # 工具头板温度 / 主机负载 / MCU 固件…）。第三方族走这条通路，
                     # 界面按族无关的方式逐条列出，见 app/core/adapter.py::details()
                     "details": _details_of(session),
+                    # 这台设备可选哪几路画面 + 当前显示的是哪一路。
+                    # 界面据此渲染「摄像头」切换；只有一路时不显示入口。
+                    "cameras": cameras_of(session),
+                    "camera": _selected_camera(session),
                 }
             )
         return {
@@ -789,8 +821,9 @@ class _Handler(BaseHTTPRequestHandler):
                         if not self._push_h264(index, session, sent_params):
                             return
                         continue
+                    camera = _selected_camera(session)
                     cache.touch(index)
-                    seq, jpeg = cache.frame(index)
+                    seq, jpeg = cache.frame(index, camera)
                     if not jpeg or last_seq.get(index) == seq:
                         continue
                     last_seq[index] = seq
@@ -893,6 +926,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/layout":
             self._layout()
             return
+        if path == "/api/camera":
+            self._camera()
+            return
+        if path == "/api/sessions":
+            self._sessions_action()
+            return
         if path != "/api/command":
             self._send_bytes(b"not found", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
             return
@@ -910,6 +949,91 @@ class _Handler(BaseHTTPRequestHandler):
         ok, detail = self._control(index, action, value)
         self._send_bytes(
             json.dumps({"ok": ok, "detail": detail}, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _sessions_action(self) -> None:
+        """``POST /api/sessions`` —— 全部连接 / 全部断开。
+
+        桌面版工具栏有「▶ 全部连接」「■ 全部断开」，网页端过去只能一台一台点
+        （而设备多的时候这正是最常用的操作）。``{"action": "connect_all"|"disconnect_all"}``。
+        """
+        if self.sessions_action_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"ok": False, "detail": "该运行方式不支持在网页上整体连接/断开"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.sessions_action_fn(action=str(body.get("action", "") or ""))
+        except Exception as exc:  # noqa: BLE001 - 失败原因要回到界面上
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+        )
+
+    def _camera(self) -> None:
+        """``POST /api/camera`` —— 画面的「刷新」与「切换哪一路」。
+
+        * ``{"index": 0, "action": "refresh"}`` —— 重新发现摄像头并丢掉缓存帧。
+          桌面版右键菜单一直有「重新连接」，而网页端连"刷新一下画面"都做不到；
+          摄像头刚插上、或者之前 502 的那一路刚起来时，用户点一下就该看到结果。
+        * ``{"index": 0, "action": "select", "camera": 1}`` —— 这台设备改看第 2 路
+          （Voron 这类机器常有多路：喷嘴 + 舱内）。
+        """
+        if self.camera_action_fn is None:
+            self._send_bytes(
+                json.dumps(
+                    {"ok": False, "detail": "该运行方式不支持在网页上切换画面"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                "application/json; charset=utf-8",
+                HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        body = self._read_json_body()
+        if body is None:
+            self._send_bytes(
+                json.dumps({"ok": False, "detail": "请求格式不正确"}, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            index = int(body.get("index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        try:
+            camera = int(body.get("camera", 0))
+        except (TypeError, ValueError):
+            camera = 0
+        try:
+            result = self.camera_action_fn(
+                index=index,
+                action=str(body.get("action", "") or ""),
+                camera=max(0, camera),
+            )
+        except Exception as exc:  # noqa: BLE001 - 失败原因要回到界面上
+            result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(result.get("ok"))
+        self._send_bytes(
+            json.dumps(result, ensure_ascii=False).encode("utf-8"),
             "application/json; charset=utf-8",
             HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
         )
@@ -1182,11 +1306,16 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _layout(self) -> None:
-        """``POST /api/layout`` ``{"index": 0, "span": 2}``：设置画面占几格。"""
+        """``POST /api/layout``
+
+        * ``{"index": 0, "span": 2}``：设置画面占几格（重点画面 2×2）；
+        * ``{"index": 0, "action": "up"|"down"|"top"|"bottom"}``：调整画面顺序 ——
+          桌面版右键菜单的「上移 / 下移 / 移到最前 / 移到最后」，网页端以前只能干看着。
+        """
         if self.layout_fn is None:
             self._send_bytes(
                 json.dumps(
-                    {"supported": False, "detail": "该运行方式不支持在网页上调整画面大小"},
+                    {"supported": False, "detail": "该运行方式不支持在网页上调整画面"},
                     ensure_ascii=False,
                 ).encode("utf-8"),
                 "application/json; charset=utf-8",
@@ -1203,7 +1332,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             index = int(body.get("index", -1))
-            span = int(body.get("span", 1))
+        except (TypeError, ValueError):
+            index = -1
+        action = str(body.get("action", "") or "")
+        try:
+            if action:
+                reorder = getattr(self.app, "reorder_fn", None)
+                if reorder is None:
+                    result = {"ok": False, "detail": "该运行方式不支持调整画面顺序"}
+                else:
+                    result = reorder(index=index, direction=action)
+            else:
+                span = int(body.get("span", 1))
+                result = self.layout_fn(index, span)
         except (TypeError, ValueError):
             self._send_bytes(
                 json.dumps({"ok": False, "detail": "参数不合法"}, ensure_ascii=False).encode(),
@@ -1211,8 +1352,6 @@ class _Handler(BaseHTTPRequestHandler):
                 HTTPStatus.BAD_REQUEST,
             )
             return
-        try:
-            result = self.layout_fn(index, span)
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
         ok = bool(result.get("ok"))
@@ -1263,14 +1402,36 @@ class _Handler(BaseHTTPRequestHandler):
         if not 0 <= index < len(sessions):
             self._send_bytes(b"no such printer", "text/plain", HTTPStatus.NOT_FOUND)
             return
+        session = sessions[index]
+        # ?cam=N 指定取哪一路（多摄像头机器）；不给就用该设备当前选中的那一路
+        camera = self._camera_arg(session)
         self.app.cache.touch(index)
-        _, jpeg = self.app.cache.frame(index)
+        _, jpeg = self.app.cache.frame(index, camera)
         if not jpeg:
-            seq, jpeg = sessions[index].latest_frame()
+            _, jpeg = camera_frame(session, camera)
             if not jpeg:
                 self._send_bytes(b"no frame", "text/plain", HTTPStatus.SERVICE_UNAVAILABLE)
                 return
         self._send_bytes(jpeg, "image/jpeg")
+
+    def _camera_arg(self, session: PrinterSession) -> int:
+        """读 ``?cam=N`` 并夹到**该设备真实存在**的那几路里。
+
+        写坏的参数（字母、负数、超出范围）一律退回该设备当前选中的那一路 ——
+        返回「没有画面」（503）会让人以为摄像头坏了，而实际只是前端传了个不存在的序号。
+        拓竹那族没有 `cameras()`，所以任何非 0 的序号都会退回 0。
+        """
+        default = _selected_camera(session)
+        query = parse_qs(urlparse(self.path).query)
+        raw = (query.get("cam") or [""])[0]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        known = {item["index"] for item in cameras_of(session)}
+        if known:
+            return value if value in known else default
+        return 0
 
     def _stream(self, raw_index: str) -> None:
         try:
@@ -1288,8 +1449,10 @@ class _Handler(BaseHTTPRequestHandler):
         while not self.app.stopping:
             if len(self._sessions()) <= index:
                 break
+            session = self._sessions()[index]
+            camera = self._camera_arg(session)
             self.app.cache.touch(index)
-            seq, jpeg = self.app.cache.frame(index)
+            seq, jpeg = self.app.cache.frame(index, camera)
             if jpeg and seq != last_seq:
                 last_seq = seq
                 header = (
@@ -1375,6 +1538,9 @@ class WebServer:
         import_config_fn: Optional[Callable[..., dict]] = None,
         diagnose_fn: Optional[Callable[..., dict]] = None,
         layout_fn: Optional[Callable[..., dict]] = None,
+        camera_action_fn: Optional[Callable[..., dict]] = None,
+        reorder_fn: Optional[Callable[..., dict]] = None,
+        sessions_action_fn: Optional[Callable[..., dict]] = None,
         info_fn: Optional[Callable[[int], dict]] = None,
     ) -> None:
         self.get_sessions = get_sessions
@@ -1400,6 +1566,12 @@ class WebServer:
         self.diagnose_fn = diagnose_fn
         #: 画面布局（重点画面 2×2）
         self.layout_fn = layout_fn
+        #: 画面刷新与多路切换（桌面右键菜单有的能力，网页端也要有）
+        self.camera_action_fn = camera_action_fn
+        #: 画面顺序（上移/下移/置顶/置底）
+        self.reorder_fn = reorder_fn
+        #: 全部连接 / 全部断开
+        self.sessions_action_fn = sessions_action_fn
         #: 连接信息（令牌 + 局域网地址）。参数是服务端口。
         self.info_fn = info_fn
         #: 记住画面最大宽度：start() 重建转码线程时要原样恢复（否则重启后静默退回默认值）

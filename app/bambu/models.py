@@ -459,6 +459,9 @@ class PrinterInfo:
     #: 第三方族的摄像头地址（留空则尝试自动发现）。U1 这类设备的摄像头端点
     #: 不是标准 MJPEG，需要用户手填 —— 见 `docs/FIELD_NOTES.md`。
     camera_url: str = ""
+    #: 这台设备**显示哪一路**画面（多摄像头机器用，例如 Voron 的喷嘴 + 舱内）。
+    #: 0 = 第一路。可选的摄像头列表见 `session.cameras()`。
+    camera_index: int = 0
 
     def display_name(self) -> str:
         if self.name:
