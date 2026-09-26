@@ -39,6 +39,29 @@ STREAM_MODES = [
     ("RTSPS 322（X1/H2/X2D）", "rtsp"),
 ]
 
+#: 「开灯 / 关灯 G-code」两行的输入提示。
+#: 必须给出**三类**常见写法里最有代表性的两种（宏、输出引脚），因为用户往往
+#: 不知道自己的接法算哪一种；同时点明「留空」的约定：留空不是「以后再说」，
+#: 而是明确声明「这台设备没有可控灯光」（适配器据此不声明灯控能力，
+#: 界面也就不会出现一个按下去没反应的灯按钮 —— 见 `_accept()`）。
+LIGHT_ON_HINT = "例如 LIGHT_ON 或 SET_PIN PIN=caselight VALUE=1（留空 = 这台设备没有可控灯光）"
+LIGHT_OFF_HINT = "例如 LIGHT_OFF 或 SET_PIN PIN=caselight VALUE=0（留空 = 这台设备没有可控灯光）"
+
+#: 选拓竹族时给这两行的说明。停用而不隐藏，但**必须**说清为什么 ——
+#: 否则用户会以为界面坏了，或者以为拓竹这台机器的灯永远控制不了。
+LIGHT_BAMBU_NOTE = (
+    "「开灯 / 关灯 G-code」是给第三方设备（Klipper / Moonraker、例如 Voron 2.4）用的："
+    "拓竹机器的灯光由机型能力决定，不需要填命令，这两行已停用。"
+)
+
+#: 选第三方族时给这两行的说明：强调「填什么由这台机器的接线决定」，
+#: 并重申「留空 = 不声明灯控能力」这条约定。
+LIGHT_THIRD_PARTY_NOTE = (
+    "Klipper 机器上「舱灯」没有统一做法：请填这台机器上真正能开关灯的命令"
+    "（宏 / SET_PIN / SET_FAN_SPEED 都行，界面不猜名字）。"
+    "留空 = 这台设备没有可控灯光，界面不会出现灯按钮。"
+)
+
 #: 非拓竹族「测试连接」的单次 HTTP 超时（秒）。
 #: 比拓竹那套（MQTT 10 秒 + 摄像头 12 秒）短得多：一次 GET 就能判定，
 #: 用户不该为了一行版本号等在对话框前面十几秒。
@@ -291,6 +314,28 @@ class PrinterEditDialog(QDialog):
         )
         form.addRow("摄像头 URL", self.camera_edit)
 
+        # 「开灯 / 关灯 G-code」两行 —— 只对**第三方设备（Klipper / Moonraker）**有意义。
+        #
+        # 为什么让用户自己填命令，而不是我们猜一个名字：Klipper 机器上「舱灯」没有统一
+        # 做法 —— 可能是宏（`LIGHT_ON`）、可能是输出引脚
+        # （`SET_PIN PIN=caselight VALUE=1`）、也可能接在某个风扇上
+        # （`SET_FAN_SPEED FAN=chamber_light SPEED=1`）。真机（Voron 2.4）实测 60 个对象里
+        # 既没有 led/neopixel/output_pin，也没有灯光宏，所以"猜名字"必然踩空；
+        # 踩空的表现是"点了没反应"，用户只会以为软件坏了。Fluidd / Mainsail 同样是
+        # 让用户填命令，这里照做。
+        #
+        # 约定：**留空 = 这台设备没有可控灯光**（不是"以后再说"）。适配器只在这两个字段
+        # 任一非空时才声明 `can_control_light`，界面因此不会显示一个按下去没反应的灯按钮。
+        self.light_on_label = QLabel("开灯 G-code")
+        self.light_on_edit = QLineEdit(self.printer.light_on_gcode)
+        self.light_on_edit.setPlaceholderText(LIGHT_ON_HINT)
+        form.addRow(self.light_on_label, self.light_on_edit)
+
+        self.light_off_label = QLabel("关灯 G-code")
+        self.light_off_edit = QLineEdit(self.printer.light_off_gcode)
+        self.light_off_edit.setPlaceholderText(LIGHT_OFF_HINT)
+        form.addRow(self.light_off_label, self.light_off_edit)
+
         # 下面三行是**拓竹专有**的：机型/序列号来自拓竹的 MQTT 遥测与 8 位访问代码，
         # 视频通道是 6000/322 那套。Klipper 机器没有这些概念，选第三方族时要停用。
         self.serial_label = QLabel("序列号")
@@ -318,6 +363,20 @@ class PrinterEditDialog(QDialog):
         form.addRow(self.stream_label, self.stream_combo)
         layout.addLayout(form)
 
+        #: （标签, 输入控件）：灯控那两行**只在第三方族可用**（选拓竹时置灰）。
+        #: 与下面那组拓竹专有行一样：只是停用而不是隐藏 —— 用户仍能看见原值，
+        #: 也不会以为界面出错。说明文字随族变化（两族都要有一句解释，
+        #: 因为这两行始终是"有条件可用"的）。
+        self._light_rows: list[tuple[QLabel, QWidget]] = [
+            (self.light_on_label, self.light_on_edit),
+            (self.light_off_label, self.light_off_edit),
+        ]
+        self.light_note = QLabel()
+        self.light_note.setWordWrap(True)
+        self.light_note.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        # 说明紧跟在它解释的那两行下面（表单里灯控两行在拓竹专有行**之前**）
+        layout.addWidget(self.light_note)
+
         #: （标签, 输入控件）：选非拓竹族时整行置灰，切回拓竹立刻恢复 ——
         #: 只是停用而不是隐藏，用户仍能看见原值，也不会以为界面出错。
         self._bambu_rows: list[tuple[QLabel, QWidget]] = [
@@ -327,7 +386,7 @@ class PrinterEditDialog(QDialog):
         ]
         self.bambu_only_note = QLabel(
             "Klipper / Moonraker 机器没有「机型 / 视频通道 / 序列号」这些概念"
-            "（它们是拓竹 MQTT 体系的字段），下面几行已停用。"
+            "（它们是拓竹 MQTT 体系的字段），上面几行已停用。"
         )
         self.bambu_only_note.setWordWrap(True)
         self.bambu_only_note.setStyleSheet(f"color: {theme.TEXT_DIM};")
@@ -386,7 +445,7 @@ class PrinterEditDialog(QDialog):
         self._apply_family()
 
     def _apply_family(self) -> None:
-        """按当前选中的族刷新凭据行、端口提示与拓竹专有行的可用性。"""
+        """按当前选中的族刷新凭据行、端口提示、灯控行与拓竹专有行的可用性。"""
         descriptor = self._descriptor()
         policy = descriptor.credential
         self.credential_label.setText(policy.label)
@@ -403,6 +462,13 @@ class PrinterEditDialog(QDialog):
         # 「自动识别序列号」也是拓竹专有：第三方族没有序列号可识别
         self.auto_serial.setEnabled(is_bambu)
         self.bambu_only_note.setVisible(not is_bambu)
+
+        # 灯控那两行正好相反：只有第三方族（Klipper / Moonraker）才需要用户填命令，
+        # 拓竹的灯由机型能力决定（P1S 有、A1 没有），填了也不会有任何作用 → 停用。
+        for label, widget in self._light_rows:
+            label.setEnabled(not is_bambu)
+            widget.setEnabled(not is_bambu)
+        self.light_note.setText(LIGHT_BAMBU_NOTE if is_bambu else LIGHT_THIRD_PARTY_NOTE)
 
     def _credential_text(self) -> str:
         """凭据输入框的内容（用户在这里只填一个框，写到哪个字段由族决定）。"""
@@ -530,12 +596,22 @@ class PrinterEditDialog(QDialog):
                 from ..bambu.models import detect_model
 
                 info.model = detect_model(info.serial)
+            # 灯控那两行在拓竹族下是停用的（拓竹的灯由机型能力决定）：取值沿用原配置，
+            # 免得「编辑一次」就把用户以前填的值抹成空（以后切回第三方族还要用）。
+            info.light_on_gcode = self.printer.light_on_gcode
+            info.light_off_gcode = self.printer.light_off_gcode
         else:
             # 非拓竹族：那三行是停用的，取值沿用原对象 —— 免得「编辑一次」
             # 就把用户的旧值抹成空（切回拓竹族时还要用）。
             info.serial = self.printer.serial
             info.model = self.printer.model
             info.stream_mode = self.printer.stream_mode
+            # 第三方族的灯控：存用户填的命令原文，适配器拿到什么就原样下发
+            # （`POST /printer/gcode/script`），界面绝不在代码里猜宏名 / 引脚名。
+            # `.strip()` 保证「留空」落成**空字符串**而不是空白串：空字符串 = 明确
+            # 声明"这台设备没有可控灯光"，适配器据此不声明 `can_control_light`。
+            info.light_on_gcode = self.light_on_edit.text().strip()
+            info.light_off_gcode = self.light_off_edit.text().strip()
         self.result = info
         self.accept()
 

@@ -107,6 +107,8 @@ class WebHost:
         port: int = 0,
         api_key: str = "",
         camera_url: str = "",
+        light_on_gcode: str = "",
+        light_off_gcode: str = "",
     ) -> dict:
         """添加或更新一台设备：写配置 + 落盘 + **立即建会话**。
 
@@ -166,6 +168,11 @@ class WebHost:
                     existing_info.port = int(port)
                 if camera_url:
                     existing_info.camera_url = camera_url
+                # 灯光命令：留空表示"不改"，避免编辑一次就把已填的命令抹掉
+                if light_on_gcode:
+                    existing_info.light_on_gcode = light_on_gcode
+                if light_off_gcode:
+                    existing_info.light_off_gcode = light_off_gcode
                 info = existing_info
             else:
                 info = PrinterInfo(
@@ -176,6 +183,8 @@ class WebHost:
                     family=family if family and family != FAMILY_BAMBU else "",
                     port=int(port or 0),
                     camera_url=camera_url or "",
+                    light_on_gcode=light_on_gcode or "",
+                    light_off_gcode=light_off_gcode or "",
                 )
                 apply_credential(info, credential)
                 self.config.printers.append(info)
@@ -557,6 +566,8 @@ class WebHost:
         access_code: str = "",
         api_key: str = "",
         port: int = 0,
+        light_on_gcode: str = "",
+        light_off_gcode: str = "",
     ) -> dict:
         """重连 / 编辑 / 删除。索引基于当前会话列表（与网页端看到的一致）。"""
         sessions = self._sessions()
@@ -583,6 +594,11 @@ class WebHost:
                 setattr(session.info, policy_key, credential)
             if port > 0:
                 session.info.port = int(port)
+            # 灯光命令：非空才写（留空 = 不改，否则编辑一次就把命令抹了）
+            if light_on_gcode:
+                session.info.light_on_gcode = light_on_gcode
+            if light_off_gcode:
+                session.info.light_off_gcode = light_off_gcode
             # 同步回配置里那一份（发信源是配置对象，界面读的是会话上的 info）
             for item in self.config.printers:
                 if item.ip == ip:
@@ -591,6 +607,10 @@ class WebHost:
                         setattr(item, policy_key, credential)
                     if port > 0:
                         item.port = int(port)
+                    if light_on_gcode:
+                        item.light_on_gcode = light_on_gcode
+                    if light_off_gcode:
+                        item.light_off_gcode = light_off_gcode
                     break
             self.config.save()
             # 同 add_printer：只认 last_error，warnings 不阻断

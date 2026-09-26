@@ -716,6 +716,9 @@ class _Handler(BaseHTTPRequestHandler):
                     # 界面据此渲染「摄像头」切换；只有一路时不显示入口。
                     "cameras": cameras_of(session),
                     "camera": _selected_camera(session),
+                    # 灯光命令：编辑表单要能回填当前值（留空 = 这台设备没有可控灯光）
+                    "light_on_gcode": str(getattr(info, "light_on_gcode", "") or ""),
+                    "light_off_gcode": str(getattr(info, "light_off_gcode", "") or ""),
                 }
             )
         return {
@@ -1078,6 +1081,9 @@ class _Handler(BaseHTTPRequestHandler):
                 port=_as_port(body.get("port")),
                 api_key=str(body.get("api_key", "") or ""),
                 camera_url=str(body.get("camera_url", "") or ""),
+                # 灯光控制：Klipper 机器上"舱灯"没有统一做法，让用户填命令
+                light_on_gcode=str(body.get("light_on_gcode", "") or ""),
+                light_off_gcode=str(body.get("light_off_gcode", "") or ""),
             )
         except Exception as exc:  # noqa: BLE001 - 添加失败要让界面看到原因
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
@@ -1139,6 +1145,9 @@ class _Handler(BaseHTTPRequestHandler):
                 access_code=str(body.get("access_code", "") or ""),
                 api_key=str(body.get("api_key", "") or ""),
                 port=_as_port(body.get("port")),
+                # 灯光命令：留空表示"不改"，所以只在传了非空值时才写
+                light_on_gcode=str(body.get("light_on_gcode", "") or ""),
+                light_off_gcode=str(body.get("light_off_gcode", "") or ""),
             )
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}

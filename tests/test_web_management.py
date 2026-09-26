@@ -80,18 +80,42 @@ def web_server(isolated_config_dir):
         port=0,
         api_key="",
         camera_url="",
+        light_on_gcode="",
+        light_off_gcode="",
     ):
         # ⚠️ 这里必须与 `WebHost.add_printer` 的签名**逐项一致**：
-        # 服务端是按关键字调用它的，签名漂了就会变成 400（踩过一次）
+        # 服务端是按关键字调用它的，签名漂了就会变成 400（踩过两次）
         calls.append(
-            ("add", name, ip, access_code, model_label, serial, family, port, api_key, camera_url)
+            (
+                "add",
+                name,
+                ip,
+                access_code,
+                model_label,
+                serial,
+                family,
+                port,
+                api_key,
+                camera_url,
+                light_on_gcode,
+                light_off_gcode,
+            )
         )
         return {"ok": True, "detail": "已添加"}
 
     def manage_printer(
-        index=-1, action="", name="", access_code="", api_key="", port=0
+        index=-1,
+        action="",
+        name="",
+        access_code="",
+        api_key="",
+        port=0,
+        light_on_gcode="",
+        light_off_gcode="",
     ):
-        calls.append(("manage", index, action, name, access_code, api_key, port))
+        calls.append(
+            ("manage", index, action, name, access_code, api_key, port, light_on_gcode, light_off_gcode)
+        )
         if action == "boom":
             return {"ok": False, "detail": "未知操作"}
         return {"ok": True, "detail": f"{action} 完成"}
@@ -189,7 +213,9 @@ def test_添加设备会带上序列号传给宿主(web_server):
         },
     )
     assert status == 200 and data["ok"] is True
-    assert ("add", "新机", "192.168.1.77", "12345678", "X2D", "20PABC", "", 0, "", "") in calls
+    assert (
+        "add", "新机", "192.168.1.77", "12345678", "X2D", "20PABC", "", 0, "", "", "", ""
+    ) in calls
 
 
 def test_添加设备会带上设备族与第三方凭据(web_server):
@@ -223,7 +249,46 @@ def test_添加设备会带上设备族与第三方凭据(web_server):
         7125,
         "abc123",
         "http://192.168.1.90/webcam/?action=snapshot",
+        "",
+        "",
     ) in calls
+
+
+def test_灯光命令也透传给宿主(web_server):
+    """契约：网页填的开/关灯 G-code 必须送到宿主，否则配置永远存不下来。
+
+    Klipper 机器上"舱灯"没有统一做法（宏 / 输出引脚 / 某个风扇），所以由用户填命令；
+    这两个键漏掉的表现是"填了没反应"—— 用户只会以为软件坏了。
+    """
+    base, calls, _sessions = web_server
+    status, data = _post(
+        base,
+        "/api/add_printer",
+        {
+            "name": "Voron",
+            "ip": "192.168.1.90",
+            "family": "moonraker",
+            "light_on_gcode": "LIGHT_ON",
+            "light_off_gcode": "SET_PIN PIN=caselight VALUE=0",
+        },
+    )
+    assert status == 200 and data["ok"] is True
+    add_call = next(call for call in calls if call[0] == "add")
+    assert add_call[10] == "LIGHT_ON"
+    assert add_call[11] == "SET_PIN PIN=caselight VALUE=0"
+
+
+def test_编辑设备也能改灯光命令(web_server):
+    """契约：`action:"update"` 要能带上灯光命令。"""
+    base, calls, _sessions = web_server
+    status, data = _post(
+        base,
+        "/api/printers",
+        {"index": 0, "action": "update", "light_on_gcode": "LIGHT_ON"},
+    )
+    assert status == 200 and data["ok"] is True
+    manage_call = next(call for call in calls if call[0] == "manage")
+    assert manage_call[7] == "LIGHT_ON"
 
 
 def test_端口非法时按默认端口处理(web_server):
@@ -262,7 +327,7 @@ def test_设备管理三个动作都被转发(web_server, action):
     base, calls, _sessions = web_server
     status, data = _post(base, "/api/printers", {"index": 0, "action": action})
     assert status == 200 and data["ok"] is True
-    assert ("manage", 0, action, "", "", "", 0) in calls
+    assert ("manage", 0, action, "", "", "", 0, "", "") in calls
 
 
 def test_设备管理未知动作返回400(web_server):
