@@ -12,6 +12,9 @@ from .models import PrinterInfo, PrinterStatus
 from .mqtt_worker import MqttWorker
 from .timeouts import (
     CAMERA_STREAM_JOIN,
+    MQTT_PROBE_INTERVAL,
+    MQTT_PROBE_SILENCE,
+    MQTT_PROBE_TIMEOUT,
     MQTT_STUCK_SECONDS,
     RTSP_ADOPT_TIMEOUT,
     RTSP_FIRST_FRAME_TIMEOUT,
@@ -82,6 +85,14 @@ class PrinterSession:
         #: 遥测自愈用：上一次看到的 MqttWorker.connect_count。
         #: 看门狗靠它判断"这段时间里 paho 到底连上过没有"，见 _mqtt_watchdog_tick。
         self._mqtt_seen_connects = 0
+        #: 遥测探活状态：发出的时刻、发起前收到的最后一封报文时间、上一次发起时刻。
+        #: 判据是"探活有没有回应"，而不是"连接计数有没有涨"——后者对健康的长连接
+        #: 永远不成立，会把正常连接误判成卡死（见 _mqtt_watchdog_tick 的说明）。
+        self._mqtt_probe_sent_at = 0.0
+        self._mqtt_probe_baseline = 0.0
+        self._mqtt_probe_request_at = 0.0
+        #: 上一次重建遥测的时刻。重建本身要花时间，短时间内不该反复重建。
+        self._mqtt_restart_at = 0.0
 
     # ------------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -208,7 +219,7 @@ class PrinterSession:
         return "h264" if self._h264 is not None else "jpeg"
 
     def _mqtt_watchdog_tick(self) -> None:
-        """遥测自愈：paho 的重连卡死时，整条重建连接。
+        """遥测自愈：paho 的重连真正卡死时，整条重建连接。
 
         ## 为什么需要它
 
@@ -220,35 +231,78 @@ class PrinterSession:
         * 初始 connect 一直失败时它停在断开态，不会重新走一遍 TLS 探测。
 
         症状就是「**画面正常·遥测断开**」时不时出现、而且**不再自愈** ——
-        用户只能手动点「重连」。这个 tick 就是兜住那种情况的。
+        用户只能手动点「重连」。
 
-        ## 判据
+        ## 判据（这里以前判错过，改过一轮）
 
-        看 `MqttWorker.connect_count` **有没有涨**，而不是看状态字符串：
+        老写法是「``connect_count`` 超过 90 秒没涨就算卡死」。问题是：**一条健康的
+        长连接本来就不会让计数上涨** —— 连上之后就一直是那一次。于是只要连接保持
+        90 秒以上，就会被判成「疑似卡死」并重建一次，用户看到的是
+        「画面和进度都正常，却一直提示遥测卡死」，而且真正卡死时反倒要等很久。
 
-        * 一直在涨 -> paho 正常工作，不打扰；
-        * 超过 90 秒没涨过 -> 卡死了，重建一条。
+        现在改成**主动探活**，结论来自设备有没有回应，而不是猜：
 
-        这样不会和 paho 自身的重连打架（它每次连上都会让计数 +1），
-        也不会因为打印机偶尔断开就频繁重建。
+        1. 在线、且 ``MQTT_PROBE_SILENCE`` 秒内收到过报文 -> 健康，不动它；
+        2. 离线、或者在线但久无报文 -> 发一次 ``pushall`` 探活（限频）；
+        3. 探活后 ``MQTT_PROBE_TIMEOUT`` 秒内来了报文 -> 健康，恢复观察；
+        4. 探活没有回应、且距离上次成功连接已超过 ``MQTT_STUCK_SECONDS`` -> 重建。
+
+        这样既不会误报（健康连接不会被重建），也能在真卡死时快速发现
+        （最多 ``MQTT_PROBE_SILENCE + MQTT_PROBE_TIMEOUT`` 秒就能确认）。
         """
         worker = self._mqtt
         if worker is None or not self.running:
             return
         now = time.time()
-        last_ok = max(worker.last_connected_at, worker.first_attempt_at)
-        if not last_ok or (now - last_ok) < MQTT_STUCK_SECONDS:
-            return
         if getattr(worker, "connect_count", 0) > self._mqtt_seen_connects:
-            # 期间连上过：说明 paho 在正常重连，把基线抬上去继续观察
+            # 期间连上过：paho 在正常重连，把基线抬上去
             self._mqtt_seen_connects = worker.connect_count
+
+        last_message = float(getattr(self.status, "last_message_ts", 0.0) or 0.0)
+        silent_for = now - last_message if last_message else float("inf")
+        if self.status.mqtt_online and silent_for < MQTT_PROBE_SILENCE:
+            # 明确健康：在线且报文新鲜。**绝不重建**（老写法就是在这里误报的）
+            self._mqtt_probe_sent_at = 0.0
+            self._mqtt_probe_baseline = last_message
             return
-        self.warnings.append("遥测连接疑似卡死，正在重建（约每 90 秒检查一次）")
-        LOGGER.warning("MQTT 疑似卡死，重建连接：%s", self.info.ip)
+
+        if self._mqtt_probe_sent_at:
+            if (now - self._mqtt_probe_sent_at) < MQTT_PROBE_TIMEOUT:
+                return  # 探活还没到期，等下一个 tick 看结果
+            if last_message > self._mqtt_probe_baseline:
+                # 探活有回应：这条连接是好的（只是刚才安静），恢复观察
+                LOGGER.debug("遥测探活有回应，连接正常：%s", self.info.ip)
+                self._mqtt_probe_sent_at = 0.0
+                self._mqtt_probe_baseline = last_message
+                return
+            # 探活没回应：确认没反应，再看距离上次成功连接够不够久
+            last_ok = max(worker.last_connected_at, worker.first_attempt_at)
+            cooldown_over = (now - self._mqtt_restart_at) >= MQTT_STUCK_SECONDS
+            if last_ok and (now - last_ok) >= MQTT_STUCK_SECONDS and cooldown_over:
+                self.warnings.append(
+                    f"遥测 {int(silent_for) if silent_for != float('inf') else MQTT_STUCK_SECONDS}"
+                    f" 秒没有响应（已主动探活确认），正在重建连接"
+                )
+                LOGGER.warning("MQTT 无响应，重建连接：%s", self.info.ip)
+                self._mqtt_probe_sent_at = 0.0
+                self._mqtt_restart_at = now
+                try:
+                    worker.restart()
+                except Exception:  # noqa: BLE001 - 自愈失败不能把看门狗线程带走
+                    LOGGER.exception("重建 MQTT 连接失败：%s", self.info.ip)
+            return
+
+        # 可疑（离线或久无报文）：主动探活，限频
+        if (now - self._mqtt_probe_request_at) < MQTT_PROBE_INTERVAL:
+            return
+        self._mqtt_probe_request_at = now
+        self._mqtt_probe_sent_at = now
+        self._mqtt_probe_baseline = last_message
+        LOGGER.debug("遥测疑似无响应，发探活请求：%s", self.info.ip)
         try:
-            worker.restart()
-        except Exception:  # noqa: BLE001 - 自愈失败不能把看门狗线程带走
-            LOGGER.exception("重建 MQTT 连接失败：%s", self.info.ip)
+            worker.request_pushall(force=True)
+        except Exception:  # noqa: BLE001 - 探活失败本身就说明有问题，等下一轮
+            LOGGER.debug("探活请求发送失败：%s", self.info.ip, exc_info=True)
 
     def _video_watchdog(self) -> None:
         """周期性自检并自愈：

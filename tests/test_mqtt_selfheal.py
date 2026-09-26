@@ -7,8 +7,12 @@ Android 上息屏/切网之后底层 socket 状态坏掉，paho 的退避重连�
 初始 connect 一直失败时它也不会重新走一遍 TLS 探测。
 
 症状是「**画面正常·遥测断开**」时不时出现、而且**不再自愈**，用户只能手动点重连。
-`PrinterSession._mqtt_watchdog_tick()` 就是兜住这种情况的：靠
-`MqttWorker.connect_count` 有没有涨来判断 paho 是真卡死了还是在正常重连。
+
+⚠️ 判据在 2026-09 改过一轮：老写法是「``connect_count`` 超过 90 秒没涨就算卡死」，
+但**健康的长连接本来就不会让计数上涨**，于是每 90 秒误报一次
+（用户原话：「画面和打印信息一切正常，但依旧提示遥测卡死」）。
+现在改成**主动探活**：发一次 ``pushall``，看设备有没有报文回来。
+判据细节与用例见 `tests/test_mqtt_watchdog.py`；本文件保留原有的自愈场景。
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import time
 from app.bambu.models import PrinterInfo, PrinterModel
 from app.bambu.mqtt_worker import MqttWorker
 from app.bambu.printer import MQTT_STUCK_SECONDS, PrinterSession
+from app.bambu.timeouts import MQTT_PROBE_TIMEOUT
 
 
 class FakeWorker:
@@ -27,6 +32,10 @@ class FakeWorker:
         self.connect_count = connect_count
         self.restarts = 0
         self.stopped = False
+        self.pushalls = 0
+
+    def request_pushall(self, force: bool = False) -> None:
+        self.pushalls += 1
 
     def restart(self) -> None:
         self.restarts += 1
@@ -55,6 +64,11 @@ def _stuck_worker(seen: int = 1, count: int = 1) -> FakeWorker:
     return worker
 
 
+def _expire_probe(session: PrinterSession) -> None:
+    """把"探活已发出"的时间往前推，模拟等够了一个探活超时。"""
+    session._mqtt_probe_sent_at = time.time() - MQTT_PROBE_TIMEOUT - 1
+
+
 # --------------------------------------------------------------- 判据
 
 
@@ -75,7 +89,11 @@ def test_连接正常推进时不重建():
 
 
 def test_长时间没连上则重建():
-    """**核心回归**：90 秒没有成功连接 -> 整条重建。"""
+    """**核心回归**：久无报文且探活也没回应 -> 整条重建。
+
+    ⚠️ 现在要两拍：第一拍发探活（不重建），等够一个探活超时后再判定。
+    老写法是"计数没涨就直接重建"，那正是误报的来源（见模块开头）。
+    """
     session = make_session()
     session.running = True
     worker = _stuck_worker()
@@ -83,8 +101,13 @@ def test_长时间没连上则重建():
     session._mqtt_seen_connects = worker.connect_count
 
     session._mqtt_watchdog_tick()
+    assert worker.pushalls == 1, "第一拍应当先探活"
+    assert worker.restarts == 0, "探活结果还没出来，不能马上重建"
 
-    assert worker.restarts == 1, "卡死时必须重建连接"
+    _expire_probe(session)
+    session._mqtt_watchdog_tick()
+
+    assert worker.restarts == 1, "探活无回应 + 久无报文，必须重建连接"
     assert session.warnings, "要让用户能看到发生过自愈（便于排查网络）"
 
 
@@ -104,7 +127,7 @@ def test_刚启动不久不重建():
 
 
 def test_重建过一次之后不再反复重建():
-    """契约：重建后计数会涨，下一轮不该立刻又重建（避免抖动）。"""
+    """契约：重建后不该紧接着又重建（避免抖动）。"""
     session = make_session()
     session.running = True
     worker = _stuck_worker()
@@ -112,9 +135,13 @@ def test_重建过一次之后不再反复重建():
     session._mqtt_seen_connects = worker.connect_count
 
     session._mqtt_watchdog_tick()
-    assert worker.restarts == 1
+    _expire_probe(session)
     session._mqtt_watchdog_tick()
-    assert worker.restarts == 1, "重建后计数已推进，不该在同一条件下再次重建"
+    assert worker.restarts == 1
+
+    _expire_probe(session)
+    session._mqtt_watchdog_tick()
+    assert worker.restarts == 1, "刚重建过（且探活有限频），不该立刻又重建"
 
 
 def test_未启动或没有worker时不动():
