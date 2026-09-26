@@ -136,6 +136,10 @@ def _parse(data: dict[str, Any]) -> "AppConfig":
                 # 非拓竹族的凭据，与访问代码同样按本机方式加密保存
                 api_key=secret.decrypt_text(str(item.get("api_key", ""))),
                 camera_url=str(item.get("camera_url", "") or ""),
+                camera_index=_coerce_int(item, "camera_index", 0, 0, 99),
+                # 第三方族的开/关灯 G-code（用户自己填，见 PrinterInfo 的说明）
+                light_on_gcode=str(item.get("light_on_gcode", "") or ""),
+                light_off_gcode=str(item.get("light_off_gcode", "") or ""),
             )
         )
     web_token = str(data.get("web_token", "") or "") or secret.token_hex(8)

@@ -462,6 +462,14 @@ class PrinterInfo:
     #: 这台设备**显示哪一路**画面（多摄像头机器用，例如 Voron 的喷嘴 + 舱内）。
     #: 0 = 第一路。可选的摄像头列表见 `session.cameras()`。
     camera_index: int = 0
+    #: 第三方族的「开灯 / 关灯」G-code。留空表示不声明灯控能力。
+    #:
+    #: 为什么让用户自己填：Klipper 机器上"舱灯"没有统一做法 —— 可能是宏
+    #: （``LIGHT_ON``）、可能是输出引脚（``SET_PIN PIN=caselight VALUE=1``）、
+    #: 也可能接在某个风扇上（``SET_FAN_SPEED FAN=chamber_light SPEED=1``）。
+    #: 猜名字必然踩空，所以按 Fluidd / Mainsail 的做法让用户填**命令**。
+    light_on_gcode: str = ""
+    light_off_gcode: str = ""
 
     def display_name(self) -> str:
         if self.name:

@@ -396,6 +396,8 @@ class MoonrakerAdapter(PollingDeviceSession):
         api_key: str = "",
         camera_url: str = "",
         led_name: str = "",
+        light_on_gcode: str = "",
+        light_off_gcode: str = "",
         ws_url: str = "",
         timeout: float = 6.0,
         on_keepalive: Optional[Any] = None,
@@ -437,6 +439,9 @@ class MoonrakerAdapter(PollingDeviceSession):
         #: 舱灯的 Moonraker 对象名（例如 U1 是 ``cavity_led``）。
         #: 留空表示不声明灯控能力 —— 不猜名字，猜错会发一个必然失败的请求。
         self.led_name = led_name
+        #: 开/关灯的 G-code（用户自己填，Klipper 上没有统一做法，见 :meth:`_set_light`）
+        self.light_on_gcode = light_on_gcode
+        self.light_off_gcode = light_off_gcode
         #: WebSocket 地址。留空表示「与 HTTP 同主机同端口」（真实 Moonraker 就是
         #: 同端口先握手再升级）；测试里假服务器用独立端口，所以可以显式指定。
         self.ws_url = ws_url
@@ -460,7 +465,7 @@ class MoonrakerAdapter(PollingDeviceSession):
             # ⚠️ 灯控与速度档位走 WebSocket-only 的 /printer/control/*（HTTP 发不通）。
             # 灯需要知道对象名才声明支持（猜错会必然失败）；速度不需要额外参数，
             # 有 WS 通道就能用。
-            can_control_light=bool(led_name),
+            can_control_light=bool(led_name or light_on_gcode or light_off_gcode),
             can_set_speed=True,
             # Klipper 没有 HMS 体系
             has_hms=False,
@@ -866,13 +871,7 @@ class MoonrakerAdapter(PollingDeviceSession):
                 return False
 
         if command == "light":
-            if not self.led_name:
-                return False
-            # ⚠️ 参数名是 `name`（Moonraker 包装层再映射成 Klipper 的 mux key `led`），
-            # 传 `led` 会因缺必填项报错；且该层取整数 → 只能 0/1 开关，不能调光。
-            return self._ws_call(
-                "printer.control.led", {"name": self.led_name, "white": 1 if params.get("on") else 0}
-            )
+            return self._set_light(bool(params.get("on")))
 
         if command == "speed":
             # ⚠️ 参数名是 `percentage`；且官方限定"仅打印中可用"
@@ -881,6 +880,34 @@ class MoonrakerAdapter(PollingDeviceSession):
             return self._ws_call("printer.control.print_speed", {"percentage": percentage})
 
         LOGGER.info("Moonraker 暂不支持指令 %s", command)
+        return False
+
+    def _set_light(self, on: bool) -> bool:
+        """开灯 / 关灯。两种做法，按配置优先：
+
+        1. 用户填了 G-code（``LIGHT_ON`` / ``SET_PIN PIN=caselight VALUE=1`` /
+           ``SET_FAN_SPEED FAN=chamber_light SPEED=1`` …）→ 走
+           ``POST /printer/gcode/script``。Klipper 上"舱灯"没有统一做法，
+           让用户填命令是最不会踩空的方式（Fluidd / Mainsail 也是这么做的）。
+        2. 设备有 Moonraker 认识的 LED 对象（``led_name``，U1 是 ``cavity_led``）
+           → 走 WebSocket 的 ``printer.control.led``。
+           ⚠️ 参数名是 `name`（Moonraker 包装层再映射成 Klipper 的 mux key `led`），
+           传 `led` 会因缺必填项报错；且该层取整数 → 只能 0/1 开关，不能调光。
+
+        两者都没配置就返回 False —— 绝不猜一个名字发出去（猜错只会让人以为软件坏了）。
+        """
+        script = self.light_on_gcode if on else self.light_off_gcode
+        if script:
+            try:
+                self._request("/printer/gcode/script", {"script": script}, method="POST")
+                return True
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                LOGGER.warning("下发灯光 G-code 失败：%s（%s）", script, exc)
+                return False
+        if self.led_name:
+            return self._ws_call(
+                "printer.control.led", {"name": self.led_name, "white": 1 if on else 0}
+            )
         return False
 
     # ------------------------------------------------------------------ WebSocket

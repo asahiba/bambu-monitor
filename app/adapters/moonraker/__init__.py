@@ -33,5 +33,9 @@ def create_session(info: Any, **options: Any) -> MoonrakerAdapter:
         base_url=base_url,
         api_key=api_key,
         camera_url=camera_url,
+        # 灯光：用用户填的 G-code（Klipper 上"舱灯"没有统一做法，
+        # 可能是宏、输出引脚或某个风扇，猜名字必然踩空）
+        light_on_gcode=str(getattr(info, "light_on_gcode", "") or ""),
+        light_off_gcode=str(getattr(info, "light_off_gcode", "") or ""),
         **options,
     )

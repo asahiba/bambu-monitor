@@ -113,6 +113,8 @@ class FakeMoonraker:
         # --- 观测点：测试据此断言"适配器到底请求了什么" ---
         self.requests: list[tuple[str, str]] = []
         self.commands: list[str] = []
+        #: 收到的 G-code（灯光控制走 `/printer/gcode/script`，见 `_set_light`）
+        self.gcode_scripts: list[str] = []
         self.monitor_started = 0
         self.keepalive_seen = 0
         #: WebSocket 调用记录（方法名 + 参数）
@@ -399,6 +401,13 @@ def _make_handler(fake: FakeMoonraker):
                     fake.state = "printing"
                 elif action == "cancel":
                     fake.state = "cancelled"
+                self._send_json({"result": "ok"})
+                return
+            if path == "/printer/gcode/script":
+                # 灯光控制走这条：Klipper 上没有统一的"舱灯"对象，
+                # 程序让用户填开/关灯 G-code，这里把收到的脚本记下来供断言
+                body = self._body()
+                fake.gcode_scripts.append(str(body.get("script", "")))
                 self._send_json({"result": "ok"})
                 return
             self._send(b"not found", "text/plain", 404)
