@@ -86,6 +86,7 @@ class FakeMoonraker:
         webhooks_state: str = "ready",
         camera: str = "snapshot",
         camera_requires_monitor: bool = False,
+        camera_monitor: bool = True,
         api_key: str = "",
         estimated_time: Optional[float] = 3600.0,
     ) -> None:
@@ -105,6 +106,8 @@ class FakeMoonraker:
         #: "snapshot" 提供快照端点；"none" 表示没有摄像头；"list" 只通过 webcams/list 暴露
         self.camera = camera
         self.camera_requires_monitor = camera_requires_monitor
+        #: 设备是否认识 ``camera.start_monitor``（U1 认识，普通 Moonraker 不认识）
+        self.camera_monitor = camera_monitor
         self.api_key = api_key
         self.estimated_time = estimated_time
         # --- 观测点：测试据此断言"适配器到底请求了什么" ---
@@ -169,6 +172,10 @@ class FakeMoonraker:
         """
         self.ws_calls.append((method, params))
         if method == "camera.start_monitor":
+            if not self.camera_monitor:
+                # 普通 Moonraker（Voron 实测）**没有**这个方法，会回 -32601。
+                # 程序必须认出"这台设备不需要保活"，而不是每 5 秒报一次告警。
+                return {"error": {"code": -32601, "message": f"Unknown method {method}"}}
             self.monitor_started += 1
             self.keepalive_seen += 1
             # 保活后快照才开始更新（对应真机"不保活画面就静止"）
@@ -238,13 +245,37 @@ class FakeMoonraker:
         return {"result": {"status": status, "eventtime": time.time()}}
 
     def webcams_response(self) -> dict[str, Any]:
+        """摄像头列表。``camera`` 取值决定返回什么：
+
+        * ``"snapshot"`` / ``"list"`` —— 一路正常摄像头（默认）；
+        * ``"multi"`` —— 两路（Voron 这类机器常见的「喷嘴 + 舱内」）；
+        * ``"multi_disabled"`` —— 一路正常 + 一路 ``enabled: false``（配了但没插上）；
+        * ``"none"`` —— 什么都不返回。
+        """
         webcams: list[dict[str, Any]] = []
-        if self.camera in ("snapshot", "list"):
+        if self.camera != "none":
             webcams.append(
                 {
                     "name": "camera",
                     "snapshot_url": "/camera/monitor.jpg",
                     "stream_url": "/camera/stream.mjpg",
+                }
+            )
+        if self.camera == "multi":
+            webcams.append(
+                {
+                    "name": "nozzle",
+                    "location": "nozzle",
+                    "snapshot_url": "/camera2/monitor.jpg",
+                    "stream_url": "/camera2/stream.mjpg",
+                }
+            )
+        if self.camera == "multi_disabled":
+            webcams.append(
+                {
+                    "name": "unplugged",
+                    "enabled": False,
+                    "snapshot_url": "/camera3/monitor.jpg",
                 }
             )
         return {"result": {"webcams": webcams}}
@@ -333,6 +364,12 @@ def _make_handler(fake: FakeMoonraker):
                     self._send(b"stale frame", "text/plain", 404)
                 else:
                     self._send(TINY_JPEG, "image/jpeg")
+            elif path == "/camera2/monitor.jpg":
+                # 第二路摄像头：比第一路长一点，便于断言"取到的是哪一路"
+                self._send(TINY_JPEG + b"\x00" * 16, "image/jpeg")
+            elif path == "/camera3/monitor.jpg":
+                # 模拟"设备端配了但没插上"的摄像头：能列出、取不到帧
+                self._send(b"no device", "text/plain", 404)
             else:
                 self._send(b"not found", "text/plain", 404)
 

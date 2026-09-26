@@ -438,11 +438,92 @@ Creality 是 `0..5`、Elegoo CC1 是 `0..22`、FlashForge 是字符串、PrusaLi
 
 ---
 
+## 2.2 Voron 2.4 真机实测（2026-09-18，Moonraker v0.11.0）
+
+设备：`192.168.31.55:7125`，hostname `voron24`，Klipper（`/server/info` **不上报**
+`klipper_version`，只有 `moonraker_version` 与 `klippy_state`），webhooks 状态 `ready`。
+扫描方式：`tools/moonraker_find.py`（按端口扫网段，只读）。
+
+### ✅ 摄像头：URL 是**相对路径**，且挂在主机 80 端口上（不是 Moonraker 端口）
+
+`/server/webcams/list` 返回：
+
+```json
+{"name": "Printer", "service": "mjpegstreamer", "location": "printer",
+ "stream_url": "/webcam/?action=stream", "snapshot_url": "/webcam/?action=snapshot",
+ "target_fps": 30, "target_fps_idle": 15, "enabled": true}
+```
+
+两个地址都实测过：
+
+| 地址 | 结果 |
+| --- | --- |
+| `http://192.168.31.55/webcam/?action=snapshot` | **200 image/jpeg 约 28 KB** ← 能出画面 |
+| `http://192.168.31.55:7125/webcam/?action=snapshot` | **404 application/json** |
+| `http://192.168.31.55/webcam/?action=stream` | 200 multipart/x-mixed-replace（MJPEG 长连接） |
+
+结论：`/webcam/` 由 nginx 代理到 crowsnest 的 ustreamer，**在主机 80 端口**；
+Moonraker 自己的端口后面没有这个路径。程序原来把相对地址拼在 Moonraker 端口上，
+于是「遥测正常、端口也通，但永远没有画面」。现在按「主机根优先、Moonraker 端口兜底」
+解析并记住成功的那一个（`app/adapters/moonraker/adapter.py` 的 `_candidate_bases`）。
+
+### ⚠️ 多路画面：设备端配了几路，未必都在跑
+
+| 路径 | 结果 |
+| --- | --- |
+| `/webcam/` | 200，正常出图 |
+| `/webcam2/` `/webcam3/` `/webcam4/` | **502**（nginx 有这个 location，但上游 ustreamer 不在） |
+| `/webcam5/` | 200 text/html（前端 SPA 的兜底页，不是摄像头） |
+
+也就是说 crowsnest 里可能配了 2–4 路摄像头，但只有第一路在跑；502 那几路在界面上
+应该显示成「不可用」，而不是静默消失。Moonraker 的 webcams 数据库里只登记了 1 路。
+
+### 📋 设备能力（`/printer/objects/list`，共 60 个）
+
+值得用起来的对象（程序当前只查了 8 个）：
+
+| 对象 | 能拿到什么 |
+| --- | --- |
+| `print_stats` | `filename`、`state`、`message`、`total_duration`、`print_duration`（秒）、**`filament_used`（mm）**、`info`（层数，需切片器写 `SET_PRINT_STATS_INFO`） |
+| `virtual_sdcard` | `progress`（0–1）、`is_active`、`file_path`、**`file_position` / `file_size`**（字节级进度） |
+| `display_status` | `message`（M117 屏幕提示） |
+| `toolhead` | `homed_axes`（`xyz`）、`axis_minimum/maximum`（**300×300×270**）、`position`、`print_time`、`stalls` |
+| `gcode_move` | `speed_factor`、`extrude_factor`、`speed`、`homing_origin` |
+| `fan` / `heater_fan *` | 风扇转速（`speed`）与是否在转 |
+| `temperature_sensor EBBCan` | 工具头板温度 |
+| `filament_switch_sensor 断料监测` | 断料开关状态 |
+| `filament_motion_sensor 转堵监测` | 堵料检测（`filament_detected`） |
+| `system_stats` | 主机 CPU / 内存 / 负载 |
+| `mcu` / `canbus_stats *` | MCU 版本、负载、CAN 总线统计 |
+
+**剩余时间**：Klipper 没有原生字段，但有两个正经来源 ——
+`print_stats.print_duration / virtual_sdcard.progress`（按已打印时长外推），
+或 `GET /server/files/metadata?filename=<path>` 的 `estimated_time`（切片器给的，更准）。
+
+### 🔧 可用操作（gcode_macro，共 16 个）
+
+`HOME_FULL_QGL`、`HOME_XYZ`、`HOME_X/Y/Z`、`PAUSE`、`RESUME`、`CANCEL_PRINT`、
+`SET_PAUSE_NEXT_LAYER`、`SET_PAUSE_AT_LAYER`、`PRINT_START`、`PRINT_END`、
+`_CLIENT_EXTRUDE`、`_CLIENT_RETRACT`、`_CLIENT_LINEAR_MOVE`、`_PROBE_TEMP_GUARD`、
+`SET_PRINT_STATS_INFO`。
+
+其中 `_CLIENT_*` 三个是 Fluidd / Mainsail 的客户端宏（挤丝、回抽、直线移动），
+正是界面做「移动 / 挤出」时该用的东西；`quad_gantry_level`、`bed_mesh`、`probe`、
+`manual_probe`、`exclude_object`、`idle_timeout` 也都是对象（可直接查询/调用）。
+
+### ⚠️ 保活：普通 Moonraker **没有** `camera.start_monitor`
+
+U1 需要它，Voron 上调用会返回 `-32601 Method not found`。程序原来每 5 秒试一次、
+每次打一条告警。现在一旦确认设备不认识它就永久关掉（`_keepalive_supported`）。
+
+---
+
 ## 3. 待补充
 
 * A2L 固件更新完成后：重抓 SSDP 原文确认 `devmodel`，并实测 6000 端口鉴权包的真实回应。
 * A2L / H2C 的 Developer Mode `fun` 字段实测（验证结论二）。
 * 任一台 U1 实机的 `/server/info` 与 `/printer/objects/list` 输出（验证上表）。
+* Voron 上 `print_stats.info` 是否有值（取决于切片器有没有写 `SET_PRINT_STATS_INFO`）。
 
 
 

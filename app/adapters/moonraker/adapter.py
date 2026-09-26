@@ -73,6 +73,11 @@ STATE_MAP: dict[str, str] = {
 #: `webhooks.state` 为这些值时视为 Klipper 不可用
 WEBHOOKS_BAD = frozenset({"shutdown", "error", "startup"})
 
+#: 副画面（非主画面）的抓帧超时上限与连续失败上限。
+#: 副画面坏掉时既要尽快放弃，又不能永久放弃（摄像头可能只是还没启动）。
+EXTRA_CAMERA_TIMEOUT = 3.0
+EXTRA_CAMERA_MAX_FAILS = 3
+
 
 def _as_float(value: Any) -> Optional[float]:
     try:
@@ -213,8 +218,24 @@ class MoonrakerAdapter(PollingDeviceSession):
         self.timeout = timeout
         #: 可选钩子：每次轮询后调用一次，用于自定义保活逻辑
         self._on_keepalive = on_keepalive
+        #: 用户手填的摄像头地址（留空则自动发现）。见 ``self._cameras``。
         self._camera_url = camera_url
         self._camera_probed = bool(camera_url)
+        #: 这台机器的**全部**摄像头（真机实测：Voron 上 crowsnest 可能配了多路）。
+        #: 每项形如 ``{"index","name","location","url","stream_url","base","fails","detail"}``。
+        #: ``index 0`` 是主画面（基类那条 ``latest_frame()`` 通路用的就是它）。
+        self._cameras: list[dict[str, Any]] = []
+        #: 非主画面的最近一帧：``{index: (seq, jpeg)}``
+        self._extra_frames: dict[int, tuple[int, bytes]] = {}
+        self._extra_seq = 0
+        #: 相对 URL 的基准地址（**探测出来的**）：Moonraker 的 webcams.list 给的是
+        #: 相对路径（``/webcam/?action=snapshot``），它由 crowsnest / 前端挂在**主机
+        #: 80 端口**上，Moonraker 自己的端口上并没有这个路径（实测 404）。
+        #: 留空表示还没探出来，此时按候选顺序试。
+        self._camera_base = ""
+        #: 设备是否认识摄像头保活方法（``None`` = 还不知道）。
+        #: 普通 Moonraker 没有它（实测返回 -32601），U1 这类设备必须有 —— 见 `_maybe_keepalive`。
+        self._keepalive_supported: Optional[bool] = None
         self._last_keepalive = 0.0
         #: 舱灯的 Moonraker 对象名（例如 U1 是 ``cavity_led``）。
         #: 留空表示不声明灯控能力 —— 不猜名字，猜错会发一个必然失败的请求。
@@ -258,8 +279,7 @@ class MoonrakerAdapter(PollingDeviceSession):
         所以这里先探一次，否则会出现"明明有摄像头却永远不取画面"。
         探测失败不影响遥测：退化成"只监控、无画面"。
         """
-        if not self._camera_url:
-            self._discover_camera()
+        self._discover_cameras()
         super().start()
 
     # ------------------------------------------------------------------ 传输
@@ -288,37 +308,213 @@ class MoonrakerAdapter(PollingDeviceSession):
         return parse_status(raw)
 
     def _fetch_frame(self) -> Optional[bytes]:
-        if not self._camera_url:
-            self._discover_camera()
-            if not self._camera_url:
+        """取主画面（``index 0``）。
+
+        基类拿到它之后会存进 ``_latest_frame`` 并推进帧号，所以「主画面」这条通路
+        与只有一路摄像头时完全一致。
+
+        ⚠️ **主画面先取、其余画面后取**：反过来的话，一路坏掉的摄像头（没插上、
+        或地址是 404）会把它那几次超时全部算在主画面之前 —— 用户看到的是
+        "画面很卡甚至没有"。其余画面取不到不该影响能看的那一路。
+        """
+        if not self._cameras:
+            self._discover_cameras()
+            if not self._cameras:
                 return None
-        try:
-            request = urllib.request.Request(self._camera_url)
-            if self.api_key:
-                request.add_header("X-Api-Key", self.api_key)
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = response.read()
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            # 画面拿不到不算设备离线，只记通道说明
-            self.last_camera_detail = f"摄像头不可用：{exc}"
-            return None
-        if not body.startswith(b"\xff\xd8"):
-            self.last_camera_detail = "摄像头返回的不是 JPEG（本程序只支持 JPEG 画面）"
-            return None
+        body = self._fetch_camera(0)
+        self._fetch_extra_cameras()
         return body
 
-    def _discover_camera(self) -> None:
-        """用官方端点 ``/server/webcams/list`` 自动发现摄像头 URL。
+    def _fetch_camera(self, index: int) -> Optional[bytes]:
+        """取指定摄像头的快照；失败时在候选基准地址之间轮换一次再放弃。
 
-        只探测一次，失败就永久退化为"无画面"，避免每轮都白试。
+        为什么要轮换：Moonraker 给的相对路径（``/webcam/…``）实际挂在**主机 80 端口**
+        上（crowsnest / 前端静态目录），而 Moonraker 自己的端口上返回 404。
+        但有些部署确实把摄像头挂在 Moonraker 端口后面，所以两个都试，
+        谁成功就把结果记进 ``base``，之后不再重复试错。
+
+        非主画面（``index > 0``）只试一次、用更短的超时：它坏掉不该拖慢主画面。
+        """
+        camera = self._camera_at(index)
+        if camera is None:
+            return None
+        if camera["base"]:
+            candidates = [camera["base"]]
+        elif index == 0:
+            candidates = list(self._candidate_bases())
+        else:
+            # 副画面不该自己去试两种基准：主画面已经告诉我们哪种能用了
+            known = self._camera_base or (self._candidate_bases() or [""])[0]
+            candidates = [known] if known else []
+        timeout = self.timeout if index == 0 else min(self.timeout, EXTRA_CAMERA_TIMEOUT)
+        last_detail = ""
+        for base in candidates:
+            url = self._resolve(camera["path"], base)
+            body, detail = self._snapshot(url, timeout=timeout)
+            if body:
+                if camera["base"] != base:
+                    camera["base"] = base
+                    if index == 0:
+                        self._camera_base = base
+                camera["fails"] = 0
+                camera["detail"] = ""
+                return body
+            last_detail = detail
+        camera["fails"] = int(camera.get("fails", 0)) + 1
+        camera["detail"] = last_detail
+        if index == 0:
+            self.last_camera_detail = last_detail
+        return None
+
+    def _snapshot(self, url: str, timeout: float = 0.0) -> tuple[Optional[bytes], str]:
+        """下载一帧快照，返回 ``(JPEG 字节 或 None, 失败说明)``。"""
+        try:
+            request = urllib.request.Request(url)
+            if self.api_key:
+                request.add_header("X-Api-Key", self.api_key)
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+                body = response.read()
+                ctype = response.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            return None, f"摄像头 {url} 返回 HTTP {exc.code}"
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return None, f"摄像头不可用：{exc}"
+        if not body.startswith(b"\xff\xd8"):
+            return None, f"摄像头返回的不是 JPEG（{ctype or '无 Content-Type'}）：{url}"
+        return body, ""
+
+    def _fetch_extra_cameras(self) -> None:
+        """顺带取其余摄像头的画面（失败次数多的先放一放，避免每轮都白等）。"""
+        for camera in self._cameras[1:]:
+            index = int(camera["index"])
+            if int(camera.get("fails", 0)) >= EXTRA_CAMERA_MAX_FAILS and not camera.get(
+                "probe_again"
+            ):
+                continue
+            body = self._fetch_camera(index)
+            if body:
+                self._extra_seq += 1
+                self._extra_frames[index] = (self._extra_seq, body)
+                camera["probe_again"] = False
+            elif int(camera.get("fails", 0)) == EXTRA_CAMERA_MAX_FAILS:
+                # 连错几次就隔一会儿再试（摄像头可能只是还没启动）
+                camera["probe_again"] = True
+
+    def _candidate_bases(self) -> list[str]:
+        """相对 URL 的候选基准地址：主机根优先，其次 Moonraker 端口。"""
+        host = urllib.parse.urlsplit(self.base_url).hostname or str(getattr(self.info, "ip", ""))
+        scheme = "https" if self.base_url.startswith("https://") else "http"
+        root = f"{scheme}://{host}"
+        bases = [self._camera_base] if self._camera_base else []
+        for base in (root, self.base_url):
+            if base and base not in bases:
+                bases.append(base)
+        return bases
+
+    @staticmethod
+    def _resolve(path: str, base: str) -> str:
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return f"{base.rstrip('/')}{path if path.startswith('/') else '/' + path}"
+
+    def _camera_at(self, index: int) -> Optional[dict[str, Any]]:
+        for camera in self._cameras:
+            if int(camera["index"]) == int(index):
+                return camera
+        return None
+
+    def _add_camera(self, name: str, location: str, path: str, stream_path: str = "") -> None:
+        """登记一路摄像头（按 URL 去重）。``index`` 由加入顺序决定，0 是主画面。"""
+        if not path:
+            return
+        for camera in self._cameras:
+            if camera["path"] == path:
+                return
+        self._cameras.append(
+            {
+                "index": len(self._cameras),
+                "name": name or f"摄像头 {len(self._cameras) + 1}",
+                "location": location,
+                "path": path,
+                "stream_path": stream_path,
+                "base": "",
+                "fails": 0,
+                "detail": "",
+                "probe_again": False,
+            }
+        )
+        if len(self._cameras) == 1:
+            self._camera_url = self._resolve(path, self._candidate_bases()[-1] if not path.startswith("http") else "")
+        self.capabilities = self.capabilities.merged(
+            has_camera=True, video_channel="http_snapshot"
+        )
+        self.video_backend = "快照"
+
+    def cameras(self) -> list[dict[str, Any]]:
+        """这台机器的摄像头清单（给界面做「选哪一路 / 同时看几路」）。
+
+        每项包含：``index`` / ``name`` / ``location`` / ``available`` / ``detail`` /
+        ``url``（解析后的快照地址，便于用户核对）。没有任何摄像头时返回空列表。
+        """
+        items = []
+        for camera in self._cameras:
+            base = camera["base"] or (self._candidate_bases()[0] if self._candidate_bases() else "")
+            items.append(
+                {
+                    "index": int(camera["index"]),
+                    "name": str(camera["name"]),
+                    "location": str(camera.get("location", "")),
+                    "available": int(camera.get("fails", 0)) == 0,
+                    "detail": str(camera.get("detail", "")),
+                    "url": self._resolve(str(camera["path"]), base) if base else str(camera["path"]),
+                    "stream_url": (
+                        self._resolve(str(camera["stream_path"]), base)
+                        if camera.get("stream_path") and base
+                        else ""
+                    ),
+                }
+            )
+        return items
+
+    def latest_frame(self, camera: int = 0) -> tuple[int, Optional[bytes]]:
+        """取某一路画面的最新帧。
+
+        ``camera=0`` 走基类那条通路（主画面）；其它序号取本适配器缓存的那一路。
+        多路摄像头是 Voron 这类机器的常态（喷嘴 + 舱内），
+        界面据此做「切换看哪一路」或「同屏看几路」。
+        """
+        if int(camera) == 0:
+            return super().latest_frame()
+        with self._lock:
+            seq, frame = self._extra_frames.get(int(camera), (0, None))
+        return seq, frame
+
+    def _discover_cameras(self) -> None:
+        """用官方端点 ``/server/webcams/list`` 发现**全部**可用摄像头。
+
+        只探测一次（失败则退化为"无画面"或只有用户手填的那一路），因为
+        ``webcams/list`` 在设备端是数据库查询，没必要每轮都问。
+
+        实测（Voron 2.4 + crowsnest，2026-09）：返回的是**相对路径**
+        ``/webcam/?action=snapshot``，其中 ``/webcam/`` 由 nginx 代理到
+        crowsnest 的 ustreamer，而 Moonraker 端口上没有这个路径（404）——
+        以前这里把相对路径拼在 Moonraker 端口上，于是「有摄像头却永远没画面」。
         """
         if self._camera_probed:
             return
         self._camera_probed = True
+        # 用户手填的地址优先当作主画面（例如 U1 那种 Moonraker 里没登记的摄像头）
+        if self._camera_url:
+            self._add_camera("自定义", "", self._camera_url)
         try:
             data = self._request("/server/webcams/list")
         except Exception as exc:  # noqa: BLE001 - 探测失败很常见，不值得报错
             LOGGER.debug("webcams/list 探测失败：%s", exc)
+            if self._camera_url:
+                self.capabilities = self.capabilities.merged(
+                    has_camera=True, video_channel="http_snapshot"
+                )
+                self.video_backend = "快照"
             return
         webcams = data.get("result", {}).get("webcams") if isinstance(data, dict) else None
         if not isinstance(webcams, list):
@@ -326,21 +522,30 @@ class MoonrakerAdapter(PollingDeviceSession):
         for webcam in webcams:
             if not isinstance(webcam, dict):
                 continue
-            # 优先用快照（单帧 JPEG），因为本程序按帧取用，不解析 MJPEG 流
-            url = str(webcam.get("snapshot_url") or webcam.get("stream_url") or "")
-            if url:
-                self._camera_url = self._absolute(url)
-                self.capabilities = self.capabilities.merged(
-                    has_camera=True, video_channel="http_snapshot"
-                )
-                self.video_backend = "快照"
-                LOGGER.info("自动发现摄像头：%s", self._camera_url)
-                return
+            if webcam.get("enabled") is False:
+                # 设备端明确禁用的不登记：它只会每次都失败
+                continue
+            # 优先用快照（单帧 JPEG），因为本程序按帧取用，不解析 MJPEG 流；
+            # 流地址仍然保留，界面可以给用户一个「在浏览器里打开」的入口。
+            snapshot = str(webcam.get("snapshot_url") or webcam.get("stream_url") or "")
+            stream = str(webcam.get("stream_url") or "")
+            self._add_camera(
+                str(webcam.get("name") or ""),
+                str(webcam.get("location") or ""),
+                snapshot,
+                stream if stream != snapshot else "",
+            )
+        if self._cameras:
+            LOGGER.info(
+                "发现 %d 路摄像头：%s",
+                len(self._cameras),
+                "、".join(f"{item['name']}" for item in self._cameras),
+            )
 
     def _absolute(self, url: str) -> str:
-        if url.startswith("http://") or url.startswith("https://"):
-            return url
-        return f"{self.base_url}{url if url.startswith('/') else '/' + url}"
+        """把（可能是相对的）摄像头地址补全 —— 保留给外部调用方，内部用 :meth:`_resolve`。"""
+        bases = self._candidate_bases()
+        return self._resolve(url, bases[0] if bases else self.base_url)
 
     def _maybe_keepalive(self) -> None:
         """周期性给摄像头续命，否则画面会静止。
@@ -368,10 +573,17 @@ class MoonrakerAdapter(PollingDeviceSession):
                     self._adopt_camera()
             return
 
-        if not self._camera_url:
+        if not self._camera_url or self._keepalive_supported is False:
             return
-        # 默认保活：对 U1 这类设备是"能否看到画面"的前提
-        self._ws_call("camera.start_monitor", {"domain": "lan", "interval": 0})
+        # 默认保活：对 U1 这类设备是"能否看到画面"的前提。
+        # ⚠️ 但普通 Moonraker（Voron 实测）里**没有**这个方法，调用会返回
+        # -32601 Method not found；以前每 5 秒试一次、每次都打一条告警，
+        # 把真的问题淹掉了。所以这里一旦确认设备不认识它就永久关掉。
+        self._ws_call(
+            "camera.start_monitor",
+            {"domain": "lan", "interval": 0},
+            missing_method_disables="keepalive",
+        )
 
     def _adopt_camera(self) -> None:
         self.capabilities = self.capabilities.merged(
@@ -441,8 +653,15 @@ class MoonrakerAdapter(PollingDeviceSession):
             self._ws = client
             return client
 
-    def _ws_call(self, method: str, params: Optional[dict] = None) -> bool:
-        """发一条 WS JSON-RPC 调用；失败返回 False（不抛异常）。"""
+    def _ws_call(
+        self, method: str, params: Optional[dict] = None, *, missing_method_disables: str = ""
+    ) -> bool:
+        """发一条 WS JSON-RPC 调用；失败返回 False（不抛异常）。
+
+        :param missing_method_disables: 填 ``"keepalive"`` 时，如果设备明确回答
+            「方法不存在」（JSON-RPC ``-32601``），就把摄像头保活永久关掉 ——
+            这是"这台设备不需要它"，不是故障，不该每 5 秒刷一条告警。
+        """
         client = self._ensure_ws()
         if client is None:
             return False
@@ -450,6 +669,11 @@ class MoonrakerAdapter(PollingDeviceSession):
             client.call(method, params)
             return True
         except (WebSocketError, OSError, ValueError) as exc:
+            text = str(exc)
+            if missing_method_disables and ("-32601" in text or "Method not found" in text):
+                self._keepalive_supported = False
+                LOGGER.info("设备不认识 %s，已关闭摄像头保活（这不是故障）", method)
+                return False
             LOGGER.warning("Moonraker WS 调用 %s 失败：%s", method, exc)
             with self._ws_lock:
                 if self._ws is client:
