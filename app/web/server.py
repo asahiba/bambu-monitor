@@ -144,6 +144,25 @@ def _as_port(value: object) -> int:
     return port if 0 <= port <= 65535 else 0
 
 
+def _details_of(session: PrinterSession) -> list[dict]:
+    """会话提供的额外读数（没有这个方法的老会话返回空列表，不影响前端）。"""
+    getter = getattr(session, "details", None)
+    if not callable(getter):
+        return []
+    try:
+        rows = getter()
+    except Exception:  # noqa: BLE001 - 读数拿不到不能把整个状态接口带崩
+        LOGGER.debug("读取额外读数失败", exc_info=True)
+        return []
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows:
+        if isinstance(row, dict) and row.get("label"):
+            clean.append({"label": str(row["label"]), "value": str(row.get("value", ""))})
+    return clean
+
+
 def _families_payload() -> list[dict]:
     """已注册的设备族（供网页端渲染「设备族」下拉与凭据字段标签）。
 
@@ -661,6 +680,10 @@ class _Handler(BaseHTTPRequestHandler):
                         else ""
                     ),
                     "problem_text": " ".join(problems),
+                    # 设备能提供、但不属于通用状态模型的读数（风扇 / 断料与走料传感器 /
+                    # 工具头板温度 / 主机负载 / MCU 固件…）。第三方族走这条通路，
+                    # 界面按族无关的方式逐条列出，见 app/core/adapter.py::details()
+                    "details": _details_of(session),
                 }
             )
         return {

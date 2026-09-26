@@ -73,6 +73,16 @@ INDEX_HTML = r"""<!doctype html>
   .chip{display:flex;align-items:center;gap:4px}
   .sw{width:10px;height:10px;border-radius:2px;border:1px solid #000}
   .chip.active{color:var(--accent);font-weight:700}
+  /* 设备详情（第三方族能给出十几条读数：风扇、断料/走料传感器、耗材用量、主机负载…）。
+     为什么默认收起：这些读数全铺开时卡片会比画面还高，一屏就被读数占满 ——
+     画面才是主角，所以做成按需展开的一块。
+     窄屏（手机一行两列、长读数名）也看得清：table-layout:fixed + 折行，不用横向滚动。 */
+  .details{margin-top:2px;font-size:11px;color:var(--dim)}
+  .details > summary{cursor:pointer;color:var(--accent);font-size:11px;outline:none}
+  .details table{width:100%;border-collapse:collapse;margin-top:3px;table-layout:fixed}
+  .details td{padding:1px 3px;vertical-align:top;word-break:break-word;overflow-wrap:anywhere}
+  .details td.k{width:40%;color:var(--dim)}
+  .details td.v{color:var(--text)}
   .row4{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
   .row4 .grow{flex:1}
   .row4 button{background:var(--panel);color:var(--text);border:1px solid var(--border);
@@ -307,6 +317,10 @@ function ensureTile(index){
         <button data-act="stop">⏹ 停止</button>
         <button data-act="light">💡 灯</button>
       </div>
+      <details class="details" style="display:none">
+        <summary>详情</summary>
+        <table><tbody></tbody></table>
+      </details>
     </div>`;
   const img = element.querySelector('img');
   const nosignal = element.querySelector('.nosignal');
@@ -341,6 +355,9 @@ function ensureTile(index){
   });
   const hmsBadge = element.querySelector('.hms');
   hmsBadge.addEventListener('click', event => { event.stopPropagation(); showHms(index); });
+  // 「详情」默认收起，点 summary 展开时这次点击**不能**冒泡到上面那个
+  // 「点整卡切换全屏」的监听 —— 否则用户想看读数，画面却直接全屏了。
+  element.querySelector('.details').addEventListener('click', event => event.stopPropagation());
   tile = {element, img, nosignal, status: {}};
   state.tiles.set(index, tile);
   wall.appendChild(element);
@@ -397,6 +414,52 @@ function applyFrame(index, payload){
   img.dataset.previous = img.dataset.current || '';
   img.dataset.current = url;
   img.src = url;
+}
+
+/* ---------------------------------------------------------------- 设备详情
+   第三方族（Klipper/Moonraker）能给出十几条读数：风扇转速、断料/走料传感器、
+   工具头板温度、耗材用量、文件位置、主机负载…这些过去取到了却没有任何界面显示。
+   服务端把它们放在每台设备的 `details` 里（`[{"label": …, "value": …}, …]`）。
+
+   为什么默认收起（<details>）：18 条读数全铺开时卡片会比画面还高，一屏就被读数
+   占满 —— 画面才是主角，读数按需展开。
+
+   为什么重建前先比签名：applyStatus() 每一帧都会走到这里，无脑清空重建会让用户
+   正在看的列表闪烁。<details> 的展开状态是 DOM 属性，**不重建就不会被重置**，
+   所以刷新时绝不碰 `.open`：否则用户展开的详情每次刷新都会被收起来。
+
+   为什么只用 createElement + textContent：读数是设备/用户数据，拼 innerHTML
+   等于把设备返回的字符串当代码渲染。 */
+function renderDetails(element, info){
+  const box = element.querySelector('.details');
+  if (!box) return;
+  const rows = Array.isArray(info.details) ? info.details : [];
+  // 空列表 = 这台设备没有这类读数（拓竹那族就是空列表）：整块隐藏，不留空框、不占行高
+  if (!rows.length){
+    box.style.display = 'none';
+    return;
+  }
+  const signature = JSON.stringify(rows.map(row => [row.label, row.value]));
+  if (box.dataset.signature !== signature){
+    box.dataset.signature = signature;
+    const body = box.querySelector('tbody');
+    body.textContent = '';
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      const key = document.createElement('td');
+      key.className = 'k';
+      key.textContent = row.label || '';
+      const value = document.createElement('td');
+      value.className = 'v';
+      value.textContent = row.value == null ? '' : String(row.value);
+      tr.appendChild(key);
+      tr.appendChild(value);
+      body.appendChild(tr);
+    });
+    // 摘要带上条数：用户一眼就知道值不值得展开
+    box.querySelector('summary').textContent = '详情（' + rows.length + ' 条）';
+  }
+  box.style.display = '';
 }
 
 function applyStatus(data){
@@ -462,6 +525,9 @@ function applyStatus(data){
                `${t.label} ${t.type || '--'}${remain}</span>`;
       }).join('') : '';
     }
+
+    // 设备详情（第三方族的额外读数）：默认收起，展开状态跨刷新保留
+    renderDetails(element, info);
 
     // HMS
     const hmsBadge = element.querySelector('.hms');

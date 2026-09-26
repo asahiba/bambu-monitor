@@ -82,6 +82,13 @@ def main(argv: list[str] | None = None) -> int:
             if camera["detail"]:
                 print(f"       最近失败：{camera['detail']}")
 
+        print("\n=== 详细读数（session.details()，界面会逐条列出来） ===")
+        details = session.details() if hasattr(session, "details") else []
+        if not details:
+            print("  （这个设备族没有额外读数）")
+        for row in details:
+            print(f"  {row['label']:16} {row['value']}")
+
         print("\n=== 取帧实测 ===")
         for camera in cameras:
             seq, frame = session.latest_frame(int(camera["index"]))

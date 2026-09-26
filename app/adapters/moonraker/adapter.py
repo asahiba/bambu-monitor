@@ -48,7 +48,7 @@ from .ws import WebSocketClient, WebSocketError
 
 LOGGER = logging.getLogger("bambu-monitor.moonraker")
 
-#: 一次查询要拿的对象（请求体里的键）。可按需裁剪，但保持精简有利于设备端开销。
+#: 固定查询的对象。可按需裁剪，但保持精简有利于设备端开销。
 QUERY_OBJECTS: tuple[str, ...] = (
     "print_stats",
     "virtual_sdcard",
@@ -58,6 +58,23 @@ QUERY_OBJECTS: tuple[str, ...] = (
     "webhooks",
     "toolhead",
     "gcode_move",
+)
+
+#: **扩展**对象的对象类型前缀：名字由设备配置决定（例如 ``heater_fan fan0``、
+#: ``temperature_sensor EBBCan``、``filament_switch_sensor 断料监测``），
+#: 所以启动时按前缀从 ``/printer/objects/list`` 里挑，见 `MoonrakerAdapter._wanted_objects`。
+#: 这些读数不会进通用状态模型，而是经 :func:`parse_details` 交给界面显示。
+DETAIL_OBJECT_PREFIXES: tuple[str, ...] = (
+    "fan",
+    "heater_fan",
+    "temperature_sensor",
+    "filament_switch_sensor",
+    "filament_motion_sensor",
+    "output_pin",
+    "led",
+    "neopixel",
+    "system_stats",
+    "mcu",
 )
 
 #: `print_stats.state` -> 归一化作业状态
@@ -162,6 +179,17 @@ def parse_status(
                 fields["progress_percent"] = max(0, min(100, round(fraction * 100)))
                 break
 
+    # 剩余时间：Klipper 没有原生字段，用「已打印时长 ÷ 进度」外推。
+    # 进度太小（刚开始）或没有时长时**不猜** —— 显示"--"比显示一个错的倒计时强。
+    if isinstance(stats, Mapping):
+        printed = _as_float(stats.get("print_duration"))
+        percent = fields.get("progress_percent")
+        if printed and printed > 0 and isinstance(percent, int) and percent >= 5:
+            total_estimate = printed / (percent / 100.0)
+            remaining = int(max(0.0, total_estimate - printed) / 60.0)
+            if remaining > 0:
+                fields["remaining_minutes"] = remaining
+
     extruder = status.get("extruder")
     if isinstance(extruder, Mapping):
         temperature = _as_float(extruder.get("temperature"))
@@ -181,6 +209,169 @@ def parse_status(
             fields["bed_target_temper"] = target
 
     return fields
+
+def _duration_text(seconds: Optional[float]) -> str:
+    """秒 -> 「1小时23分」/「45分」/「30秒」。"""
+    if not seconds or seconds <= 0:
+        return ""
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}小时{minutes:02d}分"
+    if minutes:
+        return f"{minutes}分{secs:02d}秒"
+    return f"{secs}秒"
+
+
+def _bool_text(value: Any, *, yes: str = "已触发", no: str = "正常") -> str:
+    return yes if value else no
+
+
+def parse_details(objects: Mapping[str, Any]) -> list[dict[str, str]]:
+    """把「能看但不参与归一化」的读数整理成界面可以直接显示的条目。
+
+    为什么单独一条：进度/温度这类会进 `DeviceStatus` 的字段是**有限的通用字段**，
+    而 Klipper 能给的远不止这些 —— 风扇转速、断料/堵料传感器、工具头板温度、
+    主机负载、MCU 版本、耗材用量、屏幕提示……这些各家的名字都不一样，
+    塞进通用状态模型会把模型撑爆。
+
+    所以这里返回**展示用的键值对**（``[{"label": "风扇", "value": "60%"}, …]``），
+    由界面按族无关的方式直接列出来。缺哪个字段就少一行，不会报错。
+
+    实测（Voron 2.4）：这里有十几项可看，见 `docs/FIELD_NOTES.md` §2.2。
+    """
+    if not isinstance(objects, Mapping):
+        return []
+    container = objects.get("result")
+    if isinstance(container, Mapping):
+        objects = container
+    status = objects.get("status")
+    if not isinstance(status, Mapping):
+        status = objects if "print_stats" in objects else {}
+    rows: list[dict[str, str]] = []
+
+    def add(label: str, value: str) -> None:
+        if value:
+            rows.append({"label": label, "value": value})
+
+    stats = status.get("print_stats")
+    if isinstance(stats, Mapping):
+        add("已打印", _duration_text(_as_float(stats.get("print_duration"))))
+        add("累计时长", _duration_text(_as_float(stats.get("total_duration"))))
+        filament = _as_float(stats.get("filament_used"))
+        if filament:
+            add("耗材用量", f"{filament / 1000:.2f} m" if filament > 1000 else f"{filament:.0f} mm")
+        add("提示信息", str(stats.get("message") or ""))
+
+    sdcard = status.get("virtual_sdcard")
+    if isinstance(sdcard, Mapping):
+        position = _as_float(sdcard.get("file_position"))
+        size = _as_float(sdcard.get("file_size"))
+        if position and size:
+            add("文件位置", f"{position / 1048576:.1f} / {size / 1048576:.1f} MB")
+
+    display = status.get("display_status")
+    if isinstance(display, Mapping):
+        add("屏幕提示", str(display.get("message") or ""))
+
+    extruder = status.get("extruder")
+    if isinstance(extruder, Mapping):
+        power = _as_float(extruder.get("power"))
+        if power is not None:
+            add("喷嘴加热", f"{power * 100:.0f}%")
+        if extruder.get("can_extrude") is False:
+            add("挤丝", "当前不可挤丝（温度不足或未归零）")
+        pressure = _as_float(extruder.get("pressure_advance"))
+        if pressure is not None:
+            add("压力提前", f"{pressure:g}")
+
+    bed = status.get("heater_bed")
+    if isinstance(bed, Mapping):
+        power = _as_float(bed.get("power"))
+        if power is not None:
+            add("热床加热", f"{power * 100:.0f}%")
+
+    toolhead = status.get("toolhead")
+    if isinstance(toolhead, Mapping):
+        position = toolhead.get("position")
+        if isinstance(position, (list, tuple)) and len(position) >= 3:
+            add("当前位置", f"X {position[0]:.1f}  Y {position[1]:.1f}  Z {position[2]:.1f}")
+        homed = str(toolhead.get("homed_axes") or "").upper()
+        if homed:
+            missing = [axis for axis in "XYZ" if axis.lower() not in homed.lower()]
+            add("归零状态", "XYZ 已归零" if not missing else f"未归零：{'/'.join(missing)}")
+        stalls = _as_int(toolhead.get("stalls"))
+        if stalls:
+            add("丢步", f"{stalls} 次")
+
+    move = status.get("gcode_move")
+    if isinstance(move, Mapping):
+        parts = []
+        speed = _as_float(move.get("speed_factor"))
+        if speed is not None:
+            parts.append(f"速度 {speed * 100:.0f}%")
+        flow = _as_float(move.get("extrude_factor"))
+        if flow is not None:
+            parts.append(f"流量 {flow * 100:.0f}%")
+        add("倍率", " · ".join(parts))
+
+    # 风扇：`fan` 与 `heater_fan <名字>` 都是对象，名字由设备决定
+    for name, value in status.items():
+        if not isinstance(value, Mapping):
+            continue
+        if name == "fan" or name.startswith("heater_fan"):
+            speed = _as_float(value.get("speed"))
+            if speed is not None:
+                text = f"{speed * 100:.0f}%"
+                rpm = _as_float(value.get("rpm"))
+                if rpm:
+                    text += f"（{rpm:.0f} rpm）"
+                add(f"风扇 {name.replace('heater_fan ', '')}", text)
+        elif name.startswith("temperature_sensor"):
+            temperature = _as_float(value.get("temperature"))
+            if temperature is not None:
+                add(f"温度 {name.replace('temperature_sensor ', '')}", f"{temperature:.1f}℃")
+        elif name.startswith("filament_switch_sensor"):
+            # ⚠️ 语义踩过坑：断料开关的 `filament_detected: true` 表示**有料**
+            # （真机实测：正在打印时它是 true）。第一版把两个分支写反了，
+            # 于是打印机好好地在打，界面上却写「无料」。
+            add(
+                f"断料检测 {name.replace('filament_switch_sensor ', '')}",
+                "有料" if value.get("filament_detected") else "无料（已触发）",
+            )
+        elif name.startswith("filament_motion_sensor"):
+            # 走料检测给的是**瞬时**状态：挤出间隙、回抽、空驶时读到 false 是正常的。
+            # 所以这里只如实转述，**不下"堵料"结论** —— 真机上正是这一条在
+            # 正常打印时显示成「可能堵料」，属于自己造出来的假警报。
+            add(
+                f"走料检测 {name.replace('filament_motion_sensor ', '')}",
+                "检测到走料" if value.get("filament_detected") else "未检测到（瞬时值）",
+            )
+        elif name.startswith("output_pin") or name.startswith("led") or name.startswith("neopixel"):
+            add(f"输出 {name}", str(value.get("value", "")))
+
+    system = status.get("system_stats")
+    if isinstance(system, Mapping):
+        parts = []
+        cpu = _as_float(system.get("sysload"))
+        if cpu is not None:
+            parts.append(f"负载 {cpu:.2f}")
+        mem_avail = _as_float(system.get("memavail"))
+        mem_total = _as_float(system.get("memtotal"))
+        if mem_avail and mem_total:
+            parts.append(f"内存 {(mem_total - mem_avail) / mem_total * 100:.0f}%")
+        add("主机", " · ".join(parts))
+
+    mcu = status.get("mcu")
+    if isinstance(mcu, Mapping):
+        version = str(mcu.get("mcu_version") or "")
+        if version:
+            # 真机给的是 "v0.13.0-770-gce7002bed" 这种长串，界面只要版本号那一段
+            add("MCU 固件", version.split("-", 1)[0])
+
+    return rows
+
 
 class MoonrakerAdapter(PollingDeviceSession):
     """一台 Moonraker 设备的监控会话。
@@ -228,6 +419,10 @@ class MoonrakerAdapter(PollingDeviceSession):
         #: 非主画面的最近一帧：``{index: (seq, jpeg)}``
         self._extra_frames: dict[int, tuple[int, bytes]] = {}
         self._extra_seq = 0
+        #: 扩展对象（风扇 / 传感器 / 主机状态…）的清单与最近一次读到的读数。
+        self._extra_objects: list[str] = []
+        self._extra_objects_probed = False
+        self._details: list[dict[str, str]] = []
         #: 相对 URL 的基准地址（**探测出来的**）：Moonraker 的 webcams.list 给的是
         #: 相对路径（``/webcam/?action=snapshot``），它由 crowsnest / 前端挂在**主机
         #: 80 端口**上，Moonraker 自己的端口上并没有这个路径（实测 404）。
@@ -301,11 +496,52 @@ class MoonrakerAdapter(PollingDeviceSession):
         return json.loads(body.decode("utf-8", errors="replace"))
 
     def _fetch_status(self) -> Mapping[str, Any]:
-        payload = {"objects": {name: None for name in QUERY_OBJECTS}}
+        payload = {"objects": {name: None for name in self._wanted_objects()}}
         raw = self._request("/printer/objects/query", payload, method="POST")
         self.status.raw.update(raw if isinstance(raw, dict) else {})
+        self._details = parse_details(raw)
         self._maybe_keepalive()
         return parse_status(raw)
+
+    def _wanted_objects(self) -> list[str]:
+        """要查询的对象：固定那几个 + **这台设备实际上有的**扩展对象。
+
+        扩展对象的名字由设备配置决定（``heater_fan fan0``、``temperature_sensor EBBCan``、
+        ``filament_switch_sensor 断料监测``…），不可能写死在代码里；
+        所以启动时读一次 ``/printer/objects/list``，按前缀挑出我们认得的那些。
+        查询一个设备没有的对象会被 Klipper 忽略（不报错），但白白增加报文体积，
+        所以这里只查确认存在的。
+        """
+        if not self._extra_objects and not self._extra_objects_probed:
+            self._extra_objects_probed = True
+            try:
+                data = self._request("/printer/objects/list")
+                names = (data.get("result") or {}).get("objects") if isinstance(data, dict) else None
+                if isinstance(names, list):
+                    self._extra_objects = [
+                        str(name)
+                        for name in names
+                        if isinstance(name, str)
+                        and (
+                            name == "fan"
+                            or name.split(" ", 1)[0] in DETAIL_OBJECT_PREFIXES
+                        )
+                    ]
+                    LOGGER.info(
+                        "Moonraker 扩展对象 %d 个：%s",
+                        len(self._extra_objects),
+                        "、".join(self._extra_objects),
+                    )
+            except Exception as exc:  # noqa: BLE001 - 拿不到就只看固定字段
+                LOGGER.debug("objects/list 探测失败：%s", exc)
+        return [*QUERY_OBJECTS, *self._extra_objects]
+
+    def details(self) -> list[dict[str, str]]:
+        """设备能提供但不在通用状态模型里的读数（风扇、传感器、主机负载…）。
+
+        真机（Voron 2.4）实测有十几项，见 `docs/FIELD_NOTES.md` §2.2。
+        """
+        return list(self._details)
 
     def _fetch_frame(self) -> Optional[bytes]:
         """取主画面（``index 0``）。

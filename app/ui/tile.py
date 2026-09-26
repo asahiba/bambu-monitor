@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QFont, QGuiApplication
@@ -26,6 +27,60 @@ from ..core.device import DisplayStatus, camera_status_text, display_status
 from . import theme
 from .frame_decoder import FrameDecoder
 from .video_widget import VideoWidget
+
+#: 信息行里优先并排显示的读数（按这个顺序挑，最多 :data:`_INLINE_DETAIL_LIMIT` 条）。
+#:
+#: 为什么只挑几条、其余进 tooltip：Klipper/Moonraker 这类设备实测能给出十几条读数
+#: （风扇 / 断料与走料传感器 / 工具头板温度 / 耗材用量…，Voron 2.4 上是 18 条），
+#: 全部铺进信息行会把卡片撑高、把画面挤小 —— 而画面才是这个界面的主角。
+_INLINE_DETAIL_PRIORITY: tuple[str, ...] = (
+    "耗材用量",  # 还剩多少料：换料/断料判断的第一步
+    "已打印",  # 这一件打了多久
+    "风扇",  # 风扇停了是堵料/过热的前兆
+    "断料检测",  # 断料开关
+    "走料检测",  # 走料传感器（瞬时值）
+)
+
+#: 信息行里最多并排几条这样的读数
+_INLINE_DETAIL_LIMIT = 3
+
+
+def session_details(session: Any) -> list[dict[str, str]]:
+    """读会话的额外读数（``session.details()``），拿不到就返回空列表。
+
+    * 拓竹那族（以及没有这个方法的旧会话）就是空列表 —— 此时界面**整块不显示**：
+      不给空框、不留空行，信息行与卡片提示都与改造前完全一致；
+    * 读数取不到（适配器内部异常）不能把整路画面带崩，所以这里兜住异常。
+    """
+    getter = getattr(session, "details", None)
+    if not callable(getter):
+        return []
+    try:
+        rows = getter()
+    except Exception:  # noqa: BLE001 - 读数只是锦上添花，不能影响画面刷新
+        return []
+    if not isinstance(rows, list):
+        return []
+    clean: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("label"):
+            continue
+        clean.append({"label": str(row["label"]), "value": str(row.get("value", ""))})
+    return clean
+
+
+def inline_details(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """从读数里挑出并排进信息行的几条（完整清单仍然在 tooltip 里）。"""
+    picked: list[dict[str, str]] = []
+    for keyword in _INLINE_DETAIL_PRIORITY:
+        for row in rows:
+            if row in picked or keyword not in row["label"]:
+                continue
+            picked.append(row)
+            break
+        if len(picked) >= _INLINE_DETAIL_LIMIT:
+            break
+    return picked
 
 
 class _Badge(QLabel):
@@ -403,21 +458,46 @@ class CameraTile(QFrame):
         else:
             self.hms_badge.setVisible(False)
 
-        # 把通道提示（例如 RTSPS 回退、缺少依赖）放到鼠标提示里
+        # 把通道提示（例如 RTSPS 回退、缺少依赖）与设备读数放到鼠标提示里
+        self._refresh_tooltip(status)
+
+    def _refresh_tooltip(self, status: DisplayStatus) -> None:
+        """拼卡片 tooltip：通道告警 + 「设备能提供但不属于通用状态模型」的完整读数清单。
+
+        ⚠️ 这个方法同时被 `_update_status_panel()` 与 `_update_info_row()` 调用：
+        信息行是这两处唯一会变的东西，读数的并排显示在信息行里、完整清单在这里，
+        两边必须同进同出（只刷新信息行却不刷新 tooltip，读数就会漏在 tooltip 外面）。
+        重复调用是安全的：`self._tooltip` 做了缓存比较，内容没变就不会重设。
+        """
         tips = list(self.session.warnings)
         if status.last_error:
             tips.append(status.last_error)
         if self.session.last_camera_detail:
             tips.append(f"视频通道：{self.session.video_backend}（{self.session.last_camera_detail}）")
+        # 设备读数（风扇 / 传感器 / 耗材用量…）：十几条在信息行里放不下，逐条列在这里。
+        # 空列表时**一行都不加**，tooltip 内容与改造前完全一致（拓竹那族就是这样）。
+        for row in self._detail_rows(status):
+            tips.append(f"{row['label']}：{row['value']}")
         tooltip = "\n".join(dict.fromkeys(tips)) if tips else ""
         if tooltip != self._tooltip:
             self._tooltip = tooltip
             self.setToolTip(tooltip)
 
+    def _detail_rows(self, status: DisplayStatus) -> list[dict[str, str]]:
+        """本设备可展示的额外读数；遥测没上来时返回空列表。
+
+        离线时设备读数多半是上一次轮询留下的旧值，跟「离线」角标放在一起会误导，
+        所以与信息行同一个判据：没有遥测就整块不显示。
+        """
+        if not (status.mqtt_online or status.last_message_ts):
+            return []
+        return session_details(self.session)
+
     def _update_info_row(self, status: DisplayStatus) -> None:
         """喷嘴/热床/仓温/层数/WiFi/预计完成/错误码，渲染成一个可换行的富文本标签。"""
         if not (status.mqtt_online or status.last_message_ts):
             self._set_text(self.info_label, "")
+            self._refresh_tooltip(status)
             return
         accent = theme.ACCENT
         dim = theme.TEXT_DIM
@@ -441,7 +521,14 @@ class CameraTile(QFrame):
             if status.print_error_text:
                 label = f"{label} {status.print_error_text}"
             parts.append(f"<b style='color:{theme.ERROR}'>{label}</b>")
+        # 该设备「能看但不进通用状态模型」的读数：只把最关键的 2-3 条并在这里
+        # （完整清单进 tooltip，见 _refresh_tooltip）—— 十几条全铺开会把卡片撑高。
+        for row in inline_details(self._detail_rows(status)):
+            # 这个标签是 RichText：读数来自设备，必须转义，否则值里的 `<` 会被当标签解析
+            parts.append(f"{html.escape(row['label'], quote=False)} {html.escape(row['value'], quote=False)}")
         self._set_text(self.info_label, "&nbsp;&nbsp;".join(parts))
+        # tooltip 里带着这些读数的完整清单，信息行刷新时一并刷新（见 _refresh_tooltip 的说明）
+        self._refresh_tooltip(status)
 
     def _update_filament_row(self, status: DisplayStatus) -> None:
         """耗材行：AMS 各槽位色块 + 类型 + 余量，以及外挂料盘（单个可换行标签）。"""

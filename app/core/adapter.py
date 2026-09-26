@@ -238,6 +238,15 @@ class PollingDeviceSession:
         with self._lock:
             return self._frame_seq, self._latest_frame
 
+    def details(self) -> list[dict[str, str]]:
+        """设备能提供、但不属于通用状态模型的读数（风扇、传感器、主机负载…）。
+
+        返回 ``[{"label": "风扇", "value": "60%"}, …]``，界面按族无关的方式直接列出。
+        基类默认返回空列表：拓竹那边的这类信息已经落在 ``PrinterStatus`` 的具体字段里，
+        由界面自己读；第三方族（Moonraker）字段又杂又多，走这条通路更合适。
+        """
+        return []
+
     @property
     def camera_fps(self) -> float:
         elapsed = time.time() - self._started_at if self._started_at else 0.0

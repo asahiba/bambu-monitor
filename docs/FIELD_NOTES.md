@@ -499,6 +499,22 @@ Moonraker 自己的端口后面没有这个路径。程序原来把相对地址�
 **剩余时间**：Klipper 没有原生字段，但有两个正经来源 ——
 `print_stats.print_duration / virtual_sdcard.progress`（按已打印时长外推），
 或 `GET /server/files/metadata?filename=<path>` 的 `estimated_time`（切片器给的，更准）。
+实测 23% / 已打印 67 分钟时外推得 3 小时 45 分，与文件名的 `4h37m` 估算基本吻合。
+进度小于 5% 或没有 `print_duration` 时**不猜**（显示 `--`）。
+
+### ⚠️ 两个料丝传感器的语义（照抄字段会造出假警报）
+
+| 对象 | 原始值（打印中实测） | 正确读法 |
+| --- | --- | --- |
+| `filament_switch_sensor 断料监测` | `filament_detected: true` | **true = 有料**。写成"无料"就是反的 |
+| `filament_motion_sensor 转堵监测` | `filament_detected: false` | 这是**瞬时**值：挤出间隙/回抽/空驶时读到 false 很正常，**不能据此报"堵料"** |
+
+第一版把前者写反、把后者当成故障诊断，结果打印机正常打印时界面上出现
+「无料」「可能堵料」两条假警报。现在前者按"有料/无料（已触发）"、后者按
+"检测到走料/未检测到（瞬时值）"如实转述。
+
+顺带一个 UI 事实：这些读数一共十几条，**不能全塞进卡片**（会把卡片撑爆），
+所以走 `details()` 这条展示通路，默认收在「详情」里。
 
 ### 🔧 可用操作（gcode_macro，共 16 个）
 
