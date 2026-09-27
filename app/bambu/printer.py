@@ -12,6 +12,7 @@ from .models import PrinterInfo, PrinterStatus
 from .mqtt_worker import MqttWorker
 from .timeouts import (
     CAMERA_STREAM_JOIN,
+    FRAME_STALE_TOLERANCE,
     MQTT_PROBE_INTERVAL,
     MQTT_PROBE_SILENCE,
     MQTT_PROBE_TIMEOUT,
@@ -93,6 +94,8 @@ class PrinterSession:
         self._mqtt_probe_request_at = 0.0
         #: 上一次重建遥测的时刻。重建本身要花时间，短时间内不该反复重建。
         self._mqtt_restart_at = 0.0
+        #: 连续重建次数：用来把冷却时间逐次拉长（设备关机时别每 90 秒刷一遍日志）
+        self._mqtt_restart_failures = 0
 
     # ------------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -264,6 +267,7 @@ class PrinterSession:
             # 明确健康：在线且报文新鲜。**绝不重建**（老写法就是在这里误报的）
             self._mqtt_probe_sent_at = 0.0
             self._mqtt_probe_baseline = last_message
+            self._mqtt_restart_failures = 0
             return
 
         if self._mqtt_probe_sent_at:
@@ -275,9 +279,13 @@ class PrinterSession:
                 self._mqtt_probe_sent_at = 0.0
                 self._mqtt_probe_baseline = last_message
                 return
-            # 探活没回应：确认没反应，再看距离上次成功连接够不够久
+            # 探活没回应：确认没反应，再看距离上次成功连接够不够久。
+            # 冷却时间**逐次拉长**（90 秒 → 3 分 → 6 分 → 12 分）：真机日志里能看到
+            # 关机的打印机被每 90 秒重建一次，一晚上几百条日志，把真正的问题淹掉；
+            # 设备回来后第一次探活成功就会把计数清零。
+            cooldown = MQTT_STUCK_SECONDS * min(2 ** min(self._mqtt_restart_failures, 3), 8)
             last_ok = max(worker.last_connected_at, worker.first_attempt_at)
-            cooldown_over = (now - self._mqtt_restart_at) >= MQTT_STUCK_SECONDS
+            cooldown_over = (now - self._mqtt_restart_at) >= cooldown
             if last_ok and (now - last_ok) >= MQTT_STUCK_SECONDS and cooldown_over:
                 self.warnings.append(
                     f"遥测 {int(silent_for) if silent_for != float('inf') else MQTT_STUCK_SECONDS}"
@@ -286,6 +294,7 @@ class PrinterSession:
                 LOGGER.warning("MQTT 无响应，重建连接：%s", self.info.ip)
                 self._mqtt_probe_sent_at = 0.0
                 self._mqtt_restart_at = now
+                self._mqtt_restart_failures += 1
                 try:
                     worker.restart()
                 except Exception:  # noqa: BLE001 - 自愈失败不能把看门狗线程带走
@@ -512,11 +521,25 @@ class PrinterSession:
             if rtsp_only:
                 # 该机型只有 RTSPS 一条路，绝不能退回 6000（那边一定失败）。
                 # 交由看门狗周期性重试。
+                #
+                # 真机实测（三台 X2D，2026-09）：322 端口 TCP 永远可连，但打印机的
+                # 实时画面服务**会不定期地完全不响应 TLS 握手** —— 于是"取不到画面"
+                # 最常见的原因不是我们连错，而是①打印机上「局域网实时画面」被关掉了，
+                # ②别的客户端（Bambu Studio / 手机 App）正占着那一路画面。
+                # 这两条都能让用户自己解决，所以直接写出来，别只说"未取到画面"。
+                last_detail = stream.detail or ""
+                reason = ""
+                if "没有响应" in last_detail:
+                    reason = "（打印机没有应答，通常是被别的客户端占着，或者该功能被关掉了）"
                 self.warnings.append(
-                    "RTSPS(322) 未取到画面：请在打印机屏幕上开启「局域网实时画面 / LAN Mode Liveview」"
+                    "RTSPS(322) 未取到画面" + reason + "：请确认打印机屏幕上"
+                    "「局域网实时画面 / LAN Mode Liveview」已开启，"
+                    "并且没有别的设备（Bambu Studio / 手机 App）正在看同一路画面"
                 )
                 self.video_channel = "rtsp"
-                self._set_state_hint("RTSPS 未取到画面，等待重试")
+                self._set_state_hint(
+                    "RTSPS 未取到画面，等待重试" + ("：打印机未应答" if reason else "")
+                )
                 return
             self.warnings.append("RTSPS(322) 未取到画面，已回退到 6000 端口")
             channel = "tcp6000"
@@ -598,7 +621,23 @@ class PrinterSession:
             # 口令没错（遥测都通了），那就不是访问代码的问题
             detail = "6000 端口不支持该机型，正在改用 RTSPS(322) 通道"
             self.last_camera_detail = detail
-        self.status.camera_online = state == CameraStream.STATE_STREAMING
+        # ⚠️ 「正在连接/重连」**不等于画面断了**：RTSPS 的流会自己重连
+        # （真机实测 X2D：打印机的实时画面服务会不定期拒掉新连接，我们于是
+        # connecting → streaming → connecting 来回跳）。如果这时候立刻把
+        # camera_online 置假，界面上就会不停闪「画面重连中」，而其实画面还在动。
+        # 判据用"上一帧有多新"：6 秒内有帧就仍然算在线。
+        recent_frame = False
+        for stream in (self._rtsp, self._camera):
+            age = getattr(stream, "last_frame_age", None)
+            if age is not None and age < FRAME_STALE_TOLERANCE:
+                recent_frame = True
+                break
+        if state == CameraStream.STATE_STREAMING:
+            self.status.camera_online = True
+        elif state in (CameraStream.STATE_CONNECTING, CameraStream.STATE_RETRYING):
+            self.status.camera_online = recent_frame
+        else:
+            self.status.camera_online = False
         if state == CameraStream.STATE_AUTH_ERROR:
             self.status.last_error = detail
         self._emit("camera")

@@ -159,6 +159,11 @@ class PollingDeviceSession:
         next_frame = 0.0
         while not self._stop_event.is_set():
             now = time.time()
+            # ⚠️ `max_fps = 0` 在界面上是"不限制帧率"，但这里**绝不能**理解成"不取帧"：
+            # 用户把每路帧率设成 0 之后，所有快照型设备（Klipper / Moonraker）会永久
+            # 停在「画面未启动」—— 真机上就是这么复现的（Voron 的遥测和读数都正常，
+            # 只有画面一直空着）。0 按 UNLIMITED_FPS 处理。
+            effective_fps = self._max_fps if self._max_fps > 0 else self.UNLIMITED_FPS
             if now >= next_status:
                 self._poll_status()
                 interval = self._poll_interval
@@ -166,12 +171,17 @@ class PollingDeviceSession:
                     # 连续失败：逐步退避，最长 max_poll_interval，避免离线设备被高频轮询
                     interval = min(self.max_poll_interval, interval * (1 + self._failures))
                 next_status = time.time() + interval
-            if self.capabilities.has_camera and self._max_fps > 0 and now >= next_frame:
+            if self.capabilities.has_camera and effective_fps > 0 and now >= next_frame:
                 self._poll_frame()
-                next_frame = time.time() + (1.0 / self._max_fps)
+                next_frame = time.time() + (1.0 / effective_fps)
             elif not self.capabilities.has_camera:
                 next_frame = time.time() + 60.0  # 无摄像头：不必频繁判断
             self._stop_event.wait(0.05)
+
+    #: ``max_fps = 0`` 表示"不限制帧率"（设置界面的原话），
+    #: 但轮询型设备族**不能真的不限速**：快照就是一次 HTTP 请求，
+    #: 不限速等于把设备打满。所以按这个上限跑，而不是 0 = 不取帧。
+    UNLIMITED_FPS = 10.0
 
     def _poll_status(self) -> None:
         try:

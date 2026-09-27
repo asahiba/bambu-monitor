@@ -9,14 +9,25 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
+import socket
+import ssl
 import threading
 import time
 from typing import Callable, Optional
 from urllib.parse import quote
 
 from .ports import RTSP_PORT
-from .timeouts import RTSP_FIRST_FRAME_TIMEOUT, RTSP_OPEN_TIMEOUT_MS
+from .timeouts import (
+    RTSP_FIRST_FRAME_TIMEOUT,
+    RTSP_OPEN_TIMEOUT_MS,
+    RTSPS_PREFLIGHT_PAUSE,
+    RTSPS_PREFLIGHT_TIMEOUT,
+    RTSPS_STALE_READ_SECONDS,
+)
+
+LOGGER = logging.getLogger("bambu-monitor.rtsp")
 
 # 自签证书 + 强制 TCP 传输，必须在导入 cv2 之前设置
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|tls_verify;0")
@@ -68,6 +79,62 @@ class RtspStream(threading.Thread):
     def available() -> bool:
         return importlib.util.find_spec("cv2") is not None
 
+    def preflight(self, path: str = "", timeout: float = RTSPS_PREFLIGHT_TIMEOUT) -> tuple[bool, str]:
+        """用**纯 Python** 快速探一次「打印机这次会不会理我们」。
+
+        ## 为什么必须有这一步
+
+        真机实测（X2D，2026-09）：322 端口 TCP 永远可连，但 **TLS 握手会不定期地
+        完全没有响应** —— 连续握 4 次，2 次超时（TLS 1.2 与 1.3 都会中招，所以不是
+        协议版本问题）。也就是说这台设备的实时画面服务大约一半的新连接会石沉大海。
+
+        而 OpenCV / FFmpeg 那条路**拿不到这个控制权**：`CAP_PROP_OPEN_TIMEOUT_MSEC`
+        管不到 TLS 握手，一次石沉就能让 `VideoCapture` 卡上十几秒甚至更久，
+        表现出来就是用户说的「画面经常卡住」，尤其是帧率高的机型（X2D / H2 / P2S）
+        —— 它们的数据量大，连接被挂住的概率也更高。
+
+        所以先用我们自己的 socket + ssl 探一下（超时可控、TLS 版本自动降级），
+        拿到 RTSP 的响应行才算「这次能用」，再去开 OpenCV。探不通就等一小会儿重来，
+        而不是让 FFmpeg 白等十几秒。
+
+        :returns: ``(是否可用, 说明)``；说明里带响应行或失败原因。
+        """
+        target = path or self.active_path
+        url = self.url(path=target)
+        request = (
+            f"DESCRIBE {url} RTSP/1.0\r\n"
+            f"CSeq: 1\r\n"
+            f"Accept: application/sdp\r\n"
+            f"User-Agent: BambuMonitor\r\n\r\n"
+        ).encode("ascii", "ignore")
+        # ⚠️ 这里自己建 socket，**不用 `tlsutil.connect_tls`**：那个函数会把超时换成
+        # 它自己的 HANDSHAKE_TIMEOUT、还会按候选参数逐个重试，实测一次要 12 秒 ——
+        # 而这一步的全部意义就是"快"。自己用一个上下文、把超时卡死在 timeout 上。
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        tls = None
+        try:
+            raw = socket.create_connection((self.host, RTSP_PORT), timeout=timeout)
+            raw.settimeout(timeout)
+            tls = context.wrap_socket(raw, server_hostname=self.host)
+            tls.settimeout(timeout)
+            tls.sendall(request)
+            data = tls.recv(2048).decode("utf-8", "replace")
+        except Exception as exc:  # noqa: BLE001 - 探测失败很常见，交给调用方重试
+            return False, f"RTSP 服务没有响应（{type(exc).__name__}: {exc}）"
+        finally:
+            if tls is not None:
+                try:
+                    tls.close()
+                except OSError:
+                    pass
+        status = data.splitlines()[0].strip() if data else ""
+        if "RTSP/1.0" not in status:
+            return False, f"RTSP 响应异常：{status or '（空）'}"
+        # 401 也算通：说明服务活着，只是等我们带上 Digest 鉴权（OpenCV 会自己带）
+        return True, status
+
     #: 不同机型/固件的 RTSP 路径可能不同，按顺序尝试
     DEFAULT_PATHS = ("/streaming/live/1", "/streaming/live/2", "/live/1")
 
@@ -96,18 +163,19 @@ class RtspStream(threading.Thread):
             return self._latest_seq, self._latest
 
     def wait_first_frame(self, timeout: float = RTSP_FIRST_FRAME_TIMEOUT) -> Optional[bytes]:
-        """等待首帧；一旦确定连不上就提前返回，避免白白等满超时。"""
+        """等待首帧。
+
+        ⚠️ ``retrying`` **不算失败**：现在开流前会先做纯 Python 预探，打印机不理我们时
+        会快速重试（真机上约一半的新连接会石沉），这时候继续等才可能等到首帧。
+        只有 ``auth_error``（口令不对）与 ``stopped``（已停）才值得提前放弃 ——
+        以前把 ``retrying`` 也算失败，于是首次预探一失败就立刻返回，界面显示没画面，
+        而其实再试一次就通了。
+        """
         deadline = time.time() + timeout
-        started = time.time()
         while time.time() < deadline:
             if self._first_frame_event.wait(0.2):
                 return self.latest_frame()[1]
-            failed = self.state in (
-                self.STATE_RETRYING,
-                self.STATE_AUTH_ERROR,
-                self.STATE_STOPPED,
-            )
-            if failed and (time.time() - started) > 1.5:
+            if self.state in (self.STATE_AUTH_ERROR, self.STATE_STOPPED):
                 return None
         return None
 
@@ -145,6 +213,8 @@ class RtspStream(threading.Thread):
             return
 
         backoff = 2.0
+        #: 预探连续失败次数：连着探不通就按退避等待，别把打印机的实时画面服务压垮
+        preflight_failures = 0
         while not self._stop_event.is_set():
             path = self._paths[self._path_index % len(self._paths)]
             self._set_state(
@@ -152,7 +222,24 @@ class RtspStream(threading.Thread):
             )
             capture = None
             try:
-                # 给 FFmpeg 设置打开/读取超时，避免打印机未开启该服务时长时间卡住
+                # ① 先用纯 Python 探一次（真机上约一半的新连接会石沉，见 preflight 的说明）：
+                #    探不通就快速重来，而不是让 OpenCV/FFmpeg 在里面白等十几秒。
+                ok, why = self.preflight(path)
+                if not ok:
+                    preflight_failures += 1
+                    self._set_state(self.STATE_RETRYING, why)
+                    if preflight_failures >= 3:
+                        # 连探 3 次都不理：退到另一条候选路径试试（有的固件路径不同）
+                        self._path_index += 1
+                    if self._stop_event.wait(
+                        RTSPS_PREFLIGHT_PAUSE * min(preflight_failures, 5)
+                    ):
+                        break
+                    continue
+                if preflight_failures:
+                    LOGGER.info("RTSPS 预探第 %d 次恢复响应（%s）", preflight_failures, why)
+                    preflight_failures = 0
+                # ② 给 FFmpeg 设置打开/读取超时，避免打印机未开启该服务时长时间卡住
                 params = [
                     int(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC),
                     int(self._open_timeout_ms),
@@ -189,9 +276,18 @@ class RtspStream(threading.Thread):
                             if self._stop_event.wait(min(gap, 0.5)):
                                 break
                             continue
+                    read_started = time.time()
                     ok, frame = capture.read()
                     if not ok or frame is None:
                         self._set_state(self.STATE_RETRYING, "RTSPS 画面中断，正在重连")
+                        break
+                    # 读到的帧太旧说明这次连接其实已经废了（FFmpeg 里可能积压了数据）：
+                    # 丢掉过期帧，别把几分钟前的画面当"最新"贴到界面上
+                    age = time.time() - read_started
+                    if age > RTSPS_STALE_READ_SECONDS:
+                        self._set_state(
+                            self.STATE_RETRYING, f"RTSPS 取帧卡了 {age:.0f} 秒，正在重连"
+                        )
                         break
                     last_emit = time.time()
                     # 先缩小再编码：1080p → 画面实际尺寸，CPU 与带宽都省一大截

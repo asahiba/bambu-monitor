@@ -202,3 +202,23 @@ def test_只有一路时行为与以前一致(mode):
             assert len(adapter.cameras()) == 1
         finally:
             adapter.stop()
+
+
+def test_帧率设为0也要取画面():
+    """契约：`max_fps = 0` 是「不限制帧率」，**不是**「不取帧」。
+
+    真机回归：用户把每路的帧率设成 0 之后，Voron 的画面永远停在「画面未启动」——
+    遥测和详细读数都正常，只有画面是空的。原因是轮询循环把 ``0`` 当成了
+    「别取帧」（`if self._max_fps > 0`），而设置界面里 0 的说明是"不限制帧率"。
+    现在 0 按 `UNLIMITED_FPS` 处理（快照就是一次 HTTP 请求，真不限速会把设备打满）。
+    """
+    with FakeMoonraker() as fake:
+        adapter = _adapter(fake)
+        try:
+            adapter.set_max_fps(0.0)
+            adapter.start()
+            assert _wait_until(lambda: adapter.latest_frame()[1] is not None), (
+                "帧率设成 0 之后就不取画面了（真机上表现为画面永远空着）"
+            )
+        finally:
+            adapter.stop()

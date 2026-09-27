@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from typing import Optional
@@ -28,6 +29,8 @@ from . import theme
 from .add_dialog import PrinterEditDialog
 from .discover_dialog import DiscoverDialog
 from .tile import CameraTile
+
+LOGGER = logging.getLogger("bambu-monitor.ui")
 
 REFRESH_MS = 100
 #: 画面最小宽度（低于这个值就没法看了）；用于计算「窗口宽度最多能放几列」
@@ -58,6 +61,8 @@ class MainWindow(QMainWindow):
         self.tiles: list[CameraTile] = []
         self.single_tile: Optional[CameraTile] = None
         self.web = None
+        #: 桌面版同时跑着的 WebHost（网页端的设备管理/设置都经它落到同一份配置上）
+        self._web_host = None
 
         self._build_toolbar()
         self._build_center()
@@ -221,6 +226,53 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status_hint)
 
     # ------------------------------------------------------------------ 打印机管理
+    def _on_web_host_change(self) -> None:
+        """网页端改了设备列表/顺序/画面大小之后，让桌面界面跟着同步。
+
+        没有这一步的话：从网页加的设备在桌面上看不到、网页删掉的在桌面上还留着、
+        网页调过的顺序桌面也不认 —— 同一份配置两套界面各显示一半，是最容易让人
+        以为"数据丢了"的那种不一致。
+
+        `WebHost` 的 on_change 是在**服务线程**里回调的，而 Qt 控件只能在主线程动，
+        所以用 `QTimer.singleShot(0, …)` 把真正的重排丢回主线程执行。
+        """
+        QTimer.singleShot(0, self.reload_from_config)
+
+    def reload_from_config(self) -> None:
+        """按配置重建监控墙（停掉已删除的、补上新增的、按配置顺序重排）。
+
+        ⚠️ 这里会重建卡片，所以**正在显示的画面会重新开始**（几秒后就有新帧）。
+        只应在"配置被外部改过"时调用（网页端增删设备/改顺序/改大小）。
+        """
+        wanted = list(self.config.printers)
+        current = {id(session.info): session for session in self.sessions}
+        # 1) 删掉配置里已经没有的
+        for session in list(self.sessions):
+            if all(item is not session.info for item in wanted):
+                tile = next((t for t in self.tiles if t.session is session), None)
+                if tile is not None:
+                    self._detach_tile(tile)
+        # 2) 补上配置里新出现的（在网页上添加的设备）
+        known_ips = {session.info.ip for session in self.sessions}
+        for info in wanted:
+            if info.ip not in known_ips:
+                self.add_printer(info, autostart=True)
+        # 3) 按配置里的顺序重排（网页上「上移/下移/移到最后」改的就是它）
+        order = {id(item): position for position, item in enumerate(wanted)}
+        tiles = sorted(
+            self.tiles,
+            key=lambda tile: order.get(id(tile.session.info), len(order)),
+        )
+        self.sessions[:] = [tile.session for tile in tiles]
+        self.tiles[:] = tiles
+        self.rebuild_grid()
+        self._persist()
+        LOGGER.debug(
+            "按配置重建监控墙：%d 台（其中 %d 台沿用原会话）",
+            len(self.tiles),
+            len(current),
+        )
+
     def _persist(self) -> None:
         """立即写盘：避免程序异常退出时丢失刚填好的访问代码。"""
         self.config.printers = [session.info for session in self.sessions]
@@ -735,6 +787,28 @@ class MainWindow(QMainWindow):
         self._persist()
         self._notify("设置已保存")
 
+    def _update_settings_from_web(self, body: dict) -> dict:
+        """网页端「设置」保存之后，把改动**作用到正在跑的桌面上**。
+
+        网页版与桌面版共用同一份 `AppConfig`，但帧率/刷新间隔这些东西在桌面侧是
+        "已经生效的运行时状态"（每个会话的取帧上限、卡片刷新定时器、网页转码线程），
+        只写配置不改运行时会出现"网页上改了、桌面上看不出变化"。
+        """
+        result = self._web_host.update_settings(body) if self._web_host else {
+            "ok": False,
+            "detail": "设置服务未就绪",
+        }
+        if not result.get("ok"):
+            return result
+        for session in self.sessions:
+            session.set_max_fps(self.config.max_fps)
+        self._refresh_timer.setInterval(max(50, int(self.config.refresh_ms)))
+        if self.web is not None and self.web.running:
+            self.web.set_fps(self.config.web_fps, self.config.web_max_width)
+        self._persist()
+        self._notify("网页端改了设置，已同步到桌面版")
+        return result
+
     def toggle_web_server(self, enabled: bool) -> None:
         if enabled:
             self.start_web_server(show_dialog=True)
@@ -745,18 +819,39 @@ class MainWindow(QMainWindow):
             self._notify("已关闭网页监控")
 
     def start_web_server(self, show_dialog: bool = False) -> None:
+        from ..web.host import WebHost
         from ..web.server import WebServer
 
         if self.web is not None and self.web.running:
             if show_dialog:
                 self._show_web_dialog()
             return
+        # ⚠️ 以前这里**一个回调都不传**，于是从桌面版打开的网页里：
+        # 添加/删除/编辑/重连设备、通道诊断、刷新画面与选摄像头、全部连接/断开、
+        # 画面顺序、配置导入导出、看自己的地址与令牌 —— 全部返回「该运行方式不支持」。
+        # 用户的原话就是「桌面版上网页还是有一些功能不可用，例如重新连接打印机画面」。
+        # 现在把与无界面版（headless）**同一套** WebHost 接上去，两条路的能力就一致了。
+        host = WebHost(self.config, lambda: self.sessions, on_change=self._on_web_host_change)
+        self._web_host = host
         server = WebServer(
             get_sessions=lambda: list(self.sessions),
             port=self.config.web_port,
             token=self.config.web_token,
             fps=self.config.web_fps,
             max_width=self.config.web_max_width,
+            discover_fn=host.discover,
+            add_printer_fn=host.add_printer,
+            manage_printer_fn=host.manage_printer,
+            get_settings_fn=host.get_settings,
+            update_settings_fn=self._update_settings_from_web,
+            export_config_fn=host.export_config_text,
+            import_config_fn=host.import_config_text,
+            diagnose_fn=host.diagnose,
+            layout_fn=host.set_tile_span,
+            camera_action_fn=host.camera_action,
+            reorder_fn=host.reorder,
+            sessions_action_fn=host.sessions_action,
+            info_fn=host.info,
         )
         if not server.start():
             self.action_web.setChecked(False)

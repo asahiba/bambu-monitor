@@ -70,6 +70,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=0, help="服务端口（0 = 用该族默认端口）")
     parser.add_argument("--code", default="", help="拓竹的访问代码；不填则从配置里找")
     parser.add_argument("--wait", type=float, default=12.0, help="等首帧/首状态的秒数")
+    parser.add_argument(
+        "--max-fps",
+        type=float,
+        default=0.0,
+        help=(
+            "每路画面的帧率上限（0 = 不限制；默认就用 0，因为用户配置里常常是 0，"
+            "而 0 曾经被错误地当成「不取帧」，真机上表现为画面永远空着）"
+        ),
+    )
     args = parser.parse_args(argv)
 
     info = PrinterInfo(
@@ -86,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     config.printers = [info]
 
     session = create_session(info)
-    session.set_max_fps(4.0)
+    session.set_max_fps(args.max_fps)
     session.start()
     sessions = [session]
 
