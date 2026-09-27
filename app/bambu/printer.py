@@ -122,6 +122,11 @@ class PrinterSession:
         self.mqtt_auth_error = False
         self.warnings: list[str] = []
         self.video_channel = "tcp6000"
+        #: 6000 端口有没有用「口令正确却被拒」证明过它走不通（X1 系新固件就是这样，
+        #: 见 models.py 的 video_channel 说明）。一旦坐实，本会话不再往那边退 ——
+        #: 退回去只会白等一轮，真机上表现为画面在「连接中」与「访问代码错误」
+        #: 之间来回跳、永远出不来（X1C 实测）。
+        self._tcp6000_rejected = False
         self._stream_lock = threading.Lock()
         #: 串行化视频通道的建立（看门狗切换与首帧建立不能同时进行）
         self._video_setup_lock = threading.Lock()
@@ -388,6 +393,7 @@ class PrinterSession:
                 and self.info.model.supports_rtsp
             ):
                 self.warnings.append("6000 端口拒绝了正确口令，说明该机型不支持该通道，改用 RTSPS")
+                self._tcp6000_rejected = True
                 self._switch_channel("rtsp")
                 return
 
@@ -407,7 +413,7 @@ class PrinterSession:
                 stale = 0
                 if not self.info.access_code:
                     continue
-                channel = self.info.model.video_channel
+                channel = self._effective_channel()
                 if channel == "tcp6000":
                     continue  # 该机型只有 6000 一条路，流自身会重连
                 if channel == "rtsp":
@@ -479,10 +485,27 @@ class PrinterSession:
             return "rtsp"
         if channel == "tcp6000":
             return "tcp6000"
-        # 未知机型：先试 RTSPS，失败再退 6000
+        # 未知机型 / X1 系：先试 RTSPS，失败再退 6000。
+        # ⚠️ 但这台设备已经用「口令正确却被拒」证明过 6000 走不通时别再退回去：
+        # 退回去只是白等一轮（真机 X1C 固件 01.11.02.00 的 6000 端口一定被拒，
+        # 画面就在「连接中」与「访问代码错误」之间来回跳）。
+        if self._tcp6000_rejected:
+            return "rtsp"
         from .rtsp import RtspStream
 
         return "rtsp" if RtspStream.available() else "tcp6000"
+
+    def _effective_channel(self) -> str:
+        """本会话**真正**该走的通道（看门狗与「只有一条路」的判断都用它）。
+
+        与 :meth:`_preferred_channel` 的区别：这里不看用户设置，只看机型的
+        ``auto`` 是否已经被现实否掉了一半 —— ``auto`` 机型（X1 / X1C / 未知）
+        本来"两条都试"，但 6000 一旦被证实走不通，就只剩 RTSPS 一条路了。
+        """
+        channel = self.info.model.video_channel
+        if channel == "auto" and self._tcp6000_rejected:
+            return "rtsp"
+        return channel
 
     @property
     def video_unavailable_reason(self) -> str:
@@ -497,7 +520,10 @@ class PrinterSession:
         """
         if not self.info.access_code:
             return ""
-        if self.info.model.video_channel != "rtsp":
+        # 「只有一条 RTSPS 路」既包括机型决定的，也包括**实际证明过的**：
+        # X1 系是 auto（老固件靠 6000），一旦 6000 用「口令正确却被拒」证明走不通，
+        # 这台设备在本会话里就只剩 RTSPS 了。
+        if self._effective_channel() != "rtsp":
             return ""
         from .rtsp import RtspStream
 
@@ -531,7 +557,7 @@ class PrinterSession:
         # 这里只取 _stream_lock，不会与 _video_setup_lock 形成环。
         self._stop_streams()
         channel = (prefer or self._preferred_channel()).lower()
-        rtsp_only = self.info.model.video_channel == "rtsp"
+        rtsp_only = self._effective_channel() == "rtsp"
 
         if channel == "rtsp":
             from .rtsp import RtspStream  # 延迟导入：OpenCV 为可选依赖
@@ -716,6 +742,8 @@ class PrinterSession:
             # 口令没错（遥测都通了），那就不是访问代码的问题
             detail = "6000 端口不支持该机型，正在改用 RTSPS(322) 通道"
             self.last_camera_detail = detail
+            # 记住这一条：本会话不必再退回 6000（下次直接走 RTSPS）
+            self._tcp6000_rejected = True
         # ⚠️ 「正在连接/重连」**不等于画面断了**：RTSPS 的流会自己重连
         # （真机实测 X2D：打印机的实时画面服务会不定期拒掉新连接，我们于是
         # connecting → streaming → connecting 来回跳）。如果这时候立刻把

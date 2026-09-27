@@ -66,6 +66,13 @@ def _session() -> PrinterSession:
     )
 
 
+def _x1c() -> PrinterSession:
+    """X1C 是 `auto` 机型（老固件靠 6000、新固件只有 RTSPS）。"""
+    return PrinterSession(
+        PrinterInfo(ip="192.168.31.27", name="X1C", model=PrinterModel.X1C, access_code="12345678")
+    )
+
+
 # --------------------------------------------------- ① 重连中不算"画面断了"
 def test_重连中但画面还新时保持在线():
     """契约：状态是 connecting/retrying，但上一帧还很新 → 仍然算在线（别让界面闪）。"""
@@ -175,6 +182,45 @@ def test_切换通路的瞬间按最新那帧判():
     assert session.snapshot().camera_online is True
     session._handle_stream_state(session._h264, "retrying", "正在重连")
     assert session.status.camera_online is True, "新通道画面还新，不该被旧通道的陈旧帧判离线"
+
+
+# --------------------------------------------------- ④ auto 机型别再往 6000 白退
+#
+# 真机复现（X1C，192.168.31.27）：X1 系在机型表里是 `auto`（老固件靠 6000 取画面），
+# 于是 RTSPS 一失败就退到 6000；而新固件的 6000 端口**用正确口令也会被拒**，
+# 只好等看门狗（最多 15 秒一轮）再切回 RTSPS。表现就是状态永远在
+# 「连接中」与「访问代码错误」之间跳，画面一次也出不来。
+def test_6000_被拒过就不再选它():
+    """契约：坐实 6000 走不通之后，`auto` 机型的首选通道直接是 RTSPS。"""
+    session = _x1c()
+    assert session._preferred_channel() in ("rtsp", "tcp6000")  # 还没有证据时按老规矩
+    session.status.mqtt_online = True
+    session._camera = FakeStream(age=1e9)
+    session._handle_stream_state(
+        session._camera, "auth_error", "打印机拒绝连接：请检查访问代码（局域网访问码）是否正确"
+    )
+    assert session._tcp6000_rejected is True
+    assert session._preferred_channel() == "rtsp", "已经证实 6000 走不通，不该再退回去"
+    assert session._effective_channel() == "rtsp"
+
+
+def test_口令真的错了不会被当成机型不支持():
+    """契约：遥测没连上（口令本身错）时不能记成「6000 不支持该机型」。"""
+    session = _x1c()
+    session.status.mqtt_online = False
+    session._camera = FakeStream(age=1e9)
+    session._handle_stream_state(session._camera, "auth_error", "打印机拒绝连接：口令不对")
+    assert session._tcp6000_rejected is False, "口令错是用户要改配置，不是机型问题"
+
+
+def test_只有6000一条路的机型不受影响():
+    """契约：P1S / A1 这类机型无论发生什么都不会被改到 RTSPS 上（它们在 6000 上才好）。"""
+    session = PrinterSession(
+        PrinterInfo(ip="192.168.31.50", name="p1s", model=PrinterModel.P1S, access_code="12345678")
+    )
+    session._tcp6000_rejected = True
+    assert session._effective_channel() == "tcp6000"
+    assert session._preferred_channel() == "tcp6000"
 
 
 # --------------------------------------------------- ② 桌面版的网页服务要接全回调
