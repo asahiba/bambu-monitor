@@ -13,6 +13,7 @@ from .mqtt_worker import MqttWorker
 from .timeouts import (
     CAMERA_STREAM_JOIN,
     FRAME_STALE_TOLERANCE,
+    FRAME_STALE_TOLERANCE_MAX,
     MQTT_PROBE_INTERVAL,
     MQTT_PROBE_SILENCE,
     MQTT_PROBE_TIMEOUT,
@@ -30,6 +31,50 @@ from .timeouts import (
 #: H.264 访问单元最多缓存多少帧（网页端没连上时不至于无限堆积）。
 #: 1080p 单帧约 8KB，30 帧 ≈ 240KB，够网页端接上，也不会吃内存。
 H264_QUEUE_LIMIT = 30
+
+#: 慢流放宽的倍数：容忍"约 1.5 个自己的节奏"没新帧。用**实测的最近最大间隔**
+#: 而不是平均帧率 —— 打印机刚连上会先吐几张把平均值抬高，随后才进入
+#: 几秒一张的稳态（实测 p1s 6：平均 0.5 fps，实际中位间隔 3.4 秒、最大 13 秒）。
+FRAME_STALE_INTERVALS = 1.5
+
+
+def frame_stale_limit(fps: float, gap: float = 0.0) -> float:
+    """按**这台设备自己的出帧节奏**算「多久没新帧就算画面断了」。
+
+    ## 为什么不能只用一个固定值
+
+    判据原来是写死的 6 秒，但 6000 端口的 A1 / P1 系列根本不是每秒出图：
+    真机实测（用户家里的 17 台设备，90 秒采样）间隔中位数 2.8~8.8 秒、
+    **最大 12~21 秒**，十几秒没有新帧是常态。于是每台 6000 端口的机器
+    都在"在线/离线"之间乱闪（90 秒里翻 2~8 次），而画面其实一直在动。
+
+    所以门槛按实测节奏算：``max(gap, 1/fps)`` 的 1.5 倍，夹在
+    :data:`FRAME_STALE_TOLERANCE`（6 秒，快流沿用原判据）与
+    :data:`FRAME_STALE_TOLERANCE_MAX`（30 秒，避免真断了还一直显示在线）之间。
+
+    * ``gap``：最近若干帧里的最大间隔（秒），由流自己记录，见 app/bambu/framegap.py；
+    * ``fps``：实测平均帧率，只在还没量到间隔时兜底。
+
+    两个都给不出来（还没出过帧、或替身流没有这些属性）时返回下限。
+    """
+    interval = _as_positive(gap)
+    rate = _as_positive(fps)
+    if rate:
+        interval = max(interval, 1.0 / rate)
+    if interval <= 0:
+        return FRAME_STALE_TOLERANCE
+    wanted = FRAME_STALE_INTERVALS * interval
+    return min(FRAME_STALE_TOLERANCE_MAX, max(FRAME_STALE_TOLERANCE, wanted))
+
+
+def _as_positive(value: object) -> float:
+    """把 ``value`` 变成正数；None / 字符串 / 0 / 负数都当作"没有这个信息"，返回 0。"""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
 
 if TYPE_CHECKING:  # 仅类型标注：运行时按需在属性里导入，避免与 app.core 形成环
     from ..core.capabilities import DeviceCapabilities
@@ -579,6 +624,34 @@ class PrinterSession:
         self._camera = camera
         camera.start()
 
+    def _freshest_stream(self) -> Any:
+        """当前真正在出画面的那条流。
+
+        三条通路互斥（6000 端口 JPEG / RTSPS+OpenCV / RTSPS 纯 H.264），但切换
+        瞬间可能一新一旧同时挂着，所以按"上一帧有多新"挑，而不是按属性顺序挑 ——
+        否则会拿一条已经停掉的旧流去判在线，画面就会莫名显示离线。
+        """
+        best = None
+        best_age: Optional[float] = None
+        for stream in (self._camera, self._rtsp, self._h264):
+            if stream is None:
+                continue
+            age = getattr(stream, "last_frame_age", None)
+            if age is None:
+                continue
+            if best_age is None or age < best_age:
+                best, best_age = stream, age
+        return best
+
+    def _frame_stale_limit(self) -> float:
+        """当前通道「多久没新帧算断线」的门槛（按这台设备自己的节奏算）。"""
+        stream = self._freshest_stream()
+        if stream is None:
+            return FRAME_STALE_TOLERANCE
+        return frame_stale_limit(
+            getattr(stream, "fps", 0.0), getattr(stream, "frame_gap", 0.0)
+        )
+
     def _start_h264(self, sock_lock_held: bool = False) -> None:
         """建立**纯 Python 的 H.264 通路**（没有 OpenCV 时用，典型场景是安卓版）。
 
@@ -647,11 +720,12 @@ class PrinterSession:
         # （真机实测 X2D：打印机的实时画面服务会不定期拒掉新连接，我们于是
         # connecting → streaming → connecting 来回跳）。如果这时候立刻把
         # camera_online 置假，界面上就会不停闪「画面重连中」，而其实画面还在动。
-        # 判据用"上一帧有多新"：6 秒内有帧就仍然算在线。
+        # 判据用"上一帧有多新"，门槛按当前通道的帧率算（见 frame_stale_limit）。
+        limit = self._frame_stale_limit()
         recent_frame = False
-        for stream in (self._rtsp, self._camera):
+        for stream in (self._rtsp, self._camera, self._h264):
             age = getattr(stream, "last_frame_age", None)
-            if age is not None and age < FRAME_STALE_TOLERANCE:
+            if age is not None and age < limit:
                 recent_frame = True
                 break
         if state == CameraStream.STATE_STREAMING:
@@ -875,11 +949,19 @@ class PrinterSession:
 
         「画面在线」直接用最近一帧的新鲜度判定，比连接状态字符串更可靠
         （即使状态机短暂抖动，只要画面还在动就应显示为在线）。
+
+        ⚠️ 新鲜度的门槛必须是**按这台设备自己的节奏算的**，不能写死：6000 端口的
+        A1 / P1 系列实测十几秒没有新帧是常态（见 :func:`frame_stale_limit`），
+        写死 6 秒会让画面在两帧之间被判成离线 —— 真机上就是"画面在动、状态显示
+        离线"，而且每几秒翻一次。三条通路都看（包括没有 OpenCV 时的 H.264 通道），
+        按最新的一帧算。
         """
         with self._lock:
-            stream = self._camera if self._camera is not None else self._rtsp
+            stream = self._freshest_stream()
             if stream is not None:
-                self.status.camera_online = stream.last_frame_age < 6.0
+                age = getattr(stream, "last_frame_age", None)
+                if age is not None:
+                    self.status.camera_online = age < self._frame_stale_limit()
             return self.status
 
     @property

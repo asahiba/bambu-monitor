@@ -44,8 +44,8 @@ android {
         applicationId "com.bambumonitor"
         minSdk 24              // Chaquopy 17 要求至少 24
         targetSdk 34
-        versionCode 11
-        versionName "1.2.2"
+        versionCode 13
+        versionName "1.2.3"
 
         ndk {
             // Python 解释器是原生组件，必须指定 ABI。

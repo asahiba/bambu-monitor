@@ -40,6 +40,7 @@ import time
 from typing import Callable, Optional
 
 from . import tlsutil
+from .framegap import FrameGapTracker
 from .ports import CAMERA_PORT
 from .timeouts import (
     CAMERA_AUTH_BACKOFF,
@@ -117,6 +118,9 @@ class CameraStream(threading.Thread):
         self._latest_seq = 0
         self._frame_count = 0
         self._last_frame_ts = 0.0
+        #: 这台设备自己的出帧节奏（6000 端口的 P1/A1 只有 0.2 左右 fps，
+        #: 而且间隔很不匀），判「画面还在不在」时要按它来，不能写死秒数。
+        self._gaps = FrameGapTracker()
         self._first_frame_event = threading.Event()
         self.state = self.STATE_STOPPED
         self.detail = ""
@@ -163,6 +167,11 @@ class CameraStream(threading.Thread):
         if self._last_frame_ts <= 0:
             return 1e9
         return time.time() - self._last_frame_ts
+
+    @property
+    def frame_gap(self) -> float:
+        """最近若干帧里的最大间隔（这台设备自己的节奏，见 :mod:`app.bambu.framegap`）。"""
+        return self._gaps.max_gap
 
     @property
     def fps(self) -> float:
@@ -282,6 +291,7 @@ class CameraStream(threading.Thread):
                 self._latest = payload
                 self._latest_seq += 1
                 self._last_frame_ts = time.time()
+            self._gaps.note(self._last_frame_ts)
             self._frame_count += 1
             if not self._first_frame_event.is_set():
                 self._first_frame_event.set()

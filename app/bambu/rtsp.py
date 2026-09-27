@@ -18,6 +18,7 @@ import time
 from typing import Callable, Optional
 from urllib.parse import quote
 
+from .framegap import FrameGapTracker
 from .ports import RTSP_PORT
 from .timeouts import (
     RTSP_FIRST_FRAME_TIMEOUT,
@@ -69,6 +70,9 @@ class RtspStream(threading.Thread):
         self._latest_seq = 0
         self._frame_count = 0
         self._last_frame_ts = 0.0
+        #: 这台设备自己的出帧节奏（用户把帧率设得很低时，间隔会明显大于 6 秒，
+        #: 判「画面还在不在」要按实测节奏来，见 app.bambu.framegap）
+        self._gaps = FrameGapTracker()
         self._first_frame_event = threading.Event()
         self.state = self.STATE_STOPPED
         self.detail = ""
@@ -195,6 +199,11 @@ class RtspStream(threading.Thread):
             return 1e9
         return time.time() - self._last_frame_ts
 
+    @property
+    def frame_gap(self) -> float:
+        """最近若干帧里的最大间隔（这台设备自己的节奏，见 :mod:`app.bambu.framegap`）。"""
+        return self._gaps.max_gap
+
     # ------------------------------------------------------------------ 内部
     def _set_state(self, state: str, detail: str = "") -> None:
         self.state = state
@@ -316,6 +325,7 @@ class RtspStream(threading.Thread):
                         self._latest = data
                         self._latest_seq += 1
                         self._last_frame_ts = time.time()
+                    self._gaps.note(self._last_frame_ts)
                     self._frame_count += 1
                     if not self._first_frame_event.is_set():
                         self._first_frame_event.set()

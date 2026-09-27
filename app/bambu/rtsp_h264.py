@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import tlsutil
+from .framegap import FrameGapTracker
 from .ports import RTSP_PORT
 from .timeouts import RTSP_FIRST_FRAME_TIMEOUT, RTSP_OPEN_TIMEOUT_MS
 
@@ -293,6 +294,8 @@ class RtspH264Client(threading.Thread):
         self._sequence = 0
         self._started_at = 0.0
         self._last_unit_ts = 0.0
+        #: 这台设备自己的出帧节奏（判「画面还在不在」时按实测间隔放宽，见 framegap.py）
+        self._gaps = FrameGapTracker()
         self._rtp_timestamp_base: Optional[int] = None
         #: 收发共用的字节缓冲：RTSP 响应与 interleaved RTP 混在同一条连接里
         self._buffer = bytearray()
@@ -327,6 +330,11 @@ class RtspH264Client(threading.Thread):
     @property
     def last_frame_age(self) -> float:
         return time.time() - self._last_unit_ts if self._last_unit_ts else 1e9
+
+    @property
+    def frame_gap(self) -> float:
+        """最近若干帧里的最大间隔（这台设备自己的节奏，见 :mod:`app.bambu.framegap`）。"""
+        return self._gaps.max_gap
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -827,6 +835,7 @@ class RtspH264Client(threading.Thread):
         )
         self._frame_count += 1
         self._last_unit_ts = time.time()
+        self._gaps.note(self._last_unit_ts)
         if not self._first_unit_event.is_set():
             self._first_unit_event.set()
         if self._on_access_unit is not None:

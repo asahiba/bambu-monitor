@@ -15,6 +15,8 @@
    「该运行方式不支持」。
 4. **网页端改了设备列表，桌面界面不同步** —— 两边共用一份配置，但桌面不重排，
    于是"网页加的设备桌面看不到、网页删的桌面还留着"。
+5. **慢通道（6000 端口的 P1/A1）被判成离线** —— 判据写死 6 秒，而这类机器
+   只有 0.2~0.5 fps（两帧之间本来就等 2~5 秒），于是画面在动、状态却显示离线。
 """
 
 from __future__ import annotations
@@ -31,8 +33,11 @@ if _ROOT not in sys.path:
 import pytest  # noqa: E402
 
 from app.bambu.models import PrinterInfo, PrinterModel, PrinterStatus  # noqa: E402
-from app.bambu.printer import PrinterSession  # noqa: E402
-from app.bambu.timeouts import FRAME_STALE_TOLERANCE  # noqa: E402
+from app.bambu.printer import PrinterSession, frame_stale_limit  # noqa: E402
+from app.bambu.timeouts import (  # noqa: E402
+    FRAME_STALE_TOLERANCE,
+    FRAME_STALE_TOLERANCE_MAX,
+)
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="界面测试需要 PySide6（CI 不装它）")
 
@@ -47,10 +52,12 @@ def _config():
 
 
 class FakeStream:
-    """只提供 last_frame_age 的流替身。"""
+    """只提供 ``last_frame_age`` / ``fps`` / ``frame_gap`` 的流替身。"""
 
-    def __init__(self, age: float) -> None:
+    def __init__(self, age: float, fps: float = 0.0, gap: float = 0.0) -> None:
         self.last_frame_age = age
+        self.fps = fps
+        self.frame_gap = gap
 
 
 def _session() -> PrinterSession:
@@ -101,6 +108,73 @@ def test_别的通道的状态不会覆盖当前通道():
     session._handle_stream_state(object(), "stopped", "旧通道已停止")
     assert session.last_camera_state == "streaming"
     assert session.last_camera_detail == "画面正常"
+
+
+# --------------------------------------------------- ③ 慢通道不能按 6 秒判离线
+#
+# 真机复现（用户家里 17 台设备，从正在运行的实例里量出来的）：6000 端口的
+# A1 / P1 系列间隔中位数 2.8~8.8 秒、**最大 12~21 秒**，十几秒没有新帧是常态；
+# 而判据写死 6 秒（`snapshot()` 里那句 `last_frame_age < 6.0`），于是每台
+# 6000 端口的设备都在"在线/离线"之间乱闪（90 秒里翻 2~8 次），画面其实一直在动。
+def test_门槛按设备自己的节奏放宽():
+    """``frame_stale_limit``：快流沿用 6 秒，慢流按实测最大间隔放宽并封顶。"""
+    assert frame_stale_limit(0) == FRAME_STALE_TOLERANCE  # 还没出过帧
+    assert frame_stale_limit(9.0) == FRAME_STALE_TOLERANCE  # RTSPS：≈9 fps
+    # 6000 端口：中位 3 秒、偶尔 13 秒一张（实测 p1s 6）
+    assert frame_stale_limit(0.5, gap=13.0) == pytest.approx(19.5)
+    # A1：最大间隔 21 秒 → 1.5 倍会顶到上限
+    assert frame_stale_limit(0.2, gap=21.0) == FRAME_STALE_TOLERANCE_MAX
+    # 只给帧率（还没有间隔数据）时用 1/fps 兜底：0.2 fps → 5 秒 × 1.5 = 7.5
+    assert frame_stale_limit(0.2) == pytest.approx(7.5)
+    # 帧率很高、又没有间隔数据 → 退回 6 秒下限
+    assert frame_stale_limit(9.0) == FRAME_STALE_TOLERANCE
+    # 脏数据不能算出怪值
+    assert frame_stale_limit("x", gap=None) == FRAME_STALE_TOLERANCE  # type: ignore[arg-type]
+    assert frame_stale_limit(-3.0, gap=-1.0) == FRAME_STALE_TOLERANCE
+
+
+def test_慢流两帧之间保持在线():
+    """**回归**：6000 端口的机器上一帧 13 秒前，仍然是在线（旧判据会显示离线）。"""
+    session = _session()
+    session._camera = FakeStream(age=13.0, fps=0.2, gap=13.0)
+    assert session._camera.last_frame_age > FRAME_STALE_TOLERANCE  # 确实超过旧的 6 秒判据
+    assert session.snapshot().camera_online is True
+
+
+def test_慢流真的断了还是判离线():
+    """放宽不等于不管：超过上限（30 秒）没有新帧就必须显示离线。"""
+    session = _session()
+    session._camera = FakeStream(age=FRAME_STALE_TOLERANCE_MAX + 5.0, fps=0.2, gap=6.0)
+    assert session.snapshot().camera_online is False
+
+
+def test_快流仍然按6秒判离线():
+    """契约：RTSPS 这类快流不能因为这次放宽而变得迟钝。"""
+    session = _session()
+    session._rtsp = FakeStream(age=FRAME_STALE_TOLERANCE + 0.5, fps=9.0, gap=0.3)
+    assert session.snapshot().camera_online is False
+    session._rtsp = FakeStream(age=1.0, fps=9.0, gap=0.3)
+    assert session.snapshot().camera_online is True
+
+
+def test_没有_OpenCV_时的_H264_通道也算在线():
+    """**回归**：``snapshot()`` 以前只看 `_camera`/`_rtsp`，安卓版走 H.264 通路
+    （`_h264`）时画面在动却没人更新在线状态。"""
+    session = _session()
+    session._h264 = FakeStream(age=0.4, fps=8.0, gap=0.3)
+    assert session.snapshot().camera_online is True
+    session._h264 = FakeStream(age=30.0, fps=8.0, gap=0.3)
+    assert session.snapshot().camera_online is False
+
+
+def test_切换通路的瞬间按最新那帧判():
+    """契约：通道切换时一新一旧两条流可能同时挂着，不能被旧流带偏。"""
+    session = _session()
+    session._camera = FakeStream(age=40.0, fps=0.2, gap=6.0)  # 已经停掉的旧通道
+    session._h264 = FakeStream(age=0.3, fps=8.0, gap=0.3)  # 刚接上的新通道
+    assert session.snapshot().camera_online is True
+    session._handle_stream_state(session._h264, "retrying", "正在重连")
+    assert session.status.camera_online is True, "新通道画面还新，不该被旧通道的陈旧帧判离线"
 
 
 # --------------------------------------------------- ② 桌面版的网页服务要接全回调
