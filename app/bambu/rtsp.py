@@ -22,6 +22,7 @@ from .ports import RTSP_PORT
 from .timeouts import (
     RTSP_FIRST_FRAME_TIMEOUT,
     RTSP_OPEN_TIMEOUT_MS,
+    RTSPS_BACKOFF_MAX,
     RTSPS_PREFLIGHT_PAUSE,
     RTSPS_PREFLIGHT_TIMEOUT,
     RTSPS_STALE_READ_SECONDS,
@@ -239,6 +240,8 @@ class RtspStream(threading.Thread):
                 if preflight_failures:
                     LOGGER.info("RTSPS 预探第 %d 次恢复响应（%s）", preflight_failures, why)
                     preflight_failures = 0
+                # 预探通过之后才轮到 FFmpeg：它能打开就说明这条路通了
+                # （真机上"预探通过、FFmpeg 立刻又失败"也会发生，那就当普通失败重来）
                 # ② 给 FFmpeg 设置打开/读取超时，避免打印机未开启该服务时长时间卡住
                 params = [
                     int(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC),
@@ -261,6 +264,9 @@ class RtspStream(threading.Thread):
                     raise RuntimeError(
                         "无法打开 RTSPS 流（未开启「局域网实时画面」，或访问代码不正确）"
                     )
+                # 这一路开起来了：退避立刻回到起点 —— 真机上打印机会不定期拒连接，
+                # 若沿用之前累积的大退避，下一轮重连又要多等十几秒（"画面不持久"）。
+                backoff = 2.0
                 interval = 1.0 / max(1.0, self._max_fps)
                 last_emit = 0.0
                 while not self._stop_event.is_set():
@@ -332,5 +338,5 @@ class RtspStream(threading.Thread):
                         pass
             if self._stop_event.wait(backoff):
                 break
-            backoff = min(backoff * 1.5, 20.0)
+            backoff = min(backoff * 1.5, RTSPS_BACKOFF_MAX)
         self._set_state(self.STATE_STOPPED, "已停止")

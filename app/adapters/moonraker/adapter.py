@@ -95,6 +95,9 @@ WEBHOOKS_BAD = frozenset({"shutdown", "error", "startup"})
 EXTRA_CAMERA_TIMEOUT = 3.0
 EXTRA_CAMERA_MAX_FAILS = 3
 
+#: 摄像头列表探测失败后的最长重试间隔（秒）。见 `MoonrakerAdapter._schedule_camera_retry`。
+CAMERA_RETRY_MAX = 300.0
+
 
 def _as_float(value: Any) -> Optional[float]:
     try:
@@ -427,6 +430,11 @@ class MoonrakerAdapter(PollingDeviceSession):
         self._extra_objects: list[str] = []
         self._extra_objects_probed = False
         self._details: list[dict[str, str]] = []
+        #: 摄像头探测失败后的重试时刻与次数（见 `_discover_cameras` 的说明：
+        #: 一次失败就永久放弃是"一开始能显示、后来不行了"的根因）
+        self._camera_next_probe = 0.0
+        self._camera_probe_attempts = 0
+        self._camera_probe_error = ""
         #: 相对 URL 的基准地址（**探测出来的**）：Moonraker 的 webcams.list 给的是
         #: 相对路径（``/webcam/?action=snapshot``），它由 crowsnest / 前端挂在**主机
         #: 80 端口**上，Moonraker 自己的端口上并没有这个路径（实测 404）。
@@ -508,6 +516,13 @@ class MoonrakerAdapter(PollingDeviceSession):
         self.status.raw.update(raw if isinstance(raw, dict) else {})
         self._details = parse_details(raw)
         self._maybe_keepalive()
+        # ⚠️ 摄像头探测放在**状态轮询**里，不能只放在取帧路径里：
+        # 基类的轮询循环只有在 `capabilities.has_camera` 为真时才会去取帧，
+        # 而"一台摄像头都没探到"时这个标志是假的 —— 于是重试永远不会发生
+        # （真机后果：启动时那一次 webcams/list 超时，这台设备整个运行期都没画面）。
+        # 这里每轮都会调一次，`_discover_cameras()` 内部自带退避，不会每 2 秒打一次。
+        if not self._cameras:
+            self._discover_cameras()
         return parse_status(raw)
 
     def _wanted_objects(self) -> list[str]:
@@ -704,6 +719,9 @@ class MoonrakerAdapter(PollingDeviceSession):
         self._extra_frames = {}
         self._camera_base = ""
         self._camera_url = self._user_camera_url
+        # 手动刷新要**立刻**重试，不受退避影响
+        self._camera_next_probe = 0.0
+        self._camera_probe_attempts = 0
         self._discover_cameras()
         LOGGER.info("重新发现摄像头：%d 路（%s）", len(self._cameras), self.info.ip)
         return self.cameras()
@@ -750,32 +768,48 @@ class MoonrakerAdapter(PollingDeviceSession):
     def _discover_cameras(self) -> None:
         """用官方端点 ``/server/webcams/list`` 发现**全部**可用摄像头。
 
-        只探测一次（失败则退化为"无画面"或只有用户手填的那一路），因为
-        ``webcams/list`` 在设备端是数据库查询，没必要每轮都问。
+        ## ⚠️ 这里踩过一个很坑的坑：一次失败就永久没有画面
+
+        最早写成"只探一次，失败就永久退化为无画面"，理由是"避免每轮都白试"。
+        真机后果：应用启动时那一次 `webcams/list` 只要超时（同网段十几台设备同时
+        上线时很常见），这台设备**整个运行期间**都不会再有摄像头 ——
+        用户看到的就是「一开始能显示、后来重启就不行了」，而且没有任何提示
+        （`cameras()` 返回空、`backend` 是 `-`、状态写着「画面未启动」）。
+
+        现在改成：探测失败**不封顶**，按退避继续重试（5 秒 → 15 秒 → 60 秒 → 5 分钟），
+        并把失败原因记进日志；成功了就停。用户点「刷新视频流」也会立即重试。
 
         实测（Voron 2.4 + crowsnest，2026-09）：返回的是**相对路径**
         ``/webcam/?action=snapshot``，其中 ``/webcam/`` 由 nginx 代理到
         crowsnest 的 ustreamer，而 Moonraker 端口上没有这个路径（404）——
         以前这里把相对路径拼在 Moonraker 端口上，于是「有摄像头却永远没画面」。
         """
-        if self._camera_probed:
+        now = time.time()
+        if self._camera_probed and now < self._camera_next_probe:
             return
         self._camera_probed = True
+        self._camera_probe_attempts += 1
         # 用户手填的地址优先当作主画面（例如 U1 那种 Moonraker 里没登记的摄像头）
         if self._camera_url:
             self._add_camera("自定义", "", self._camera_url)
+        data: Any = None
         try:
             data = self._request("/server/webcams/list")
-        except Exception as exc:  # noqa: BLE001 - 探测失败很常见，不值得报错
-            LOGGER.debug("webcams/list 探测失败：%s", exc)
-            if self._camera_url:
-                self.capabilities = self.capabilities.merged(
-                    has_camera=True, video_channel="http_snapshot"
-                )
-                self.video_backend = "快照"
+            self._camera_probe_error = ""
+        except Exception as exc:  # noqa: BLE001 - 探测失败很常见，但要能重试
+            self._camera_probe_error = f"{type(exc).__name__}: {exc}"
+            self._schedule_camera_retry()
+            LOGGER.info(
+                "摄像头列表获取失败（第 %d 次，%s 秒后重试）：%s",
+                self._camera_probe_attempts,
+                int(self._camera_next_probe - now),
+                self._camera_probe_error,
+            )
             return
         webcams = data.get("result", {}).get("webcams") if isinstance(data, dict) else None
         if not isinstance(webcams, list):
+            self._camera_probe_error = "设备没有返回摄像头列表"
+            self._schedule_camera_retry()
             return
         for webcam in webcams:
             if not isinstance(webcam, dict):
@@ -794,11 +828,21 @@ class MoonrakerAdapter(PollingDeviceSession):
                 stream if stream != snapshot else "",
             )
         if self._cameras:
+            self._camera_probe_attempts = 0
             LOGGER.info(
                 "发现 %d 路摄像头：%s",
                 len(self._cameras),
                 "、".join(f"{item['name']}" for item in self._cameras),
             )
+        else:
+            # 设备在线、但一台摄像头都没配：不重试（这是设备的稳定状态）
+            self._camera_probe_error = ""
+            LOGGER.info("设备没有配置任何摄像头（/server/webcams/list 为空）")
+
+    def _schedule_camera_retry(self) -> None:
+        """探测失败后的退避：5 秒 → 15 秒 → 60 秒 → 之后每 5 分钟一次。"""
+        delay = {1: 5.0, 2: 15.0, 3: 60.0}.get(self._camera_probe_attempts, CAMERA_RETRY_MAX)
+        self._camera_next_probe = time.time() + delay
 
     def _absolute(self, url: str) -> str:
         """把（可能是相对的）摄像头地址补全 —— 保留给外部调用方，内部用 :meth:`_resolve`。"""

@@ -87,6 +87,7 @@ class FakeMoonraker:
         camera: str = "snapshot",
         camera_requires_monitor: bool = False,
         camera_monitor: bool = True,
+        webcams_fail_times: int = 0,
         api_key: str = "",
         estimated_time: Optional[float] = 3600.0,
     ) -> None:
@@ -108,6 +109,9 @@ class FakeMoonraker:
         self.camera_requires_monitor = camera_requires_monitor
         #: 设备是否认识 ``camera.start_monitor``（U1 认识，普通 Moonraker 不认识）
         self.camera_monitor = camera_monitor
+        #: 让 ``/server/webcams/list`` 先失败几次（模拟"应用启动时那一次超时"，
+        #: 真机上这曾经导致这台设备整个运行期都没有摄像头）
+        self.webcams_fail_times = webcams_fail_times
         self.api_key = api_key
         self.estimated_time = estimated_time
         # --- 观测点：测试据此断言"适配器到底请求了什么" ---
@@ -351,7 +355,11 @@ def _make_handler(fake: FakeMoonraker):
                     }
                 )
             elif path == "/server/webcams/list":
-                self._send_json(fake.webcams_response())
+                if fake.webcams_fail_times > 0:
+                    fake.webcams_fail_times -= 1
+                    self._send(b"temporary failure", "text/plain", 503)
+                else:
+                    self._send_json(fake.webcams_response())
             elif path == "/server/files/metadata":
                 self._send_json(fake.metadata_response())
             elif path == "/camera/start_monitor":

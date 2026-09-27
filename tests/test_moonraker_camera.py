@@ -204,6 +204,46 @@ def test_只有一路时行为与以前一致(mode):
             adapter.stop()
 
 
+def test_摄像头列表第一次拿不到会继续重试():
+    """**回归**：`webcams/list` 失败**不能永久放弃**。
+
+    真机场景：应用启动时那一次请求超时（同网段十几台设备同时上线很常见），
+    老代码会永久退化为"这台设备没有画面"—— 用户看到的是
+    「一开始能显示、后来重启就不行了」，而且没有任何提示
+    （`cameras()` 为空、`backend` 是 `-`、状态写着「画面未启动」）。
+    现在改成按退避重试（5 秒 → 15 秒 → 60 秒 → 每 5 分钟）。
+    """
+    with FakeMoonraker(camera="snapshot", webcams_fail_times=1) as fake:
+        adapter = _adapter(fake)
+        try:
+            adapter.start()
+            # 第一次探测失败：还在退避里，不该立刻就有摄像头
+            assert adapter.cameras() == []
+            assert adapter._camera_next_probe > 0, "失败后应当安排重试"  # noqa: SLF001
+            # 等到退避到期（测试里直接把时间拨到过去），下一次取帧就会重试成功
+            adapter._camera_next_probe = 0  # noqa: SLF001
+            assert _wait_until(lambda: len(adapter.cameras()) == 1, timeout=8), (
+                "退避到期后应当重新探测并拿到摄像头"
+            )
+            assert _wait_until(lambda: adapter.latest_frame()[1] is not None), "重试后应当能出画面"
+        finally:
+            adapter.stop()
+
+
+def test_设备确实没有摄像头时不再反复探测():
+    """契约：设备在线但 `webcams/list` 是空的 —— 这是稳定状态，不该一直重试。"""
+    with FakeMoonraker(camera="none") as fake:
+        adapter = _adapter(fake)
+        try:
+            adapter.start()
+            assert _wait_until(lambda: adapter._camera_probed)  # noqa: SLF001
+            time.sleep(0.5)
+            assert adapter.cameras() == []
+            assert adapter._camera_next_probe == 0, "空列表不是故障，不该安排重试"  # noqa: SLF001
+        finally:
+            adapter.stop()
+
+
 def test_帧率设为0也要取画面():
     """契约：`max_fps = 0` 是「不限制帧率」，**不是**「不取帧」。
 

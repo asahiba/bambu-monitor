@@ -21,6 +21,7 @@ from .timeouts import (
     RTSP_FIRST_FRAME_TIMEOUT,
     RTSP_RETRY_PAUSE,
     RTSP_STREAM_JOIN,
+    RTSPS_ADOPT_WITHOUT_FRAME,
     VIDEO_RESTART_JOIN,
     VIDEO_STOP_JOIN,
     WATCHDOG_INTERVAL,
@@ -365,9 +366,16 @@ class PrinterSession:
                 if channel == "tcp6000":
                     continue  # 该机型只有 6000 一条路，流自身会重连
                 if channel == "rtsp":
-                    target = "rtsp"  # 该机型只有 RTSPS，绝不能退回 6000
-                else:
-                    target = "tcp6000" if self.video_channel == "rtsp" else "rtsp"
+                    # 只有 RTSPS 一条路的机型：**不要掐掉正在重试的流**。
+                    # 打印机会不定期拒连接（实测连续 30 次才通一次），而流线程自己
+                    # 一直在快速重试；这里再建一条只会把仅有的机会抢走，
+                    # 于是"画面几分钟都不回来"。只有线程真的死了才需要重建。
+                    if self._rtsp is not None and self._rtsp.is_alive():
+                        continue
+                    self.warnings.append("RTSPS 通道线程已退出，正在重建")
+                    self._switch_channel("rtsp")
+                    return
+                target = "tcp6000" if self.video_channel == "rtsp" else "rtsp"
                 self.warnings.append(f"画面长时间无更新，正在切换到 {target} 通道重试")
                 self._switch_channel(target)
                 return
@@ -488,9 +496,12 @@ class PrinterSession:
                 # 以前这里直接退 6000，而只有 RTSPS 的机型在 6000 上一定失败 ——
                 # 于是"永远没有画面"，且用户完全不知道原因。
                 return self._start_h264(sock_lock_held=True)
-            # 首次拉流要等 FFmpeg 初始化（打包版首次加载 cv2 可能更慢），给足时间；
-            # 只有 RTSPS 一条路的机型多试几次，避免偶发失败就长时间没画面
-            attempts = 3 if rtsp_only else 2
+            # 首次拉流要等 FFmpeg 初始化（打包版首次加载 cv2 可能更慢），给足时间。
+            # ⚠️ 但**等不到首帧也不能掐掉这条流**：真机上打印机会不定期拒掉新连接
+            # （实测连续 30 次才通一次），而 `RtspStream` 线程自己会一直重试。
+            # 掐掉它再交给看门狗（60 秒后才重来）正是"画面几分钟不回来"的原因。
+            # 所以：短等一次，拿不到帧也照样采纳，让它在后台继续重连。
+            attempts = 1 if rtsp_only else 2
             for attempt in range(attempts):
                 if not self.running:
                     return
@@ -503,10 +514,21 @@ class PrinterSession:
                 )
                 holder.append(stream)
                 stream.start()
-                if stream.wait_first_frame(RTSP_ADOPT_TIMEOUT) is not None and self.running:
+                wait = RTSPS_ADOPT_WITHOUT_FRAME if rtsp_only else RTSP_ADOPT_TIMEOUT
+                if stream.wait_first_frame(wait) is not None and self.running:
                     self._rtsp = stream
                     self.video_channel = "rtsp"
                     # 采纳该流之后同步一次状态，否则界面还停留在「未连接」
+                    self._handle_stream_state(stream, stream.state, stream.detail)
+                    return
+                if rtsp_only and self.running:
+                    # 还没出帧，但这条流还在后台重试：**采纳它**，画面一到就显示
+                    self._rtsp = stream
+                    self.video_channel = "rtsp"
+                    self.warnings.append(
+                        f"RTSPS {int(wait)} 秒内没出首帧，继续在后台重连"
+                        "（打印机可能被别的客户端占着，或「局域网实时画面」没开）"
+                    )
                     self._handle_stream_state(stream, stream.state, stream.detail)
                     return
                 stream.stop()
