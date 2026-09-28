@@ -127,12 +127,28 @@ def test_preferred_channel_无opencv时RTSPS机型仍然走RTSPS(rtsp_available)
     assert session.warnings == [], "这条通路现在是正常路径，不该再提示 opencv 缺失"
 
 
-def test_preferred_channel_自动模式的X1C优先RTSPS(rtsp_available):
-    """契约：X1C 的 video_channel 是 auto：有 opencv 时优先 RTSPS，没有则退回 6000。"""
-    rtsp_available(True)
+def test_preferred_channel_自动模式的X1C看322端口在不在监听(monkeypatch):
+    """契约：X1C 的 video_channel 是 ``auto``，**由 322 端口是否在监听决定走哪条**。
+
+    真机（2026-09-28）证明了两件以前靠猜的事：
+
+    * X1C 的 322 端口是开着的、画面 720p / 30 fps —— 所以它该走 RTSPS；
+    * 它的 6000 端口用正确口令也会被拒 —— 所以"先试 RTSPS、超时了再退 6000"
+      这种猜法会让画面永远在「连接中」与「访问代码错误」之间跳。
+
+    现在只做一次 TCP 探测（不建 RTSP 会话）就能定下来，也不再依赖有没有 OpenCV。
+    """
+    import app.bambu.rtsp as rtsp
+
+    monkeypatch.setattr(rtsp, "port_listening", lambda host, port=0, timeout=0: True)
     assert make_session(model=PrinterModel.X1C)._preferred_channel() == "rtsp"
-    rtsp_available(False)
+
+    monkeypatch.setattr(rtsp, "port_listening", lambda host, port=0, timeout=0: False)
     assert make_session(model=PrinterModel.X1C)._preferred_channel() == "tcp6000"
+    # 没有 OpenCV（安卓版）时 322 开着也照样选 RTSPS：会转走纯 Python 的 H.264 通路
+    monkeypatch.setattr(rtsp.RtspStream, "available", staticmethod(lambda: False))
+    monkeypatch.setattr(rtsp, "port_listening", lambda host, port=0, timeout=0: True)
+    assert make_session(model=PrinterModel.X1C)._preferred_channel() == "rtsp"
 
 
 # ------------------------------------------------------------------ 未启动状态

@@ -32,6 +32,11 @@ from .timeouts import (
 #: 1080p 单帧约 8KB，30 帧 ≈ 240KB，够网页端接上，也不会吃内存。
 H264_QUEUE_LIMIT = 30
 
+#: `auto` 机型（X1 / X1C / 未知）判断「322 端口在不在监听」的结果缓存多久。
+#: 这是业务策略不是网络超时，所以留在本模块：用户开/关「局域网实时画面」之后
+#: 5 分钟内会自己纠正过来，期间也省掉每轮重连都去探测。
+RTSP_PORT_CHECK_INTERVAL = 300.0
+
 #: 慢流放宽的倍数：容忍"约 1.5 个自己的节奏"没新帧。用**实测的最近最大间隔**
 #: 而不是平均帧率 —— 打印机刚连上会先吐几张把平均值抬高，随后才进入
 #: 几秒一张的稳态（实测 p1s 6：平均 0.5 fps，实际中位间隔 3.4 秒、最大 13 秒）。
@@ -127,6 +132,10 @@ class PrinterSession:
         #: 退回去只会白等一轮，真机上表现为画面在「连接中」与「访问代码错误」
         #: 之间来回跳、永远出不来（X1C 实测）。
         self._tcp6000_rejected = False
+        #: 322 端口在不在监听（`auto` 机型选通道的依据，结果按
+        #: ``RTSP_PORT_CHECK_INTERVAL`` 缓存）
+        self._rtsp_port_cached = False
+        self._rtsp_port_checked_at = 0.0
         self._stream_lock = threading.Lock()
         #: 串行化视频通道的建立（看门狗切换与首帧建立不能同时进行）
         self._video_setup_lock = threading.Lock()
@@ -426,7 +435,11 @@ class PrinterSession:
                     self.warnings.append("RTSPS 通道线程已退出，正在重建")
                     self._switch_channel("rtsp")
                     return
-                target = "tcp6000" if self.video_channel == "rtsp" else "rtsp"
+                target = "rtsp" if self._refresh_rtsp_port() else "tcp6000"
+                if target == self.video_channel:
+                    # 已经在正确的通道上了：交给流自己重连，别来回换道
+                    # （每次换道都要重开会话，而打印机同时只伺候一个客户端）
+                    continue
                 self.warnings.append(f"画面长时间无更新，正在切换到 {target} 通道重试")
                 self._switch_channel(target)
                 return
@@ -445,6 +458,9 @@ class PrinterSession:
         """
         self.stop()
         self._join_video_threads(VIDEO_RESTART_JOIN)
+        # 用户在打印机上开关过「局域网实时画面」之后点「重连」应当重新探测
+        # 322 端口，而不是沿用最多 5 分钟的旧结论。
+        self._rtsp_port_checked_at = 0.0
         self.start()
 
     # ------------------------------------------------------------------ 内部
@@ -491,19 +507,51 @@ class PrinterSession:
         # 画面就在「连接中」与「访问代码错误」之间来回跳）。
         if self._tcp6000_rejected:
             return "rtsp"
-        from .rtsp import RtspStream
+        # ⚠️ 更根本的判据是**322 端口在不在监听**：在监听说明这台机器的实时画面
+        # 走 RTSPS（X1C 实测 322 秒开、画面 30 fps），不在监听才该退 6000。
+        # 以前靠"先试 RTSPS、超时了再退 6000"来推断，于是每失败一次就换一次通道，
+        # 而每次换道都要重开会话 —— 画面永远在"连接中/访问代码错误"之间跳。
+        if self._refresh_rtsp_port():
+            return "rtsp"
+        return "tcp6000"
 
-        return "rtsp" if RtspStream.available() else "tcp6000"
+    def _rtsp_port_open(self) -> bool:
+        """322 端口在不在监听（**只读缓存**，不做网络探测）。
+
+        界面线程与网页请求都会问这个值（例如 :attr:`video_unavailable_reason`），
+        所以这里绝不能等一次 TCP 超时（最坏 1.5 秒，界面会卡一下）。
+        真正的探测在 :meth:`_refresh_rtsp_port` 里，跑在视频线程/看门狗线程上。
+        """
+        return self._rtsp_port_cached
+
+    def _refresh_rtsp_port(self) -> bool:
+        """探测 322 端口并缓存（``RTSP_PORT_CHECK_INTERVAL`` 内复用结果）。
+
+        只做 TCP 连接，**不建 RTSP 会话**：打印机同时只伺候一个画面客户端，
+        探测不该去占那条通道（见 `app/bambu/rtsp.py` 开头）。
+        """
+        from .rtsp import port_listening
+
+        now = time.time()
+        checked = self._rtsp_port_checked_at
+        if checked and (now - checked) < RTSP_PORT_CHECK_INTERVAL:
+            return self._rtsp_port_cached
+        self._rtsp_port_cached = port_listening(self.info.ip)
+        self._rtsp_port_checked_at = now
+        return self._rtsp_port_cached
 
     def _effective_channel(self) -> str:
         """本会话**真正**该走的通道（看门狗与「只有一条路」的判断都用它）。
 
         与 :meth:`_preferred_channel` 的区别：这里不看用户设置，只看机型的
         ``auto`` 是否已经被现实否掉了一半 —— ``auto`` 机型（X1 / X1C / 未知）
-        本来"两条都试"，但 6000 一旦被证实走不通，就只剩 RTSPS 一条路了。
+        本来"两条都试"，但只要满足下面任一条，实际就只剩 RTSPS 一条路：
+
+        * 322 端口在监听（画面就在这条路上，X1C 实测秒开且 30 fps）；
+        * 6000 曾经用「口令正确却被拒」证明过走不通。
         """
         channel = self.info.model.video_channel
-        if channel == "auto" and self._tcp6000_rejected:
+        if channel == "auto" and (self._tcp6000_rejected or self._rtsp_port_open()):
             return "rtsp"
         return channel
 

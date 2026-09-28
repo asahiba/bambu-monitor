@@ -68,7 +68,7 @@ $artifacts = @(
         Label = "Docker 单文件镜像"
     },
     @{
-        Path = "dist-android\BambuMonitor-1.2.4-arm64.apk"
+        Path = "dist-android\BambuMonitor-1.2.5-arm64.apk"
         Dest = "android\BambuMonitor-arm64.apk"
         Label = "安卓 APK（arm64）"
     }

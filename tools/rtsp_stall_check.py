@@ -30,7 +30,7 @@ from tools._common import enable_utf8, resolve_code  # noqa: E402
 
 
 def _via_stream(host: str, code: str, seconds: float, stall: float) -> int:
-    """用产品代码那条路测：RtspStream（含开流前的纯 Python 预探与短退避重试）。
+    """用产品代码那条路测：RtspStream（开流前的 TCP 探测 + 退避重连）。
 
     这是"修完之后到底好不好用"的判据 —— 裸 cv2 那一段只说明打印机本身爱不爱理人。
     """
@@ -81,7 +81,7 @@ def _via_stream(host: str, code: str, seconds: float, stall: float) -> int:
         print(f"  平均间隔 {sum(gaps) / len(gaps) * 1000:.0f} ms，最大 {worst * 1000:.0f} ms，"
               f"卡顿（≥{stall:.0f}s）{len(stalls)} 次")
     retries = [item for item in states if item[1] == RtspStream.STATE_RETRYING]
-    print(f"  预探/重连次数：{len(retries)}")
+    print(f"  重连次数：{len(retries)}")
     for stamp, _state, detail in retries[:6]:
         print(f"    {stamp:6.1f}s  {detail}")
     print(f"  最后状态：{stream.state} —— {stream.detail}")
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--via-stream",
         action="store_true",
-        help="用产品代码（RtspStream，含开流前的纯 Python 预探）而不是裸 cv2 来测",
+        help="用产品代码（RtspStream，含开流前的 TCP 端口探测）而不是裸 cv2 来测",
     )
     args = parser.parse_args(argv)
 
