@@ -67,28 +67,43 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|tls_v
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 
 
-def port_listening(
+def port_state(
     host: str, port: int = RTSP_PORT, timeout: float = RTSPS_PORT_CHECK_TIMEOUT
-) -> bool:
-    """``host:port`` 在不在监听（**只做 TCP 连接**，不建 RTSP 会话）。
+) -> str:
+    """``host:port`` 的状态：``"open"`` / ``"closed"`` / ``"unknown"``。
 
-    两个用途，都需要"不打扰画面通道"这件事：
+    ⚠️ **必须区分"明确被拒"与"没有回应"**（真机教训，2026-09-30）：X1C 的链路会丢包 ——
+    同一台机器的 322 端口两次探测里一次超时，8883 也时通时断。若把"探测失败"一律当成
+    "端口没在监听"并跳过整轮取流，网络一抖画面就永远起不来，用户看到的是
+    「黑屏 + 说我没开局域网实时画面」，而其实我们一次都没试。
 
-    * `RtspStream` 开流前的快速筛子：322 没在监听（该机型没开「局域网实时画面」）
-      就干脆跳过这一轮，不要让 FFmpeg 去白等；
-    * `PrinterSession` 给 ``auto`` 机型选通道：322 在监听 → 走 RTSPS，
-      否则 → 走 6000。这比"先试 RTSPS 超时了再退 6000"可靠得多，也不会来回跳。
+    * 收到 RST（``ConnectionRefusedError``）→ ``"closed"``：**明确**没在监听，可以跳过；
+    * 连接超时 / 其它 OSError → ``"unknown"``：链路不通或丢包，**照常去试**；
+    * 连上了 → ``"open"``。
 
-    为什么不在这里发 DESCRIBE：那样会**建出一条 RTSP 会话**，而打印机同时只伺候
-    一个画面客户端（见模块开头），探测把通道占住就等于自己把自己饿死。
+    只做 TCP 连接，**不建 RTSP 会话**（打印机同时只伺候一个画面客户端，
+    探测不该去占那条通道）。
     """
     try:
         with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except Exception:  # noqa: BLE001 - 探测失败就是"连不上"，绝不能把调用方带崩
+            return "open"
+    except ConnectionRefusedError:
+        return "closed"
+    except Exception:  # noqa: BLE001 - 探测失败就是"问不出来"，绝不能把调用方带崩
         # 除了 OSError，离线测试环境还会让 socket 直接抛别的异常（conftest 的
         # `no_network` 守卫），所以这里必须兜住 Exception。
-        return False
+        return "unknown"
+
+
+def port_listening(
+    host: str, port: int = RTSP_PORT, timeout: float = RTSPS_PORT_CHECK_TIMEOUT
+) -> bool:
+    """``host:port`` **明确**在监听吗（即 :func:`port_state` 返回 ``"open"``）。
+
+    拿它当"能不能取流"的判据是**错的**（会把丢包当成端口关闭，见 :func:`port_state`）；
+    它只适合"确定要跳过这个目标"的场合。
+    """
+    return port_state(host, port, timeout) == "open"
 
 
 class RtspStream(threading.Thread):
@@ -273,13 +288,16 @@ class RtspStream(threading.Thread):
             capture = None
             connected_at = 0.0
             try:
-                # ⚠️ 开流前**只做一次 TCP 探测**（`port_listening`），不再自己发 DESCRIBE：
+                # ⚠️ 开流前只做一次 TCP 探测（`port_state`），不再自己发 DESCRIBE：
                 # 真机实测（X1C，2026-09-28）一台打印机的实时画面同时只伺候一个客户端，
                 # 多出来的连接不会让我们更快拿到画面，只会把仅有的那条通道搅乱。
-                # TCP 探测不建会话，所以是安全的；确认没在监听就干脆跳过这一轮。
-                if not port_listening(self.host, RTSP_PORT, timeout=RTSPS_PORT_CHECK_TIMEOUT):
+                # 只有**明确被拒**（RST）才跳过这一轮；超时/丢包一律照常去试 ——
+                # 否则链路一抖就变成"永远黑屏，还赖打印机没开实时画面"。
+                state = port_state(self.host, RTSP_PORT, timeout=RTSPS_PORT_CHECK_TIMEOUT)
+                if state == "closed":
                     raise RuntimeError(
-                        "322 端口没有在监听：这台打印机没开「局域网实时画面 / LAN Mode Liveview」"
+                        "322 端口没有在监听：这台打印机没开「局域网实时画面 / LAN Mode Liveview」，"
+                        "或者实时画面正被别的程序占着"
                     )
                 # 给 FFmpeg 设置打开/读取超时，避免打印机未开启该服务时长时间卡住
                 params = [

@@ -78,6 +78,29 @@ def test_端口探测成功时不建RTSP会话(monkeypatch):
     assert [item[0] for item in calls] == ["connect"], f"只该有 TCP 连接：{calls}"
 
 
+def test_端口状态必须区分被拒与没有回应(monkeypatch):
+    """**回归**（2026-09-30 真机）：X1C 的链路会丢包 —— 两次探测里有一次超时。
+
+    若把"超时"当成"端口没在监听"，网络一抖画面就永远起不来
+    （用户看到黑屏，界面却说他没开「局域网实时画面」）。所以只有**明确被拒**（RST）
+    才算 ``closed``，超时算 ``unknown``，仍然照常去开流。
+    """
+
+    def refused(address, timeout=None):
+        raise ConnectionRefusedError(10061, "connection refused")
+
+    monkeypatch.setattr(rtsp.socket, "create_connection", refused)
+    assert rtsp.port_state("192.168.31.27") == "closed"
+    assert port_listening("192.168.31.27") is False
+
+    def timeout(address, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(rtsp.socket, "create_connection", timeout)
+    assert rtsp.port_state("192.168.31.27") == "unknown", "超时只说明问不出来，不等于端口关闭"
+    assert port_listening("192.168.31.27") is False, "旧 API 只认 open"
+
+
 def test_退避是有耐心的():
     """契约：连续失败时退避要长得起来（实测：越急越拿不到画面）。"""
     assert RTSPS_BACKOFF_FACTOR > 1.0

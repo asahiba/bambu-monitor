@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -128,7 +129,7 @@ def test_preferred_channel_无opencv时RTSPS机型仍然走RTSPS(rtsp_available)
 
 
 def test_preferred_channel_自动模式的X1C看322端口在不在监听(monkeypatch):
-    """契约：X1C 的 video_channel 是 ``auto``，**由 322 端口是否在监听决定走哪条**。
+    """契约：X1C 的 video_channel 是 ``auto``，**由 322 端口的状态决定走哪条**。
 
     真机（2026-09-28）证明了两件以前靠猜的事：
 
@@ -136,19 +137,34 @@ def test_preferred_channel_自动模式的X1C看322端口在不在监听(monkeyp
     * 它的 6000 端口用正确口令也会被拒 —— 所以"先试 RTSPS、超时了再退 6000"
       这种猜法会让画面永远在「连接中」与「访问代码错误」之间跳。
 
-    现在只做一次 TCP 探测（不建 RTSP 会话）就能定下来，也不再依赖有没有 OpenCV。
+    只做一次 TCP 探测（不建 RTSP 会话）就能定下来，也不再依赖有没有 OpenCV。
+
+    ⚠️ 三种状态要分开（2026-09-30 真机教训）：X1C 的链路会丢包，
+    "超时"不等于"端口关闭" —— 那种情况必须保留上一次的结论，否则网络一抖
+    就会把 X1C 误判成 6000 机型，画面永远起不来。
     """
     import app.bambu.rtsp as rtsp
 
-    monkeypatch.setattr(rtsp, "port_listening", lambda host, port=0, timeout=0: True)
+    def probe(state: str):
+        return lambda host, port=0, timeout=0: state
+
+    monkeypatch.setattr(rtsp, "port_state", probe("open"))
     assert make_session(model=PrinterModel.X1C)._preferred_channel() == "rtsp"
 
-    monkeypatch.setattr(rtsp, "port_listening", lambda host, port=0, timeout=0: False)
+    monkeypatch.setattr(rtsp, "port_state", probe("closed"))
     assert make_session(model=PrinterModel.X1C)._preferred_channel() == "tcp6000"
+
     # 没有 OpenCV（安卓版）时 322 开着也照样选 RTSPS：会转走纯 Python 的 H.264 通路
     monkeypatch.setattr(rtsp.RtspStream, "available", staticmethod(lambda: False))
-    monkeypatch.setattr(rtsp, "port_listening", lambda host, port=0, timeout=0: True)
+    monkeypatch.setattr(rtsp, "port_state", probe("open"))
     assert make_session(model=PrinterModel.X1C)._preferred_channel() == "rtsp"
+
+    # 问不出来（超时/丢包）：第一次按"有 OpenCV 就走 RTSPS"兜底，之后沿用旧结论
+    monkeypatch.setattr(rtsp, "port_state", probe("unknown"))
+    session = make_session(model=PrinterModel.X1C)
+    session._rtsp_port_cached = True
+    session._rtsp_port_checked_at = time.time() - 1000.0
+    assert session._preferred_channel() == "rtsp", "丢包时不该把已知的 RTSPS 机型改判成 6000"
 
 
 # ------------------------------------------------------------------ 未启动状态

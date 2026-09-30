@@ -181,7 +181,14 @@ class MqttWorker:
             return
         self.tls_verified = verified
         if not verified:
-            LOGGER.info("打印机 %s 的 MQTT 证书链未能校验，改用不校验证书模式", self.host)
+            # ⚠️ 这句话看着像报错，其实是**正常现象**：打印机用的是自签证书，
+            # 它的证书链在多数系统上都校验不过（我们试过用 Bambu Lab CA 也匹配不上）。
+            # 所以日志里要把"这不是故障"写清楚 —— 用户会把它当成黑屏的原因。
+            LOGGER.info(
+                "打印机 %s 的 MQTT 证书链未能校验（打印机用自签证书，属正常现象），"
+                "改用不校验证书模式，连接照常",
+                self.host,
+            )
         client = _make_client(self.client_id, self.serial)
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect

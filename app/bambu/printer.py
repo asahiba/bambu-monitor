@@ -37,6 +37,10 @@ H264_QUEUE_LIMIT = 30
 #: 5 分钟内会自己纠正过来，期间也省掉每轮重连都去探测。
 RTSP_PORT_CHECK_INTERVAL = 300.0
 
+#: 启动后的这段宽限期里，不把"画面连不上"解释成"打印机连不上"。
+#: 遥测（MQTT）刚启动时还没连上属于正常，不能据此判定打印机不可达。
+PRINTER_UNREACHABLE_GRACE = 20.0
+
 #: 慢流放宽的倍数：容忍"约 1.5 个自己的节奏"没新帧。用**实测的最近最大间隔**
 #: 而不是平均帧率 —— 打印机刚连上会先吐几张把平均值抬高，随后才进入
 #: 几秒一张的稳态（实测 p1s 6：平均 0.5 fps，实际中位间隔 3.4 秒、最大 13 秒）。
@@ -136,6 +140,8 @@ class PrinterSession:
         #: ``RTSP_PORT_CHECK_INTERVAL`` 缓存）
         self._rtsp_port_cached = False
         self._rtsp_port_checked_at = 0.0
+        #: 本次启动的时刻（见 start()），用于"打印机连不上"的宽限期判断
+        self._started_at = 0.0
         self._stream_lock = threading.Lock()
         #: 串行化视频通道的建立（看门狗切换与首帧建立不能同时进行）
         self._video_setup_lock = threading.Lock()
@@ -162,6 +168,9 @@ class PrinterSession:
         if self.running:
             return
         self.running = True
+        #: 本次启动的时刻：用来给"打印机连不上"之类结论一个宽限期
+        #: （遥测刚启动时还没连上属正常，不能据此说打印机不可达）
+        self._started_at = time.time()
         self.warnings.clear()
         self._start_telemetry()
         if self.info.access_code:
@@ -529,14 +538,23 @@ class PrinterSession:
 
         只做 TCP 连接，**不建 RTSP 会话**：打印机同时只伺候一个画面客户端，
         探测不该去占那条通道（见 `app/bambu/rtsp.py` 开头）。
+
+        ``"unknown"``（超时/丢包）时**保留上一次的结论**；连一次结论都没有时按
+        "有 OpenCV 就走 RTSPS"兜底 —— 链路不通的时候不该把 X1C 这种机型误判成 6000 机型。
         """
-        from .rtsp import port_listening
+        from .rtsp import RtspStream, port_state
 
         now = time.time()
         checked = self._rtsp_port_checked_at
         if checked and (now - checked) < RTSP_PORT_CHECK_INTERVAL:
             return self._rtsp_port_cached
-        self._rtsp_port_cached = port_listening(self.info.ip)
+        state = port_state(self.info.ip)
+        if state == "open":
+            self._rtsp_port_cached = True
+        elif state == "closed":
+            self._rtsp_port_cached = False
+        elif not checked:  # 第一次就问不出来：按旧口味兜底
+            self._rtsp_port_cached = RtspStream.available()
         self._rtsp_port_checked_at = now
         return self._rtsp_port_cached
 
@@ -767,6 +785,29 @@ class PrinterSession:
 
         return callback
 
+    def _explain_camera_detail(self, detail: str) -> str:
+        """结合遥测状态修正画面失败的原因说明（真机教训，2026-09-30）。
+
+        用户报过「X1C 黑屏，日志里只有一句 MQTT 证书的 INFO」。实际情况是那台打印机的
+        链路在丢包：322 探测超时、8883 也反复重连 —— 而界面当时写的是
+        「322 端口没有在监听：没开「局域网实时画面」」，用户于是跑去打印机屏幕上翻设置，
+        真正该查的（WiFi / 电源 / 路由器）反而没人看。
+
+        判据：**遥测都断了**说明整台打印机连不上（口令是对的，否则会报鉴权错误），
+        这时候不该把锅甩给"实时画面开关"。刚启动的那十几秒不判（MQTT 还没连上属正常）。
+        """
+        if "322 端口没有在监听" not in detail:
+            return detail
+        if self.status.mqtt_online:
+            return detail
+        if (time.time() - self._started_at) < PRINTER_UNREACHABLE_GRACE:
+            return detail
+        return (
+            "打印机当前连不上（遥测也断了）：请先确认它的电源、WiFi 与路由器；"
+            "网络恢复后画面与遥测都会自动回来。若它其实能上网，再看是否别的程序"
+            "（Bambu Studio / 拓竹农场管家 / 手机 App）正占着这台打印机的实时画面"
+        )
+
     def _set_state_hint(self, detail: str) -> None:
         """没有活动视频流时，也要给界面一个明确的状态说明。"""
         self.last_camera_state = CameraStream.STATE_RETRYING
@@ -781,7 +822,7 @@ class PrinterSession:
         if source is not None and id(source) not in active:
             return
         self.last_camera_state = state
-        self.last_camera_detail = detail
+        self.last_camera_detail = self._explain_camera_detail(detail)
         if (
             state == CameraStream.STATE_AUTH_ERROR
             and self.status.mqtt_online

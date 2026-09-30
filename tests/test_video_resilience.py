@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -221,6 +222,43 @@ def test_只有6000一条路的机型不受影响():
     session._tcp6000_rejected = True
     assert session._effective_channel() == "tcp6000"
     assert session._preferred_channel() == "tcp6000"
+
+
+# --------------------------------------------------- ⑤ 「打印机连不上」别说成"你没开实时画面"
+#
+# 真机现场（2026-09-30）：用户报「X2D / X1C 黑屏，日志里只有一句 MQTT 证书的 INFO」。
+# 实际是 X1C 在丢包（322 探测超时、8883 反复重连），而界面写的是
+# 「322 端口没有在监听：这台打印机没开「局域网实时画面」」—— 用户跑去打印机屏幕上翻设置，
+# 真正该查的 WiFi / 电源反而没人看。
+_PORT_DETAIL = (
+    "RTSPS 错误：322 端口没有在监听：这台打印机没开「局域网实时画面 / LAN Mode Liveview」，"
+    "或者实时画面正被别的程序占着"
+)
+
+
+def test_遥测也断了时说明网络而不是实时画面开关():
+    session = _x1c()
+    session._started_at = time.time() - 300.0  # 早就过了启动宽限期
+    session.status.mqtt_online = False
+    detail = session._explain_camera_detail(_PORT_DETAIL)
+    assert "连不上" in detail and "WiFi" in detail
+    assert "没开「局域网实时画面」" not in detail, "整台机器连不上时不该赖实时画面开关"
+
+
+def test_遥测正常时保留原来的说明():
+    """契约：遥测通（口令没错）时，"322 没在监听"就是真的设置问题，不要改口。"""
+    session = _x1c()
+    session._started_at = time.time() - 300.0
+    session.status.mqtt_online = True
+    assert session._explain_camera_detail(_PORT_DETAIL) == _PORT_DETAIL
+
+
+def test_刚启动时不急着下打印机连不上的结论():
+    """契约：MQTT 还没连上属于启动正常过程，宽限期内保持原说明。"""
+    session = _x1c()
+    session._started_at = time.time() - 1.0
+    session.status.mqtt_online = False
+    assert session._explain_camera_detail(_PORT_DETAIL) == _PORT_DETAIL
 
 
 # --------------------------------------------------- ② 桌面版的网页服务要接全回调
