@@ -74,6 +74,13 @@ def _x1c() -> PrinterSession:
     )
 
 
+def _x2d() -> PrinterSession:
+    """X2D 只有 RTSPS 一条路。"""
+    return PrinterSession(
+        PrinterInfo(ip="192.168.31.110", name="X2D", model=PrinterModel.X2D, access_code="12345678")
+    )
+
+
 # --------------------------------------------------- ① 重连中不算"画面断了"
 def test_重连中但画面还新时保持在线():
     """契约：状态是 connecting/retrying，但上一帧还很新 → 仍然算在线（别让界面闪）。"""
@@ -258,6 +265,57 @@ def test_刚启动时不急着下打印机连不上的结论():
     session = _x1c()
     session._started_at = time.time() - 1.0
     session.status.mqtt_online = False
+    assert session._explain_camera_detail(_PORT_DETAIL) == _PORT_DETAIL
+
+
+# --------------------------------------------------- ⑥ 设备自己说"实时画面开着"时，别赖用户的设置
+#
+# 2026-10-01 现场：用户回了一句「黑屏问题完全不是因为没有解开设置」—— 他是对的。
+# 三台 X2D 的 push_status 里 ipcam.rtsp_url 是 rtsps://…:322/streaming/live/1、
+# liveview_preview: true，也就是设备自己认为实时画面开着，可 322 端口就是不响应。
+def test_设备自报实时画面开着时改说服务卡死():
+    session = _x2d()
+    session._started_at = time.time() - 300.0
+    session.status.mqtt_online = True
+    session.status.rtsp_url = "rtsps://192.168.31.110:322/streaming/live/1"
+    detail = session._explain_camera_detail(_PORT_DETAIL)
+    assert "重启" in detail, "设备说开着、端口却不通 —— 该建议重启打印机"
+    assert "没开「局域网实时画面」" not in detail, "不该让用户去翻一个本来就开着的设置"
+    assert "192.168.31.110:322" in detail, "把设备自己上报的地址写出来，便于核对"
+
+
+def test_取流打不开时也按同一套判据解释():
+    """契约：真机上 X2D 报的其实是"无法打开 RTSPS 流"（探测超时 → 照常去开流 → 打不开）。
+
+    这一条是**端到端跑出来的**：只匹配"322 端口没有在监听"那句话时，用户看到的仍然是
+    「访问口令不对，或画面被别的客户端占着」，设备自报的信息白读了。
+    """
+    session = _x2d()
+    session._started_at = time.time() - 300.0
+    session.status.mqtt_online = True
+    session.status.rtsp_url = "rtsps://192.168.31.110:322/streaming/live/1"
+    detail = session._explain_camera_detail(
+        "RTSPS 错误：无法打开 RTSPS 流（访问口令不对，或画面被别的客户端占着）"
+    )
+    assert "重启" in detail and "192.168.31.110:322" in detail
+
+
+def test_设备自报实时画面关闭时才提示去开开关():
+    """契约：H2/X2D 在关掉时会报 ``disable``（见 docs/PROTOCOL.md），这时才该提设置。"""
+    session = _x2d()
+    session._started_at = time.time() - 300.0
+    session.status.mqtt_online = True
+    session.status.rtsp_url = "disable"
+    detail = session._explain_camera_detail(_PORT_DETAIL)
+    assert "实时画面是关的" in detail and "局域网实时画面" in detail
+
+
+def test_还没收到设备上报时保持原说明():
+    """契约：设备还没上报 ipcam 时不猜（旧机型/刚启动都可能是空的）。"""
+    session = _x2d()
+    session._started_at = time.time() - 300.0
+    session.status.mqtt_online = True
+    session.status.rtsp_url = ""
     assert session._explain_camera_detail(_PORT_DETAIL) == _PORT_DETAIL
 
 

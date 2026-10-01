@@ -337,8 +337,15 @@ class RtspH264Client(threading.Thread):
         return self._gaps.max_gap
 
     def stop(self) -> None:
+        """请求停止：**只置标志**，收尾（TEARDOWN + 关 socket）交给收流线程自己做。
+
+        ⚠️ 以前这里顺手 `_close_socket()`，于是收尾的 TEARDOWN 永远发不出去
+        （socket 已经没了）。而真机实测一台打印机的实时画面**同时只服务一个客户端**，
+        客户端一声不响地消失，打印机得等自己的会话超时（live555 默认 65 秒）才放人 ——
+        期间别人（包括我们自己重连）都拿不到画面。
+        收流循环每 2 秒醒一次检查停止标志，所以这里最坏也就晚 2 秒退出。
+        """
         self._stop_event.set()
-        self._close_socket()
 
     def wait_first_unit(self, timeout: float = RTSP_FIRST_FRAME_TIMEOUT) -> bool:
         """等待第一帧（或判定连不上）。返回是否拿到了帧。"""
@@ -455,7 +462,42 @@ class RtspH264Client(threading.Thread):
             self._set_state(STATE_STREAMING, "RTSPS(H.264) 已连接")
             return self._receive_loop(sock)
         finally:
+            # 结束这一轮之前**先礼貌地 TEARDOWN**：打印机同时只服务一个画面客户端，
+            # 一声不响地消失会让它把这条会话挂到自己的超时（live555 默认 65 秒），
+            # 期间别人（包括我们自己重连）都拿不到画面。失败一律忽略。
+            self._teardown(sock, url, self._session_id, challenge, cseq)
             self._close_socket()
+
+    def _teardown(
+        self,
+        sock: ssl.SSLSocket,
+        url: str,
+        session_id: str,
+        challenge: dict[str, str],
+        cseq: int,
+    ) -> None:
+        """尽量礼貌地结束 RTSP 会话（best-effort，任何失败都不影响重连）。"""
+        try:
+            cseq += 1
+            header = build_digest_header(
+                username="bblp",
+                password=self.access_code,
+                method="TEARDOWN",
+                uri=url,
+                challenge=challenge,
+            )
+            lines = [
+                f"TEARDOWN {url} RTSP/1.0",
+                f"CSeq: {cseq}",
+                f"Authorization: {header}",
+                "User-Agent: bambu-monitor",
+            ]
+            if session_id:
+                lines.append(f"Session: {session_id}")
+            self._send(sock, lines)
+            self._debug("TEARDOWN", url, "(已发出)")
+        except Exception:  # noqa: BLE001 - 收尾动作，不能拖垮重连
+            LOGGER.debug("TEARDOWN 失败（忽略）", exc_info=True)
 
     def _send(self, sock: ssl.SSLSocket, lines: list[str]) -> None:
         sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))

@@ -786,21 +786,44 @@ class PrinterSession:
         return callback
 
     def _explain_camera_detail(self, detail: str) -> str:
-        """结合遥测状态修正画面失败的原因说明（真机教训，2026-09-30）。
+        """结合**设备自己的上报**修正画面失败的原因说明（真机教训，2026-09-30 / 10-01）。
 
-        用户报过「X1C 黑屏，日志里只有一句 MQTT 证书的 INFO」。实际情况是那台打印机的
-        链路在丢包：322 探测超时、8883 也反复重连 —— 而界面当时写的是
-        「322 端口没有在监听：没开「局域网实时画面」」，用户于是跑去打印机屏幕上翻设置，
-        真正该查的（WiFi / 电源 / 路由器）反而没人看。
+        现场是这样的：用户报「X2D / X1C 黑屏」，而界面上写的是
+        「322 端口没有在监听：这台打印机没开「局域网实时画面」」。用户明确回了一句
+        **"黑屏完全不是因为没有解开设置"** —— 他是对的：这几台 X2D 的 `push_status` 里
+        `ipcam.rtsp_url` 明明是 `rtsps://192.168.31.x:322/streaming/live/1`、
+        `liveview_preview: true`，也就是**设备自己认为实时画面开着**，可 322 端口就是不响应。
+        把"服务不响应"说成"你没开开关"，等于让用户去翻一个本来就开着的设置。
 
-        判据：**遥测都断了**说明整台打印机连不上（口令是对的，否则会报鉴权错误），
-        这时候不该把锅甩给"实时画面开关"。刚启动的那十几秒不判（MQTT 还没连上属正常）。
+        所以按下面三层判据给话（依次判定，能给出最具体的那一层）：
+
+        1. **遥测也断了** → 整台打印机连不上（口令没问题才会走到这里）：查电源 / WiFi / 路由器；
+        2. **设备自报 `ipcam.rtsp_url` 开着**（H2/X2D 系在关掉时会报 ``disable``，见
+           `docs/PROTOCOL.md`）→ 说清是"服务卡死"，建议重启打印机，并提示可能有别的客户端占着；
+        3. 设备自报 ``disable`` → 才说"请在打印机上打开「局域网实时画面」"。
+
+        刚启动的十几秒不做第 1、2 层判断（MQTT 还没连上、设备还没上报，都属正常）。
         """
-        if "322 端口没有在监听" not in detail:
+        if not any(
+            marker in detail
+            for marker in ("322 端口没有在监听", "无法打开 RTSPS 流", "RTSPS 取帧卡了")
+        ):
             return detail
-        if self.status.mqtt_online:
-            return detail
-        if (time.time() - self._started_at) < PRINTER_UNREACHABLE_GRACE:
+        warm = (time.time() - self._started_at) < PRINTER_UNREACHABLE_GRACE
+        if self.status.mqtt_online or warm:
+            reported = str(getattr(self.status, "rtsp_url", "") or "").strip()
+            if reported and reported.lower() != "disable":
+                return (
+                    f"打印机自己报告实时画面是开着的（{reported}），但取流没成功："
+                    "常见原因是这个服务在固件里卡死了 —— 请在打印机上**重启一次**；"
+                    "另一个常见原因是画面正被别的客户端占着（同一路实时画面同时只服务"
+                    "一个客户端，Bambu Studio / 农场管家 / 手机 App 都算）"
+                )
+            if reported:
+                return (
+                    "打印机自己报告实时画面是关的（ipcam.rtsp_url = disable）："
+                    "请在打印机屏幕上打开「局域网实时画面 / LAN Mode Liveview」"
+                )
             return detail
         return (
             "打印机当前连不上（遥测也断了）：请先确认它的电源、WiFi 与路由器；"
