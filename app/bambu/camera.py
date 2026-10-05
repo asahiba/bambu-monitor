@@ -122,6 +122,8 @@ class CameraStream(threading.Thread):
         #: 而且间隔很不匀），判「画面还在不在」时要按它来，不能写死秒数。
         self._gaps = FrameGapTracker()
         self._first_frame_event = threading.Event()
+        #: 最近一次读是否"对端关闭了连接"（与超时区分，见 `_read_exact`）
+        self.peer_closed = False
         self.state = self.STATE_STOPPED
         self.detail = ""
         self.tls_verified = False
@@ -204,7 +206,12 @@ class CameraStream(threading.Thread):
                 pass
 
     def _read_exact(self, count: int, timeout: float = CAMERA_FRAME_BODY_TIMEOUT) -> Optional[bytes]:
-        """读取固定长度数据，超时返回 None（不关闭连接，由调用方决定）。"""
+        """读取固定长度数据，超时返回 None（不关闭连接，由调用方决定）。
+
+        ⚠️ 同时记下"是**对端关了连接**还是**只是超时**"（见 ``self.peer_closed``）：
+        这两种情况在诊断上完全不同 —— 对端在我们发完鉴权包后立刻关闭 = 访问代码不对；
+        超时 = 流中断。以前两者都返回 None，调用方只能猜。
+        """
         buf = bytearray()
         deadline = time.time() + timeout
         sock = self._sock
@@ -215,6 +222,7 @@ class CameraStream(threading.Thread):
                 return None
             remaining = deadline - time.time()
             if remaining <= 0:
+                self.peer_closed = False
                 return None
             sock.settimeout(min(remaining, CAMERA_READ_SLICE))
             try:
@@ -224,10 +232,13 @@ class CameraStream(threading.Thread):
             except ssl.SSLWantReadError:
                 continue
             except (OSError, ssl.SSLError):
+                self.peer_closed = False
                 return None
             if not chunk:
-                return None  # 对端关闭：通常是访问代码错误
+                self.peer_closed = True  # 对端关闭
+                return None
             buf += chunk
+        self.peer_closed = False
         return bytes(buf)
 
     def _open(self) -> bool:
@@ -256,10 +267,19 @@ class CameraStream(threading.Thread):
     def _pump(self) -> None:
         """读取帧，直到出错或停止。"""
         idle_timeouts = 0
+        frames_in_cycle = 0
         while not self._stop_event.is_set():
             header = self._read_exact(FRAME_HEADER_SIZE, timeout=CAMERA_FRAME_HEADER_TIMEOUT)
             if header is None:
                 if self._stop_event.is_set():
+                    return
+                if self.peer_closed and frames_in_cycle == 0:
+                    # 发完鉴权包就断开、一帧都没给：这才是"访问代码不对"的真实表现
+                    # （真机实测：口令错时打印机直接关连接，不会回任何帧头）。
+                    self._set_state(
+                        self.STATE_AUTH_ERROR,
+                        "打印机拒绝了访问代码（发完鉴权包就被断开）：请核对局域网访问码",
+                    )
                     return
                 idle_timeouts += 1
                 if idle_timeouts >= 2:
@@ -267,12 +287,25 @@ class CameraStream(threading.Thread):
                     return
                 continue
             idle_timeouts = 0
-            payload_size = struct.unpack_from("<I", header, 0)[0]
+            payload_size, _itrack, flags, _reserved = struct.unpack_from("<IIII", header, 0)
             if not (MIN_FRAME_SIZE <= payload_size <= MAX_FRAME_SIZE):
-                self._set_state(
-                    self.STATE_AUTH_ERROR,
-                    "打印机拒绝连接：请检查访问代码（局域网访问码）是否正确",
-                )
+                # ⚠️ 2026-10-01 真机教训：**小包不等于访问代码错**。
+                # X1C / X2D 在 6000 端口上都回一个 8 字节包
+                # （帧头 flags=0、负载 `FF FF FF FF 00 00 00 00`）——那表示
+                # "这个端口不提供画面"，而它们的访问代码是对的（MQTT 都连着）。
+                # 老代码把它当"口令错"，于是界面上一直挂着「访问代码错误」，
+                # 用户跑去改一个本来就正确的口令，还让看门狗在两通道之间来回跳。
+                # 正常帧的 flags 按协议固定为 1（见模块开头的帧头说明）。
+                if flags != 1:
+                    self._set_state(
+                        self.STATE_RETRYING,
+                        "这台打印机不通过 6000 端口提供画面（返回空帧），稍后重试",
+                    )
+                else:
+                    self._set_state(
+                        self.STATE_AUTH_ERROR,
+                        "打印机拒绝连接：请检查访问代码（局域网访问码）是否正确",
+                    )
                 return
             payload = self._read_exact(payload_size, timeout=CAMERA_FRAME_BODY_TIMEOUT)
             if payload is None:
@@ -293,6 +326,7 @@ class CameraStream(threading.Thread):
                 self._last_frame_ts = time.time()
             self._gaps.note(self._last_frame_ts)
             self._frame_count += 1
+            frames_in_cycle += 1
             if not self._first_frame_event.is_set():
                 self._first_frame_event.set()
             # 断线重连后也要重新上报「已连接」，否则状态会一直停在「正在连接」
